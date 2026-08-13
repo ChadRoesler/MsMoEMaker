@@ -67,7 +67,6 @@ jobs:
       matrix:
         shape:
           - { label: "bare",          spec: ".",            updates: "unavailable" }
-          - { label: "[stagehand]",    spec: ".[stagehand]",    updates: "unavailable" }
 
     steps:
       - name: Checkout
