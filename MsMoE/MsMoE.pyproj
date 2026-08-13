@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>7c1f4a92-3e6d-4b18-9a4c-2f8b6d5e1a03</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <!-- F5 runs the CLI. Pass a recipe in the project's debug arguments. -->
+    <StartupFile>ms_moe\__main__.py</StartupFile>
+    <SearchPath>.</SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>MsMoE</Name>
+    <RootNamespace>ms_moe</RootNamespace>
+    <InterpreterId>Global|PythonCore|3.11</InterpreterId>
+    <IsWindowsApplication>False</IsWindowsApplication>
+    <Description>Build a mixture of experts from deliberately chosen specialists.</Description>
+    <TestFramework>Pytest</TestFramework>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ms_moe\__init__.py" />
+    <Compile Include="ms_moe\__main__.py" />
+    <Compile Include="ms_moe\_describe.py" />
+    <Compile Include="ms_moe\events.py" />
+    <Compile Include="ms_moe\levers.py" />
+    <Compile Include="ms_moe\manifest.py" />
+    <Compile Include="ms_moe\recipe.py" />
+    <Compile Include="ms_moe\runner.py" />
+    <Compile Include="ms_moe\stages.py" />
+    <Compile Include="tests\test_runner.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="ms_moe\" />
+    <Folder Include="tests\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="pyproject.toml" />
+    <Content Include="README.md" />
+    <Content Include="recipe.example.yaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <InterpreterReference Include="Global|PythonCore|3.11" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
+</Project>

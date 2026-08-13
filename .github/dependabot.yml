@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # GitHub Actions used in .github/workflows/*. Dependabot rewrites the pinned
+  # SHA (keeping the `# vX.Y.Z` comment in sync) when the action releases.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+
+  # Python deps for the msmoe package (pyproject lives in MsMoE/).
+  - package-ecosystem: "pip"
+    directory: "/MsMoE"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
