@@ -164,7 +164,17 @@ def main(argv: list[str] | None = None) -> int:
         ipath = Path(interpreter)
         if not ipath.is_file():
             raise SystemExit(f"--python {ipath} does not exist")
-        interpreter = str(ipath.resolve())
+        # abspath, NEVER resolve(). A venv's bin/python is a SYMLINK to the
+        # base interpreter, and resolving it throws the venv away: you asked
+        # for /lab/bin/python and got /usr/bin/python3.12, whose sys.prefix is
+        # /usr and whose site-packages has none of your training deps. The
+        # failure then reads as "No module named 'torch'" from an interpreter
+        # you never named, which is about as misleading as it gets.
+        #
+        # Measured: running the symlink gives sys.prefix=/tmp/venvtest;
+        # running its target gives sys.prefix=/usr. Same file, different venv.
+        # abspath normalises the path without following the link.
+        interpreter = os.path.abspath(str(ipath))
 
     pipeline = _find_pipeline(a.pipeline, recipe_path,
                               required=(a.command == "build"))

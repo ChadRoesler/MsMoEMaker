@@ -196,3 +196,38 @@ def test_a_missing_module_in_the_child_is_reported_as_an_env_answer(
     assert "could not import:    torch" in err
     assert "--python" in err
 
+
+
+def test_a_venv_python_is_not_resolved_into_its_base_interpreter(tmp_path,
+                                                                 capsys):
+    """The bug: Path.resolve() follows symlinks, and a venv's bin/python IS a
+    symlink to the base interpreter. Resolving it silently swaps the venv you
+    asked for with the system python - whose site-packages has none of the
+    training dependencies - and the failure surfaces as ModuleNotFoundError
+    from an interpreter the user never named.
+
+    Measured on a real venv: running the symlink gives sys.prefix=<venv>;
+    running its target gives sys.prefix=/usr.
+    """
+    import os, subprocess, sys, venv
+
+    vdir = tmp_path / "trainvenv"
+    venv.create(str(vdir), with_pip=False, symlinks=True)
+    vpy = vdir / "bin" / "python"
+    if not vpy.is_symlink():
+        pytest.skip("this platform did not create a symlinked venv python")
+
+    recipe = tmp_path / "recipe.yaml"
+    import shutil
+    shutil.copy(EXAMPLE, recipe)
+    pipeline = tmp_path / "fraunkenstein_universal.py"
+    pipeline.write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+
+    main(["build", str(recipe), "--pipeline", str(pipeline),
+          "--python", str(vpy), "--allow-refusals", "--json"])
+    started = [e for e in _events(capsys) if e["event"] == "started"][0]
+    used = started["command"].split()[0]
+    assert used == os.path.abspath(str(vpy)), (
+        f"asked for {vpy}, ran {used} - resolve() swallowed the venv")
+    assert sys.prefix not in used or str(vdir) in used
+
