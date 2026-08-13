@@ -138,3 +138,61 @@ def test_stdout_stays_pure_json_lines_under_json(lonely_recipe, capsys):
         if line.strip():
             json.loads(line)        # raises if prose leaked
     assert captured.err, "the human half should still have been written"
+
+
+# -- which interpreter runs the pipeline -------------------------------------
+# The bug this covers: Runner hardcoded sys.executable, so the pipeline was
+# always launched with whatever interpreter ms-moe happened to live in. That
+# silently collapses the exact separation the package exists for - a tiny CLI
+# anywhere, the fat trainer in the venv that has torch - and surfaces as
+# "No module named 'torch'" on a box that definitely has torch.
+
+def test_python_defaults_to_our_own_interpreter(lonely_recipe, tmp_path):
+    import sys
+    from ms_moe.runner import Runner
+    from ms_moe.levers import Translation
+    from ms_moe.events import Events
+    from tests.test_runner import FakeRecipe          # noqa: F401
+    r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
+               Events(enabled=False))
+    assert r.python == sys.executable
+
+
+def test_an_explicit_interpreter_is_used_instead(tmp_path):
+    from ms_moe.runner import Runner
+    from ms_moe.levers import Translation
+    from ms_moe.events import Events
+    from tests.test_runner import FakeRecipe
+    r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
+               Events(enabled=False), python="/opt/train/bin/python")
+    assert r.python == "/opt/train/bin/python"
+
+
+def test_a_missing_interpreter_is_a_clean_error(lonely_recipe):
+    with pytest.raises(SystemExit) as exc:
+        main(["build", str(lonely_recipe), "--python", "/nope/python"])
+    assert "does not exist" in str(exc.value)
+
+
+def test_a_missing_module_in_the_child_is_reported_as_an_env_answer(
+        tmp_path, capsys):
+    """`No module named torch` is not a bug report, it is a statement about
+    WHICH VENV ran the pipeline - so it has to name the interpreter."""
+    from ms_moe.runner import Runner
+    from ms_moe.levers import Translation
+    from ms_moe.events import Events
+    from tests.test_runner import FakeRecipe
+
+    script = tmp_path / "fraunkenstein_universal.py"
+    script.write_text(
+        'import sys\n'
+        'print("Traceback (most recent call last)", flush=True)\n'
+        'print("ModuleNotFoundError: No module named \'torch\'", flush=True)\n'
+        'sys.exit(1)\n', encoding="utf-8")
+    r = Runner(FakeRecipe(["python"]), script, Translation(),
+               Events(enabled=False), cwd=tmp_path, dryrun=True)
+    assert r.run() != 0
+    err = capsys.readouterr().err
+    assert "could not import:    torch" in err
+    assert "--python" in err
+

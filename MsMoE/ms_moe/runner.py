@@ -52,6 +52,21 @@ from .levers import Translation, resolved_roots
 # Quoted from the pipeline's own prints. Each maps a line to (stage_id, status).
 
 _SKIP = re.compile(r"^\[skip\] (.+?) already present at (.+)$")
+# The code-corpus phase, which _SKIP alone does NOT cover. Three separate
+# messages, all quoted from the pipeline, all previously invisible:
+#
+#   "[skip] code datasets already built:"  - the SUMMARY early-out, taken when
+#       every language is already on disk. Different wording from _done()'s
+#       per-language line, so it matched nothing.
+#   "Shard scan will hunt only: ..." / "N shards available; ..."  - the START
+#       of a fresh scan. On a first run with no cached corpora this is the
+#       single longest phase of the build - 45 GB of shards - and the stage sat
+#       at `pending` for all of it, which is the worst possible time for the
+#       viewer to have nothing to say.
+#   "Scanned N repos across M shard(s)."  - the end of it.
+_SKIP_ALL_CODE = re.compile(r"^\[skip\] code datasets already built")
+_CODE_START = re.compile(r"^Shard scan will hunt only:|shards available; will pull")
+_CODE_DONE = re.compile(r"^Scanned (\d+) repos across (\d+) shard")
 _FINETUNE = re.compile(r"^Fine-tuning (\S+?)\.\.\.")
 _SAVED = re.compile(r"Dense specialist saved to (.+)$")
 _STITCH = re.compile(r"Stitching (\d+) experts")
@@ -78,6 +93,13 @@ _WARNINGS = (
     (re.compile(r"Traceback \(most recent call last\)"), "traceback in the child"),
 )
 
+# The one child failure that is ALWAYS an environment answer rather than a bug.
+# Reported with the interpreter that was actually used, because "No module
+# named 'torch'" on a box that definitely has torch is a genuinely confusing
+# thing to read at 2am.
+_MISSING_MODULE = re.compile(
+    r"ModuleNotFoundError: No module named '([^']+)'")
+
 # The pipeline's `_done()` messages name the artifact in prose. Map its words
 # back onto stage ids so a resumed run reports SKIPPED instead of looking like
 # it never happened.
@@ -95,13 +117,25 @@ class Runner:
 
     def __init__(self, recipe: Any, pipeline: Path, translation: Translation,
                  events: Events, cwd: Optional[Path] = None,
-                 dryrun: bool = False) -> None:
+                 dryrun: bool = False, python: Optional[str] = None) -> None:
         self.recipe = recipe
         self.pipeline = Path(pipeline)
         self.translation = translation
         self.ev = events
         self.cwd = Path(cwd or self.pipeline.parent)
         self.dryrun = dryrun
+        # WHICH INTERPRETER RUNS THE PIPELINE. Defaults to ours, and that
+        # default was a bug for exactly as long as it was the only option.
+        #
+        # The entire argument for ms-moe being a separate package is that it is
+        # small enough to live anywhere - `ms-moe validate` on a laptop, the CLI
+        # inside seren-theatre's venv - while the TRAINER lives in whatever fat
+        # venv has torch. Forking is what makes that possible. Hardcoding
+        # sys.executable silently collapsed the two back into one, so the
+        # pipeline was launched with the viewer's interpreter and died on
+        # `import torch` - which is not a missing dependency, it is the right
+        # dependency in the other venv.
+        self.python = python or sys.executable
 
         roots = resolved_roots(recipe.size, dryrun)
         self.run_dir = self.cwd / roots["output"]
@@ -119,6 +153,7 @@ class Runner:
                     for sid, label in st.plan(experts)],
         )
         self._current: Optional[str] = None
+        self._missing_module: Optional[str] = None
 
     # -- manifest bookkeeping ----------------------------------------------
 
@@ -185,7 +220,7 @@ class Runner:
         # after the child crossed it, and the dashboard lags reality.
         env["PYTHONUNBUFFERED"] = "1"
 
-        cmd = [sys.executable, str(self.pipeline.name)]
+        cmd = [self.python, str(self.pipeline.name)]
         self.ev.started(recipe_id=self.manifest.recipe_id,
                         name=self.manifest.name, size=self.manifest.size,
                         experts=self.manifest.experts,
@@ -217,7 +252,22 @@ class Runner:
 
         ok = code == 0
         if not ok:
-            self._finish_current(mf.FAILED, note=f"child exited {code}")
+            hint = ""
+            if self._missing_module:
+                hint = (f"; the pipeline was run with {self.python} and could "
+                        f"not import {self._missing_module!r} - that is an "
+                        f"environment answer, not a missing dependency. Point "
+                        f"--python at the venv that has it.")
+                self.ev.error(stage="environment", message=hint.lstrip("; "))
+                self.ev.say("")
+                self.ev.say(f"   The pipeline ran under: {self.python}")
+                self.ev.say(f"   It could not import:    {self._missing_module}")
+                self.ev.say("   ms-moe is deliberately small and does NOT ship "
+                            "the trainer's dependencies.")
+                self.ev.say("   Point it at the training venv:")
+                self.ev.say("     ms-moe build recipe.yaml "
+                            "--python /path/to/train-venv/bin/python")
+            self._finish_current(mf.FAILED, note=f"child exited {code}{hint}")
             self.ev.error(stage=self._current or "run",
                           message=f"pipeline exited {code}")
         else:
@@ -242,6 +292,10 @@ class Runner:
     # -- line -> meaning ----------------------------------------------------
 
     def _consume(self, line: str) -> None:
+        m = _MISSING_MODULE.search(line)
+        if m:
+            self._missing_module = m.group(1)
+
         for pattern, message in _WARNINGS:
             if pattern.search(line):
                 self.ev.warning(message)
@@ -254,6 +308,30 @@ class Runner:
         m = _CFG.match(line)
         if m:
             self.ev.progress(st.PREFLIGHT, cfg=m.group(1))
+            return
+
+        if _SKIP_ALL_CODE.match(line):
+            self._finish_current()
+            self._set(st.DATA_CODE, mf.SKIPPED,
+                      note="every language already on disk")
+            return
+
+        if _CODE_START.search(line):
+            # Only if it has not already finished - the pipeline prints the
+            # shard-count line even on a partial resume.
+            stage = self.manifest.stage(st.DATA_CODE)
+            if stage is None or stage.status not in mf.TERMINAL:
+                self._finish_current()
+                self._set(st.DATA_CODE, mf.RUNNING,
+                          note="scanning shards")
+            return
+
+        m = _CODE_DONE.match(line)
+        if m:
+            self._set(st.DATA_CODE, mf.DONE,
+                      note=f"scanned {m.group(1)} repos across "
+                           f"{m.group(2)} shard(s)")
+            self._current = None
             return
 
         m = _SKIP.match(line)

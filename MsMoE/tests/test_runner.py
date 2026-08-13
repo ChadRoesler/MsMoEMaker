@@ -232,3 +232,70 @@ def test_refusals_are_recorded_in_the_manifest(lab):
                     dryrun=True)
     runner.run()
     assert mf.read(runner.run_dir).refusals == tr.refusals
+
+
+# -- the code-corpus phase ---------------------------------------------------
+# Added after a real gap: data.code only reported on the per-language
+# `_done()` line, so a FRESH run - no cached corpora, 45 GB of shards, the
+# longest phase of a first build - left the stage at `pending` for all of it.
+# The viewer had nothing to say during exactly the wait that most needs an
+# explanation.
+
+FRESH_SCAN = r'''
+import sys, time
+def say(s): print(s, flush=True)
+say("Shard scan will hunt only: PowerShell, Shell")
+say("80 shards available; will pull at most 80 shards")
+say("--- shard 1/80  (still hunting: PowerShell, Shell)")
+say("Scanned 14231 repos across 12 shard(s).")
+say("Agent dataset ready: 2000 samples")
+say("Fine-tuning python...")
+say("Dense specialist saved to /x/qwen_coder_python")
+sys.exit(0)
+'''
+
+ALL_CACHED = r'''
+import sys
+print("[skip] code datasets already built:", flush=True)
+print("          python        18000 samples  (/x/python_code.jsonl)", flush=True)
+print("Agent dataset ready: 2000 samples", flush=True)
+print("Fine-tuning python...", flush=True)
+print("Dense specialist saved to /x/qwen_coder_python", flush=True)
+sys.exit(0)
+'''
+
+
+def test_a_fresh_shard_scan_reports_running_then_done(tmp_path):
+    script = tmp_path / "fraunkenstein_universal.py"
+    script.write_text(FRESH_SCAN, encoding="utf-8")
+    _, runner = run(script, experts=("python",))
+    stage = mf.read(runner.run_dir).stage(st.DATA_CODE)
+    assert stage.status == mf.DONE, (
+        "a fresh corpus scan left data.code un-reported - that is the longest "
+        "phase of a first build and the viewer would show nothing for it")
+    assert "14231 repos" in (stage.note or "")
+
+
+def test_the_summary_skip_line_is_recognised_too(tmp_path):
+    """`[skip] code datasets already built:` is worded differently from the
+    per-language `_done()` line and matched nothing before."""
+    script = tmp_path / "fraunkenstein_universal.py"
+    script.write_text(ALL_CACHED, encoding="utf-8")
+    _, runner = run(script, experts=("python",))
+    stage = mf.read(runner.run_dir).stage(st.DATA_CODE)
+    assert stage.status == mf.SKIPPED
+    assert "already on disk" in (stage.note or "")
+
+
+def test_a_partial_resume_does_not_reopen_a_finished_stage(tmp_path):
+    """The pipeline prints the shard-count line even when resuming, so the
+    RUNNING transition must not clobber an already-terminal stage."""
+    script = tmp_path / "fraunkenstein_universal.py"
+    script.write_text(
+        'import sys\n'
+        'print("[skip] code datasets already built:", flush=True)\n'
+        'print("80 shards available; will pull at most 80 shards", flush=True)\n'
+        'sys.exit(0)\n', encoding="utf-8")
+    _, runner = run(script, experts=("python",))
+    assert mf.read(runner.run_dir).stage(st.DATA_CODE).status == mf.SKIPPED
+

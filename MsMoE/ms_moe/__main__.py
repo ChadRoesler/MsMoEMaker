@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -102,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
                          "beside the recipe, then upward from cwd)")
     ap.add_argument("--json", action="store_true",
                     help="JSON Lines events on stdout, prose on stderr")
+    ap.add_argument("--python", default=None,
+                    help="interpreter to run the pipeline with (default: the "
+                         "one running ms-moe). Use this when the trainer lives "
+                         "in a different venv - which is the normal case, "
+                         "since ms-moe is deliberately small and torch is not.")
     ap.add_argument("--dryrun", action="store_true",
                     help="FRAUNK_DRYRUN=1 - the whole pipeline, small")
     ap.add_argument("--force", action="store_true",
@@ -142,6 +148,23 @@ def main(argv: list[str] | None = None) -> int:
     if errs:
         ev.done(ok=False, stage="validate")
         return 1
+
+    # RESOLVED BEFORE THE PIPELINE LOOKUP, on purpose. Both are explicit
+    # arguments, and an explicit argument that is wrong should say so no matter
+    # what else is also missing - same rule as --pipeline. Reporting "could not
+    # find fraunkenstein_universal.py" to someone who mistyped --python sends
+    # them to fix the wrong thing.
+    #
+    # MSMOE_PYTHON as well as --python: the interpreter is a property of the
+    # BOX, not of the run, so it belongs somewhere you set once. Same shape as
+    # the family's SEREN_<X>_* levers - a flag for the one-off, an env var for
+    # the machine.
+    interpreter = a.python or os.environ.get("MSMOE_PYTHON") or None
+    if interpreter:
+        ipath = Path(interpreter)
+        if not ipath.is_file():
+            raise SystemExit(f"--python {ipath} does not exist")
+        interpreter = str(ipath.resolve())
 
     pipeline = _find_pipeline(a.pipeline, recipe_path,
                               required=(a.command == "build"))
@@ -209,8 +232,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from .runner import Runner
 
+    if interpreter:
+        ev.say(f"   pipeline interpreter: {interpreter}")
     runner = Runner(rec, pipeline, tr, ev, cwd=pipeline.parent,
-                    dryrun=a.dryrun)
+                    dryrun=a.dryrun, python=interpreter)
     return runner.run()
 
 
