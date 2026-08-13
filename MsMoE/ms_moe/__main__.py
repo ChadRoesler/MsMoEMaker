@@ -37,12 +37,28 @@ def _force_utf8_stdio() -> None:
             pass
 
 
-def _find_pipeline(explicit: str | None, recipe_path: Path) -> Path:
-    """Locate fraunkenstein_universal.py.
+def _find_pipeline(explicit: str | None, recipe_path: Path,
+                   required: bool) -> Path | None:
+    """Locate fraunkenstein_universal.py. None if absent and not required.
 
     Looked up rather than assumed, and reported when missing, because "wrapped
     a script that isn't there" should be one clear error and not a traceback
     from subprocess. Order: --pipeline, beside the recipe, cwd, then upward.
+
+    `required` is the difference between the two verbs, and it is not a
+    convenience:
+
+      build    - REQUIRED. There is nothing to fork without it.
+      validate - OPTIONAL. The README promises `ms-moe validate` runs on a
+                 laptop with no GPU so you can check a recipe BEFORE going
+                 near a machine that can run it. Demanding the pipeline made
+                 that promise false: a stranger with a recipe and no checkout
+                 got "could not find fraunkenstein_universal.py" and no
+                 validation at all. Recipe SHAPE is checkable on its own; only
+                 the refusal analysis needs a pipeline to compare against.
+
+    An explicit --pipeline that does not exist is always an error, for either
+    verb. Being told where it is and being wrong is different from not saying.
     """
     from .levers import DEFAULT_PIPELINE
 
@@ -60,9 +76,11 @@ def _find_pipeline(explicit: str | None, recipe_path: Path) -> Path:
         candidate = parent / DEFAULT_PIPELINE
         if candidate.is_file():
             return candidate.resolve()
-    raise SystemExit(
-        f"could not find {DEFAULT_PIPELINE}. Pass --pipeline PATH, or run "
-        f"from the directory that holds it.")
+    if required:
+        raise SystemExit(
+            f"could not find {DEFAULT_PIPELINE}. Pass --pipeline PATH, or run "
+            f"from the directory that holds it.")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,11 +143,27 @@ def main(argv: list[str] | None = None) -> int:
         ev.done(ok=False, stage="validate")
         return 1
 
-    pipeline = _find_pipeline(a.pipeline, recipe_path)
+    pipeline = _find_pipeline(a.pipeline, recipe_path,
+                              required=(a.command == "build"))
 
-    from .levers import translate
+    from .levers import Translation, translate
 
-    tr = translate(rec, pipeline, force=a.force)
+    if pipeline is None:
+        # Recipe-only validation. Say so LOUDLY rather than reporting a clean
+        # bill of health: "valid" and "valid, and nothing checked whether the
+        # pipeline can honour it" are different answers, and quietly giving
+        # the first when you mean the second is how a document that lies gets
+        # blessed on its way out the door.
+        tr = Translation()
+        no_pipeline_note = (
+            "no pipeline found, so ONLY the recipe's own shape was checked. "
+            "Refusals could not be computed - run this again beside "
+            "fraunkenstein_universal.py, or pass --pipeline PATH, to find out "
+            "whether a build would actually honour these fields.")
+        ev.warning(no_pipeline_note)
+    else:
+        no_pipeline_note = ""
+        tr = translate(rec, pipeline, force=a.force)
 
     if tr.refusals:
         ev.refused(tr.refusals)
@@ -150,13 +184,21 @@ def main(argv: list[str] | None = None) -> int:
         ev.emit("resolved", **eff)
         ev.say("")
         ev.say(f"Ms.MoE recipe  {rec.name}  [{eff['recipe_id']}]")
-        ev.say(f"   pipeline {pipeline}")
+        ev.say(f"   pipeline {pipeline if pipeline else '(none found)'}")
         ev.say(f"   honoured {len(tr.agreed)} field(s), "
                f"{len(tr.env)} env lever(s) set")
         ev.say(f"   refused  {len(tr.refusals)} field(s)")
+        if no_pipeline_note:
+            ev.say("")
+            ev.say(f"   NOTE  {no_pipeline_note}")
         ok = not tr.refusals
         ev.done(ok=ok, refusals=len(tr.refusals), agreed=len(tr.agreed),
-                env=tr.env)
+                env=tr.env, pipeline=str(pipeline) if pipeline else None,
+                # The consumer needs to be able to tell "no refusals" from
+                # "refusals were never computed". Same key set either way, one
+                # honest flag - the alternative is a caller inferring depth of
+                # analysis from an empty list, which it cannot do.
+                refusals_checked=pipeline is not None)
         return 0 if ok else 1
 
     # build

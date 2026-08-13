@@ -48,14 +48,19 @@ jobs:
   # code works with every dev dependency present and ./ms_moe on sys.path.
   # It proves nothing about what an operator gets from `pip install ms-moe`.
   #
-  # Two real breakages got past `test` and would have been caught here:
-  #   1. An unconditional import of an OPTIONAL dependency - invisible when the
-  #      dev install pulls it in anyway, fatal on a bare install.
-  #   2. A satisfied-but-stale floor (seren-meninges>=2.0.0 happily resolving
-  #      2.0.0 after 2.1.0 shipped). Only a real resolve in a clean env shows it.
+  # The failure classes this catches, for a CLI specifically:
+  #   1. A console script that did not install. `test` never types `ms-moe`,
+  #      it runs pytest - so a broken entry point is invisible there and fatal
+  #      for both the person following the README and seren-theatre[stagehand],
+  #      which forks that exact command.
+  #   2. An unconditional import of a dependency that only the dev install
+  #      provides - invisible when [dev] pulls it in, fatal on a bare install.
+  #   3. Dependency creep. ms-moe must stay small enough to validate a recipe
+  #      on a laptop with no GPU; the day torch turns up in its requirements,
+  #      that promise is gone and nothing else would notice.
   #
-  # So: install every SHAPE an operator can ask for, then import the app FROM
-  # OUTSIDE THE REPO so the source tree cannot mask a missing dependency.
+  # So: install the shape an operator actually asks for, then exercise the CLI
+  # FROM OUTSIDE THE REPO, so ./ms_moe on sys.path cannot mask a missing piece.
   #
   # Every shape runs on every push, including the slow ones, and this job GATES
   # the release. The maintainer eats the CI time so nobody eats a broken install.
@@ -66,7 +71,7 @@ jobs:
       fail-fast: false
       matrix:
         shape:
-          - { label: "bare",          spec: ".",            updates: "unavailable" }
+          - { label: "bare", spec: "." }
 
     steps:
       - name: Checkout
@@ -85,61 +90,91 @@ jobs:
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
-      - name: Install a test client (NOT part of the shape under test)
-        # starlette's TestClient needs httpx at runtime. It is a test tool, not
-        # something ms_moe imports, so adding it cannot mask a missing runtime
-        # dependency - but leaving it out fails the smoke step for a reason that
-        # has nothing to do with the install shape.
-        run: pip install "httpx2" || pip install "httpx"
-
-      - name: Import and construct the app OUT OF TREE
+      - name: Exercise the CLI OUT OF TREE
+        # NOT "import and construct the app". ms-moe has no app, and that is
+        # the design rather than an omission: it is a build pipeline's CLI and
+        # its contract, deliberately Seren-agnostic, with no FastAPI, no
+        # seren-meninges and no HTTP surface. The service-shaped smoke test
+        # every sibling runs is exactly right for a service and wrong here.
+        #
+        # cd to a scratch dir first. Running from the repo puts ./ms_moe on
+        # sys.path, which is precisely how a missing dependency stays hidden.
         run: |
           cd "$(mktemp -d)"
+
+          # 1. The CONSOLE SCRIPT must be on PATH. This is the string a person
+          #    types and the string seren-theatre[stagehand] forks - if the
+          #    entry point did not install, both break and neither says why.
+          ms-moe describe > describe.json
           python - <<'PY'
-          from ms_moe.app import create_app
-          from fastapi.testclient import TestClient
+          import json
+          d = json.load(open("describe.json"))
+          assert d["name"] == "ms-moe", d
+          assert set(d["commands"]) == {"build", "validate", "describe"}, d
+          # The run manifest schema is a PUBLISHED contract - seren-theatre
+          # reads it with an independent implementation and refuses a version
+          # it does not understand. Bumping it is a release decision, so it
+          # gets asserted rather than assumed.
+          assert isinstance(d["manifest_schema_version"], int), d
+          assert d["requires"] == [], f"ms-moe must require nothing: {d}"
+          print(f"describe OK - manifest schema v{d['manifest_schema_version']}")
+          PY
 
-          app = create_app()
-          print("app constructed OK")
+          # 2. THE LAPTOP PROMISE. ms-moe is the CLI and the contract, not the
+          #    trainer; the heavy machinery lives in whatever venv the pipeline
+          #    trains in. If torch ever lands here, `ms-moe validate` stops
+          #    being something you can run BEFORE going near a GPU box, and
+          #    that split is the whole reason the package is separate.
+          python - <<'PY'
+          from importlib.metadata import distribution
+          import ms_moe
+          from ms_moe import manifest, stages, levers, runner, recipe  # noqa: F401
 
-          with TestClient(app) as c:
-              r = c.get("/")
-          assert r.status_code == 200, f"/ returned {r.status_code}: {r.text[:300]}"
-          u = r.json().get("updates")
+          # Assert what ms-moe DECLARES, not what happens to be importable.
+          # Ambient importability is a correlation - a runner image, or another
+          # package installed alongside, can make torch importable without
+          # ms-moe having anything to do with it, and the check would fail on
+          # working software. The declared requirement set is true by
+          # construction, so that is what gets asserted.
+          HEAVY = ("torch", "transformers", "datasets", "trl", "accelerate",
+                   "fastapi", "uvicorn", "seren")
+          reqs = distribution("ms-moe").requires or []
+          heavy = [r for r in reqs
+                   if any(h in r.split(";")[0].lower() for h in HEAVY)]
+          assert not heavy, (
+              f"ms-moe declares {heavy}. The CLI and the contract stay small "
+              f"enough to run on a laptop with no GPU - the trainer lives in "
+              f"whatever venv the pipeline trains in. That split is the whole "
+              f"reason this package is separate.")
+          print(f"deps declared: {reqs}")
+          print(f"imports clean (ms-moe {ms_moe.__version__})")
+          PY
 
-          assert isinstance(u, dict), f"/ must always carry an updates dict, got {u!r}"
-          expected = {"status", "distribution", "installed", "latest",
-                      "update_available", "detail", "checked_at"}
-          assert set(u) == expected, f"key drift: {set(u) ^ expected}"
-          assert isinstance(u["update_available"], bool)
-
-          # DELIBERATELY NOT ASSERTED: that a non-[updates] shape reports
-          # "unavailable". That assertion was wrong and cost real debugging
-          # time. seren_meninges.updates lazily imports httpx + packaging, so
-          # the [updates] extra GUARANTEES they are present - but its absence
-          # guarantees nothing. Six of the nine services already depend on
-          # httpx directly, and sentence-transformers drags it in on top, so
-          # update checking simply works without the extra. "It worked" is
-          # not a failure, and a test that says otherwise sends you hunting a
-          # bug that isn't there.
-          #
-          # What IS invariant:
-          KNOWN = {"ok", "disabled", "unavailable", "error"}
-          assert u["status"] in KNOWN, f"unknown status {u['status']!r}"
-          if u["status"] == "unavailable":
-              assert u["update_available"] is False
-              assert u["detail"], "unavailable must say how to fix it"
-          # Update checking is CORE in seren-meninges now, not an extra, so it
-          # must be wired in EVERY shape - bare included. "unavailable" means
-          # the checker was never built or its deps are missing, which with
-          # core deps can only mean seren-meninges resolved too old. "error" is
-          # still fine: a runner with no egress is a legitimate answer.
-          assert u["status"] != "unavailable", (
-              f"status=unavailable in shape ${{ matrix.shape.label }} - update "
-              f"checking is core now, so this means seren-meninges resolved too "
-              f"old or the checker was never constructed. detail={u['detail']}"
-          )
-          print(f"updates block OK: status={u['status']}")
+          # 3. VALIDATE ACTUALLY RUNS, out of tree, on the shipped example.
+          #    A recipe that the package's own README hands to a stranger has
+          #    to parse with only what `pip install ms-moe` provides.
+          python - <<'PY'
+          import os, pathlib, subprocess, json
+          # os.environ, NOT "$GITHUB_WORKSPACE" in the string: this heredoc is
+          # quoted ('PY'), so the shell does not expand anything inside it. The
+          # literal would never resolve, the check would skip on every run, and
+          # a check that can only skip is not a check.
+          ws = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          src = ws / "MsMoE" / "recipe.example.yaml"
+          assert src.is_file(), (
+              f"recipe.example.yaml is missing at {src}. The README hands it "
+              f"to a stranger, so it has to exist and it has to parse.")
+          out = subprocess.run(["ms-moe", "validate", str(src), "--json"],
+                               capture_output=True, text=True)
+          # A refusal (exit 1) is a legitimate answer and NOT a CI failure -
+          # it means the recipe asks for something the pipeline cannot honour
+          # yet, which is the tool working. Only a crash is a failure.
+          assert out.returncode in (0, 1), (
+              f"validate exited {out.returncode}\n{out.stderr[-2000:]}")
+          events = [json.loads(l) for l in out.stdout.splitlines() if l.strip()]
+          kinds = [e["event"] for e in events]
+          assert kinds and kinds[-1] == "done", f"no terminal event: {kinds}"
+          print(f"validate OK - events: {kinds}")
           PY
 
   build-and-release:

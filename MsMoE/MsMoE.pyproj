@@ -35,6 +35,7 @@
     <Compile Include="ms_moe\recipe.py" />
     <Compile Include="ms_moe\runner.py" />
     <Compile Include="ms_moe\stages.py" />
+    <Compile Include="tests\test_cli.py" />
     <Compile Include="tests\test_runner.py" />
   </ItemGroup>
   <ItemGroup>
