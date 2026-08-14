@@ -1,6 +1,6 @@
 """Recipe -> environment, and an honest account of what did NOT translate.
 
-THE PROBLEM THIS SOLVES. `ms-moe build recipe.yaml` currently drives
+THE PROBLEM THIS SOLVES. `ms-moe-maker build recipe.yaml` currently drives
 `fraunkenstein_universal.py` by setting environment variables and forking it.
 That script exposes sixteen env levers. A recipe declares far more than sixteen
 things. So the naive wrapper - set what you can, run it, hope - would accept a
@@ -80,7 +80,7 @@ def read_pipeline_constants(path: Path) -> Dict[str, Any]:
     ast, not import. Importing fraunkenstein_universal.py executes 800 lines of
     configuration, prints a banner, sets PYTORCH_CUDA_ALLOC_CONF and imports
     torch - none of which a validation pass has any business doing. It would
-    also make `ms-moe build --check` cost a CUDA context.
+    also make `ms-moe-maker build --check` cost a CUDA context.
 
     Only literal assignments are read. Anything computed (TARGET_STEPS, which
     is an env lookup, or BASE_MODEL, which is a conditional) is deliberately
@@ -112,7 +112,7 @@ def translate(recipe: Any, pipeline: Path,
               force: bool = False) -> Translation:
     """Map a validated Recipe onto env levers, refusing what cannot be honoured.
 
-    `recipe` is a ms_moe.recipe.Recipe. Typed loosely so this module has no
+    `recipe` is a ms_moe_maker.recipe.Recipe. Typed loosely so this module has no
     import cycle with the recipe parser and stays testable with a stub.
     """
     consts = read_pipeline_constants(pipeline)

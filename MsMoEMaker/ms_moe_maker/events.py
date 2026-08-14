@@ -6,7 +6,7 @@ consumer can parse stdout without a heuristic for "is this line prose".
 
 WHY STDERR FOR THE PROSE. The other direction - prose on stdout, events on a
 side channel - means anything piping the tool has to know about the side
-channel. Putting the machine stream on stdout makes `ms-moe build r.yaml --json
+channel. Putting the machine stream on stdout makes `ms-moe-maker build r.yaml --json
 | jq` work with no ceremony, which is the whole point of having it.
 
 ONE RULE, and it is the one that gets broken: flush every line. A consumer

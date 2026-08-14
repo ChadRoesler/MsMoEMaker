@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ms-moe"
+name = "ms-moe-maker"
 dynamic = ["version"]
 description = "Build a mixture of experts from deliberately chosen specialists. Not a coding model - a coding model shaped like your stack."
 license = "GPL-3.0-only"
@@ -17,7 +17,7 @@ keywords = ["moe", "mixture-of-experts", "qwen", "fine-tuning", "gguf", "llm"]
 # transformers, datasets, trl, unsloth) belongs to the PIPELINE it forks, in
 # whatever venv that lives in.
 #
-# That split is not tidiness, it is the reason `ms-moe validate recipe.yaml`
+# That split is not tidiness, it is the reason `ms-moe-maker validate recipe.yaml`
 # runs on a laptop with no GPU. Someone should be able to check a recipe, read
 # what it will cost and see which fields cannot be honoured before they go
 # anywhere near a machine that can run it.
@@ -31,25 +31,25 @@ dev = [
 ]
 
 [project.scripts]
-ms-moe = "ms_moe.__main__:main"
+ms-moe-maker = "ms_moe_maker.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/ChadRoesler/MsMoE"
-Repository = "https://github.com/ChadRoesler/MsMoE"
-"Bug Tracker" = "https://github.com/ChadRoesler/MsMoE/issues"
+Homepage = "https://github.com/ChadRoesler/MsMoeMaker"
+Repository = "https://github.com/ChadRoesler/MsMoeMaker"
+"Bug Tracker" = "https://github.com/ChadRoesler/MsMoeMaker/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ms_moe*"]
+include = ["ms_moe_maker*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.setuptools_scm]
-# .git is one level above pyproject.toml (repo root, not the MsMoE subdir) -
+# .git is one level above pyproject.toml (repo root, not the MsMoeMaker subdir) -
 # same nested layout as every sibling repo.
 root = ".."
 version_scheme = "release-branch-semver"
-version_file = "ms_moe/_version.py"
+version_file = "ms_moe_maker/_version.py"
 tag_regex = "^v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+.*)$"
 fallback_version = "0.0.0.dev0"

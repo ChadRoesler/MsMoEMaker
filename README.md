@@ -23,24 +23,24 @@ someone else gets their own Ms.MoE.
 ## Install
 
 ```bash
-pip install ms-moe
+pip install ms-moe-maker
 ```
 
 That gets you the CLI and the contract — about a megabyte, no torch. The heavy
 machinery lives in the pipeline this forks, in whatever venv you train in. That
-split is the point: `ms-moe validate` runs on a laptop, so you can check a
+split is the point: `ms-moe-maker validate` runs on a laptop, so you can check a
 recipe and see what it will cost before going near a machine that can run it.
 
 ## Use
 
 ```bash
-ms-moe describe                  # one line of JSON, exit 0, no side effects
-ms-moe validate recipe.yaml      # parse, check, translate — touches nothing
-ms-moe build recipe.yaml         # run it
-ms-moe build recipe.yaml --json  # JSON Lines on stdout, prose on stderr
+ms-moe-maker describe                  # one line of JSON, exit 0, no side effects
+ms-moe-maker validate recipe.yaml      # parse, check, translate — touches nothing
+ms-moe-maker build recipe.yaml         # run it
+ms-moe-maker build recipe.yaml --json  # JSON Lines on stdout, prose on stderr
 ```
 
-`ms-moe build recipe.yaml` is the literal command. It's what's in this README,
+`ms-moe-maker build recipe.yaml` is the literal command. It's what's in this README,
 it's what a person types, and it's exactly what `seren-theatre[stagehand]`
 forks — no separate API path with different defaults. If those two ever
 diverged, the hand-run path would rot, because it's the one with no automated
@@ -81,7 +81,7 @@ gradient updates Shell did, and a different LR curve besides.
 
 ## Refusals — read this bit
 
-Right now `ms-moe build` drives an existing pipeline script by setting
+Right now `ms-moe-maker build` drives an existing pipeline script by setting
 environment variables and forking it. That script exposes sixteen levers. A
 recipe declares far more than sixteen things.
 
@@ -99,7 +99,7 @@ compares each field against the value that will really be used. Agreement is
 silence. Only disagreement refuses.
 
 ```
-$ ms-moe build recipe.yaml
+$ ms-moe-maker build recipe.yaml
    2 recipe field(s) cannot be honoured by fraunkenstein_universal.py:
      · budget.per_device_batch=8 cannot be applied: the pipeline uses 4 from
        PER_DEVICE_BATCH and exposes no environment lever for it.
@@ -120,7 +120,7 @@ finished, and nobody had to guess when.
 
 ## The run manifest
 
-A build writes `msmoe-run.json` into its run directory: what the run is, the
+A build writes `msmoemaker-run.json` into its run directory: what the run is, the
 ordered stage list, each stage's status and artifact, and any refusals.
 
 That file is the **only** interface between this package and any viewer.

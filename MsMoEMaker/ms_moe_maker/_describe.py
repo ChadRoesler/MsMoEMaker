@@ -1,21 +1,21 @@
-"""ms-moe's identity card. STDLIB ONLY - nothing imported, nothing read.
+"""ms-moe-maker's identity card. STDLIB ONLY - nothing imported, nothing read.
 
 Same contract and the same reason as every Seren service's `_describe`, even
-though ms-moe is NOT a Seren package and never imports one: `--describe` has to
+though ms-moe-maker is NOT a Seren package and never imports one: `--describe` has to
 answer on a half-installed tool, so it cannot need torch, pydantic, or yaml.
 The moment you most want something to be able to say its own name is when its
 install is broken.
 
-ms-moe is deliberately Seren-agnostic. No seren-* dependency, no assumption
+ms-moe-maker is deliberately Seren-agnostic. No seren-* dependency, no assumption
 that Lodestar exists, no Seren in the name. It is a pipeline for building a
 specified mixture of experts, usable by someone who has never heard of any of
-this. seren-theatre[stagehand] depends on ms-moe; ms-moe depends on nothing of
+this. seren-theatre[stagehand] depends on ms-moe-maker; ms-moe-maker depends on nothing of
 Chad's. Mandate is not ethos - the connection is opt-in from the Seren side,
 and the run DIRECTORY is the only thing the two ever share.
 """
 from __future__ import annotations
 
-NAME = "ms-moe"
+NAME = "ms-moe-maker"
 DESCRIPTION = ("Build a mixture of experts from deliberately chosen "
                "specialists. Not a coding model - a coding model shaped like "
                "your stack.")
@@ -42,6 +42,6 @@ DESCRIBE = {
     "recipe_schema_version": 1,
     # Requires nothing, of anyone. The heavy deps (torch, transformers,
     # datasets) belong to the PIPELINE it forks, not to this CLI - which is
-    # what lets `ms-moe validate` run on a laptop with no GPU and no CUDA.
+    # what lets `ms-moe-maker validate` run on a laptop with no GPU and no CUDA.
     "requires": [],
 }

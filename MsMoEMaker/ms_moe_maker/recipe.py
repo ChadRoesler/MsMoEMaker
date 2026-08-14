@@ -7,7 +7,7 @@ hand one to somebody else and they get YOUR run. That second sentence is the
 entire reason this file exists - "it works, look" is a demo, and a recipe
 somebody else can execute is a result.
 
-    ms-moe build recipe.yaml          # stagehand runs exactly this
+    ms-moe-maker build recipe.yaml          # stagehand runs exactly this
     python3 msmoe_recipe.py --validate recipe.yaml
     python3 msmoe_recipe.py --resolve  recipe.yaml    # the EFFECTIVE build
 
@@ -485,7 +485,7 @@ def resolve(rec: Recipe) -> Dict[str, Any]:
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 DESCRIBE = {
-    "name": "ms-moe-recipe",
+    "name": "ms-moe-maker-recipe",
     "schema_version": SCHEMA_VERSION,
     "kinds": ["hf", "stack", "synth"],
     "gates": ["auto", "manual", "skip"],

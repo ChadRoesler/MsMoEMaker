@@ -13,7 +13,7 @@ can move for a year without anyone downstream noticing.
 FORK, NEVER IMPORT. Non-negotiable, and not only for tidiness:
 
   * importing the pipeline executes ~800 lines of configuration, prints a
-    banner, and imports torch - so `ms-moe validate` would cost a CUDA context.
+    banner, and imports torch - so `ms-moe-maker validate` would cost a CUDA context.
   * PYTORCH_CUDA_ALLOC_CONF must be set BEFORE torch initialises or it does
     nothing at all. In-process, our own import graph decides whether we win
     that race. In a child, the environment is simply correct at exec time.
@@ -127,8 +127,8 @@ class Runner:
         # WHICH INTERPRETER RUNS THE PIPELINE. Defaults to ours, and that
         # default was a bug for exactly as long as it was the only option.
         #
-        # The entire argument for ms-moe being a separate package is that it is
-        # small enough to live anywhere - `ms-moe validate` on a laptop, the CLI
+        # The entire argument for ms-moe-maker being a separate package is that it is
+        # small enough to live anywhere - `ms-moe-maker validate` on a laptop, the CLI
         # inside seren-theatre's venv - while the TRAINER lives in whatever fat
         # venv has torch. Forking is what makes that possible. Hardcoding
         # sys.executable silently collapsed the two back into one, so the
@@ -262,10 +262,10 @@ class Runner:
                 self.ev.say("")
                 self.ev.say(f"   The pipeline ran under: {self.python}")
                 self.ev.say(f"   It could not import:    {self._missing_module}")
-                self.ev.say("   ms-moe is deliberately small and does NOT ship "
+                self.ev.say("   ms-moe-maker is deliberately small and does NOT ship "
                             "the trainer's dependencies.")
                 self.ev.say("   Point it at the training venv:")
-                self.ev.say("     ms-moe build recipe.yaml "
+                self.ev.say("     ms-moe-maker build recipe.yaml "
                             "--python /path/to/train-venv/bin/python")
             self._finish_current(mf.FAILED, note=f"child exited {code}{hint}")
             self.ev.error(stage=self._current or "run",

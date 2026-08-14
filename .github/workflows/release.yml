@@ -33,34 +33,34 @@ jobs:
 
       - name: Install package + dev extras
         run: pip install -e ".[dev]"
-        working-directory: MsMoE
+        working-directory: MsMoeMaker
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
       - name: Run tests
         run: python -m pytest tests/ -v
-        working-directory: MsMoE
+        working-directory: MsMoeMaker
 
 # ── Build + GitHub Release (tags only) ────────────────────────────────────
   # ── Install shapes ──────────────────────────────────────────────────────
   #
   # `test` installs [dev] and runs pytest FROM INSIDE the repo. That proves the
-  # code works with every dev dependency present and ./ms_moe on sys.path.
-  # It proves nothing about what an operator gets from `pip install ms-moe`.
+  # code works with every dev dependency present and ./ms_moe_maker on sys.path.
+  # It proves nothing about what an operator gets from `pip install ms-moe-maker`.
   #
   # The failure classes this catches, for a CLI specifically:
-  #   1. A console script that did not install. `test` never types `ms-moe`,
+  #   1. A console script that did not install. `test` never types `ms-moe-maker`,
   #      it runs pytest - so a broken entry point is invisible there and fatal
   #      for both the person following the README and seren-theatre[stagehand],
   #      which forks that exact command.
   #   2. An unconditional import of a dependency that only the dev install
   #      provides - invisible when [dev] pulls it in, fatal on a bare install.
-  #   3. Dependency creep. ms-moe must stay small enough to validate a recipe
+  #   3. Dependency creep. ms-moe-maker must stay small enough to validate a recipe
   #      on a laptop with no GPU; the day torch turns up in its requirements,
   #      that promise is gone and nothing else would notice.
   #
   # So: install the shape an operator actually asks for, then exercise the CLI
-  # FROM OUTSIDE THE REPO, so ./ms_moe on sys.path cannot mask a missing piece.
+  # FROM OUTSIDE THE REPO, so ./ms_moe_maker on sys.path cannot mask a missing piece.
   #
   # Every shape runs on every push, including the slow ones, and this job GATES
   # the release. The maintainer eats the CI time so nobody eats a broken install.
@@ -86,18 +86,18 @@ jobs:
 
       - name: Install ${{ matrix.shape.spec }}
         run: pip install "${{ matrix.shape.spec }}"
-        working-directory: MsMoE
+        working-directory: MsMoeMaker
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
       - name: Exercise the CLI OUT OF TREE
-        # NOT "import and construct the app". ms-moe has no app, and that is
+        # NOT "import and construct the app". ms-moe-maker has no app, and that is
         # the design rather than an omission: it is a build pipeline's CLI and
         # its contract, deliberately Seren-agnostic, with no FastAPI, no
         # seren-meninges and no HTTP surface. The service-shaped smoke test
         # every sibling runs is exactly right for a service and wrong here.
         #
-        # cd to a scratch dir first. Running from the repo puts ./ms_moe on
+        # cd to a scratch dir first. Running from the repo puts ./ms_moe_maker on
         # sys.path, which is precisely how a missing dependency stays hidden.
         run: |
           cd "$(mktemp -d)"
@@ -105,54 +105,54 @@ jobs:
           # 1. The CONSOLE SCRIPT must be on PATH. This is the string a person
           #    types and the string seren-theatre[stagehand] forks - if the
           #    entry point did not install, both break and neither says why.
-          ms-moe describe > describe.json
+          ms-moe-maker describe > describe.json
           python - <<'PY'
           import json
           d = json.load(open("describe.json"))
-          assert d["name"] == "ms-moe", d
+          assert d["name"] == "ms-moe-maker", d
           assert set(d["commands"]) == {"build", "validate", "describe"}, d
           # The run manifest schema is a PUBLISHED contract - seren-theatre
           # reads it with an independent implementation and refuses a version
           # it does not understand. Bumping it is a release decision, so it
           # gets asserted rather than assumed.
           assert isinstance(d["manifest_schema_version"], int), d
-          assert d["requires"] == [], f"ms-moe must require nothing: {d}"
+          assert d["requires"] == [], f"ms-moe-maker must require nothing: {d}"
           print(f"describe OK - manifest schema v{d['manifest_schema_version']}")
           PY
 
-          # 2. THE LAPTOP PROMISE. ms-moe is the CLI and the contract, not the
+          # 2. THE LAPTOP PROMISE. ms-moe-maker is the CLI and the contract, not the
           #    trainer; the heavy machinery lives in whatever venv the pipeline
-          #    trains in. If torch ever lands here, `ms-moe validate` stops
+          #    trains in. If torch ever lands here, `ms-moe-maker validate` stops
           #    being something you can run BEFORE going near a GPU box, and
           #    that split is the whole reason the package is separate.
           python - <<'PY'
           from importlib.metadata import distribution
-          import ms_moe
-          from ms_moe import manifest, stages, levers, runner, recipe  # noqa: F401
+          import ms_moe_maker
+          from ms_moe_maker import manifest, stages, levers, runner, recipe  # noqa: F401
 
-          # Assert what ms-moe DECLARES, not what happens to be importable.
+          # Assert what ms-moe-maker DECLARES, not what happens to be importable.
           # Ambient importability is a correlation - a runner image, or another
           # package installed alongside, can make torch importable without
-          # ms-moe having anything to do with it, and the check would fail on
+          # ms-moe-maker having anything to do with it, and the check would fail on
           # working software. The declared requirement set is true by
           # construction, so that is what gets asserted.
           HEAVY = ("torch", "transformers", "datasets", "trl", "accelerate",
                    "fastapi", "uvicorn", "seren")
-          reqs = distribution("ms-moe").requires or []
+          reqs = distribution("ms-moe-maker").requires or []
           heavy = [r for r in reqs
                    if any(h in r.split(";")[0].lower() for h in HEAVY)]
           assert not heavy, (
-              f"ms-moe declares {heavy}. The CLI and the contract stay small "
+              f"ms-moe-maker declares {heavy}. The CLI and the contract stay small "
               f"enough to run on a laptop with no GPU - the trainer lives in "
               f"whatever venv the pipeline trains in. That split is the whole "
               f"reason this package is separate.")
           print(f"deps declared: {reqs}")
-          print(f"imports clean (ms-moe {ms_moe.__version__})")
+          print(f"imports clean (ms-moe-maker {ms_moe_maker.__version__})")
           PY
 
           # 3. VALIDATE ACTUALLY RUNS, out of tree, on the shipped example.
           #    A recipe that the package's own README hands to a stranger has
-          #    to parse with only what `pip install ms-moe` provides.
+          #    to parse with only what `pip install ms-moe-maker` provides.
           python - <<'PY'
           import os, pathlib, subprocess, json
           # os.environ, NOT "$GITHUB_WORKSPACE" in the string: this heredoc is
@@ -160,11 +160,11 @@ jobs:
           # literal would never resolve, the check would skip on every run, and
           # a check that can only skip is not a check.
           ws = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
-          src = ws / "MsMoE" / "recipe.example.yaml"
+          src = ws / "MsMoeMaker" / "recipe.example.yaml"
           assert src.is_file(), (
               f"recipe.example.yaml is missing at {src}. The README hands it "
               f"to a stranger, so it has to exist and it has to parse.")
-          out = subprocess.run(["ms-moe", "validate", str(src), "--json"],
+          out = subprocess.run(["ms-moe-maker", "validate", str(src), "--json"],
                                capture_output=True, text=True)
           # A refusal (exit 1) is a legitimate answer and NOT a CI failure -
           # it means the recipe asks for something the pipeline cannot honour
@@ -201,18 +201,18 @@ jobs:
         # No sed patching needed - __version__ is resolved at runtime via
         # importlib.metadata.
         run: python -m build
-        working-directory: MsMoE
+        working-directory: MsMoeMaker
 
       - name: Upload dist as artifact (handed to the publish job)
         uses: actions/upload-artifact@v4
         with:
-          name: ms-moe-dist
-          path: MsMoE/dist/
+          name: ms-moe-maker-dist
+          path: MsMoeMaker/dist/
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: MsMoE/dist/*
+          files: MsMoeMaker/dist/*
           generate_release_notes: true
 
 # ── PyPI publish (Trusted Publishing, tokenless) ──────────────────────────
@@ -222,14 +222,14 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/ms-moe
+      url: https://pypi.org/p/ms-moe-maker
     permissions:
       id-token: write   # MANDATORY for Trusted Publishing; job-level = least privilege
     steps:
       - name: Download the built dist
         uses: actions/download-artifact@v4
         with:
-          name: ms-moe-dist
+          name: ms-moe-maker-dist
           path: dist/
 
       - name: Publish to PyPI (tokenless)

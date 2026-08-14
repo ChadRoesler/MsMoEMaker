@@ -1,9 +1,9 @@
 """The CLI's promises, including the one it was quietly breaking.
 
-THE LAPTOP PROMISE. ms-moe's README says `ms-moe validate` runs on a laptop
+THE LAPTOP PROMISE. ms-moe-maker's README says `ms-moe-maker validate` runs on a laptop
 with no GPU, so you can check a recipe and see what it will cost before going
 anywhere near a machine that can run it. That is the entire argument for
-ms-moe being a small separate package instead of part of the pipeline.
+ms-moe-maker being a small separate package instead of part of the pipeline.
 
 It was false. `validate` demanded fraunkenstein_universal.py and exited 1 with
 "could not find fraunkenstein_universal.py" before parsing anything - so a
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from ms_moe.__main__ import main
+from ms_moe_maker.__main__ import main
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "recipe.example.yaml"
 
@@ -49,14 +49,14 @@ def _events(capsys) -> list[dict]:
 def test_describe_needs_nothing(capsys):
     assert main(["describe"]) == 0
     d = json.loads(capsys.readouterr().out)
-    assert d["name"] == "ms-moe"
+    assert d["name"] == "ms-moe-maker"
     assert d["requires"] == []
 
 
 def test_describe_via_flag_short_circuits_before_argparse(capsys):
     """It has to answer on a half-installed tool, so nothing may run first."""
     assert main(["--describe"]) == 0
-    assert json.loads(capsys.readouterr().out)["name"] == "ms-moe"
+    assert json.loads(capsys.readouterr().out)["name"] == "ms-moe-maker"
 
 
 # -- the laptop promise ------------------------------------------------------
@@ -142,16 +142,16 @@ def test_stdout_stays_pure_json_lines_under_json(lonely_recipe, capsys):
 
 # -- which interpreter runs the pipeline -------------------------------------
 # The bug this covers: Runner hardcoded sys.executable, so the pipeline was
-# always launched with whatever interpreter ms-moe happened to live in. That
+# always launched with whatever interpreter ms-moe-maker happened to live in. That
 # silently collapses the exact separation the package exists for - a tiny CLI
 # anywhere, the fat trainer in the venv that has torch - and surfaces as
 # "No module named 'torch'" on a box that definitely has torch.
 
 def test_python_defaults_to_our_own_interpreter(lonely_recipe, tmp_path):
     import sys
-    from ms_moe.runner import Runner
-    from ms_moe.levers import Translation
-    from ms_moe.events import Events
+    from ms_moe_maker.runner import Runner
+    from ms_moe_maker.levers import Translation
+    from ms_moe_maker.events import Events
     from tests.test_runner import FakeRecipe          # noqa: F401
     r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
                Events(enabled=False))
@@ -159,9 +159,9 @@ def test_python_defaults_to_our_own_interpreter(lonely_recipe, tmp_path):
 
 
 def test_an_explicit_interpreter_is_used_instead(tmp_path):
-    from ms_moe.runner import Runner
-    from ms_moe.levers import Translation
-    from ms_moe.events import Events
+    from ms_moe_maker.runner import Runner
+    from ms_moe_maker.levers import Translation
+    from ms_moe_maker.events import Events
     from tests.test_runner import FakeRecipe
     r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
                Events(enabled=False), python="/opt/train/bin/python")
@@ -178,9 +178,9 @@ def test_a_missing_module_in_the_child_is_reported_as_an_env_answer(
         tmp_path, capsys):
     """`No module named torch` is not a bug report, it is a statement about
     WHICH VENV ran the pipeline - so it has to name the interpreter."""
-    from ms_moe.runner import Runner
-    from ms_moe.levers import Translation
-    from ms_moe.events import Events
+    from ms_moe_maker.runner import Runner
+    from ms_moe_maker.levers import Translation
+    from ms_moe_maker.events import Events
     from tests.test_runner import FakeRecipe
 
     script = tmp_path / "fraunkenstein_universal.py"

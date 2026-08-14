@@ -1,12 +1,12 @@
-"""The ms-moe CLI - the command stagehand forks and a person types.
+"""The ms-moe-maker CLI - the command stagehand forks and a person types.
 
 Three verbs:
 
-    ms-moe describe                     one line of JSON, exit 0, no side effects
-    ms-moe validate recipe.yaml         parse + check, touching nothing
-    ms-moe build recipe.yaml            translate, fork the pipeline, report
+    ms-moe-maker describe                     one line of JSON, exit 0, no side effects
+    ms-moe-maker validate recipe.yaml         parse + check, touching nothing
+    ms-moe-maker build recipe.yaml            translate, fork the pipeline, report
 
-`ms-moe build recipe.yaml` is deliberately the literal string in the README and
+`ms-moe-maker build recipe.yaml` is deliberately the literal string in the README and
 the literal string seren-theatre[stagehand] forks. Not a Python API call, not
 an internal entry point with different defaults - the same command. If the two
 ever diverge, the hand-run path is the one that rots, because it is the one
@@ -50,7 +50,7 @@ def _find_pipeline(explicit: str | None, recipe_path: Path,
     convenience:
 
       build    - REQUIRED. There is nothing to fork without it.
-      validate - OPTIONAL. The README promises `ms-moe validate` runs on a
+      validate - OPTIONAL. The README promises `ms-moe-maker validate` runs on a
                  laptop with no GPU so you can check a recipe BEFORE going
                  near a machine that can run it. Demanding the pipeline made
                  that promise false: a stranger with a recipe and no checkout
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     ap = argparse.ArgumentParser(
-        prog="ms-moe",
+        prog="ms-moe-maker",
         description="Build a mixture of experts from a recipe.")
     ap.add_argument("command", choices=["build", "validate", "describe"])
     ap.add_argument("recipe", nargs="?", help="path to the recipe .yaml")
@@ -105,9 +105,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="JSON Lines events on stdout, prose on stderr")
     ap.add_argument("--python", default=None,
                     help="interpreter to run the pipeline with (default: the "
-                         "one running ms-moe). Use this when the trainer lives "
+                         "one running ms-moe-maker). Use this when the trainer lives "
                          "in a different venv - which is the normal case, "
-                         "since ms-moe is deliberately small and torch is not.")
+                         "since ms-moe-maker is deliberately small and torch is not.")
     ap.add_argument("--dryrun", action="store_true",
                     help="FRAUNK_DRYRUN=1 - the whole pipeline, small")
     ap.add_argument("--force", action="store_true",

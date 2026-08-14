@@ -16,7 +16,7 @@
     <File Path="LICENSE" />
     <File Path="README.md" />
   </Folder>
-  <Project Path="MsMoE/MsMoE.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="7c1f4a92-3e6d-4b18-9a4c-2f8b6d5e1a03">
+  <Project Path="MsMoeMaker/MsMoeMaker.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="7c1f4a92-3e6d-4b18-9a4c-2f8b6d5e1a03">
     <Build Project="false" />
   </Project>
 </Solution>

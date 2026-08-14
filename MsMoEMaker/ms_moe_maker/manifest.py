@@ -1,6 +1,6 @@
-"""The run manifest - the ONLY interface between ms-moe and seren-theatre.
+"""The run manifest - the ONLY interface between ms-moe-maker and seren-theatre.
 
-Neither package imports the other. Neither package may. `ms-moe` is a build
+Neither package imports the other. Neither package may. `ms-moe-maker` is a build
 pipeline that knows nothing about Seren, and `seren-theatre` is a viewer that
 works perfectly on a directory no pipeline ever touched. What connects them is
 a document on disk, in the run directory, that one writes and the other reads.
@@ -30,7 +30,7 @@ is still going.
 FORWARD COMPATIBILITY. `schema_version` is checked by the reader and a version
 it does not understand is reported as unreadable rather than parsed optimism-
 ally. Unknown KEYS inside a known version are preserved and ignored - strict on
-write, lenient on read, the family's Postel bargain. That is what lets ms-moe
+write, lenient on read, the family's Postel bargain. That is what lets ms-moe-maker
 add a field without every installed Theatre needing an upgrade first.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ SCHEMA_VERSION = 1
 # The filename, at the root of a RUN directory (one rung). Dot-prefixed so it
 # never collides with a model artifact and never gets mistaken for one by a
 # glob that is looking for directories.
-MANIFEST_NAME = "msmoe-run.json"
+MANIFEST_NAME = "msmoemaker-run.json"
 
 # How long a "running" stage may go without a heartbeat before a reader should
 # treat the manifest as abandoned rather than live. Generous on purpose: a
@@ -121,7 +121,7 @@ class Manifest:
     # just printed to a log, because the person reading the dashboard six hours
     # later is exactly who needs to know a lever was ignored. See levers.py.
     refusals: List[str] = field(default_factory=list)
-    # Anything a future ms-moe adds that this reader does not know about.
+    # Anything a future ms-moe-maker adds that this reader does not know about.
     extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- queries the viewer wants -------------------------------------------

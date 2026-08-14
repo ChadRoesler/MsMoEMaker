@@ -2,7 +2,7 @@
 #
 #   python3 msmoe_recipe.py recipe.example.yaml        # validate + summarise
 #   python3 msmoe_recipe.py recipe.example.yaml --resolve
-#   ms-moe build recipe.example.yaml                   # stagehand runs THIS
+#   ms-moe-maker build recipe.example.yaml                   # stagehand runs THIS
 #
 # The point of a recipe is that you can hand it to someone who does not have
 # your box and they get your run. That is the difference between "it works,
