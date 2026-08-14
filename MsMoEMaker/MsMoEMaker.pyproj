@@ -10,7 +10,7 @@
     <SearchPath>.</SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
     <OutputPath>.</OutputPath>
-    <Name>MsMoeMaker</Name>
+    <Name>MsMoEMaker</Name>
     <RootNamespace>ms_moe_maker</RootNamespace>
     <InterpreterId>Global|PythonCore|3.11</InterpreterId>
     <IsWindowsApplication>False</IsWindowsApplication>

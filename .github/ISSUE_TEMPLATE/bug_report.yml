@@ -29,7 +29,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: MsMoeMaker version
+      label: MsMoEMaker version
       placeholder: "e.g. v0.2.0  (pip show ms-moe-maker)"
     validations:
       required: true

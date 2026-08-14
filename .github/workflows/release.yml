@@ -33,13 +33,13 @@ jobs:
 
       - name: Install package + dev extras
         run: pip install -e ".[dev]"
-        working-directory: MsMoeMaker
+        working-directory: MsMoEMaker
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
       - name: Run tests
         run: python -m pytest tests/ -v
-        working-directory: MsMoeMaker
+        working-directory: MsMoEMaker
 
 # ── Build + GitHub Release (tags only) ────────────────────────────────────
   # ── Install shapes ──────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ jobs:
 
       - name: Install ${{ matrix.shape.spec }}
         run: pip install "${{ matrix.shape.spec }}"
-        working-directory: MsMoeMaker
+        working-directory: MsMoEMaker
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
@@ -160,7 +160,7 @@ jobs:
           # literal would never resolve, the check would skip on every run, and
           # a check that can only skip is not a check.
           ws = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
-          src = ws / "MsMoeMaker" / "recipe.example.yaml"
+          src = ws / "MsMoEMaker" / "recipe.example.yaml"
           assert src.is_file(), (
               f"recipe.example.yaml is missing at {src}. The README hands it "
               f"to a stranger, so it has to exist and it has to parse.")
@@ -201,18 +201,18 @@ jobs:
         # No sed patching needed - __version__ is resolved at runtime via
         # importlib.metadata.
         run: python -m build
-        working-directory: MsMoeMaker
+        working-directory: MsMoEMaker
 
       - name: Upload dist as artifact (handed to the publish job)
         uses: actions/upload-artifact@v4
         with:
           name: ms-moe-maker-dist
-          path: MsMoeMaker/dist/
+          path: MsMoEMaker/dist/
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: MsMoeMaker/dist/*
+          files: MsMoEMaker/dist/*
           generate_release_notes: true
 
 # ── PyPI publish (Trusted Publishing, tokenless) ──────────────────────────

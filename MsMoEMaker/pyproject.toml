@@ -34,9 +34,9 @@ dev = [
 ms-moe-maker = "ms_moe_maker.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/ChadRoesler/MsMoeMaker"
-Repository = "https://github.com/ChadRoesler/MsMoeMaker"
-"Bug Tracker" = "https://github.com/ChadRoesler/MsMoeMaker/issues"
+Homepage = "https://github.com/ChadRoesler/MsMoEMaker"
+Repository = "https://github.com/ChadRoesler/MsMoEMaker"
+"Bug Tracker" = "https://github.com/ChadRoesler/MsMoEMaker/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -46,7 +46,7 @@ include = ["ms_moe_maker*"]
 testpaths = ["tests"]
 
 [tool.setuptools_scm]
-# .git is one level above pyproject.toml (repo root, not the MsMoeMaker subdir) -
+# .git is one level above pyproject.toml (repo root, not the MsMoEMaker subdir) -
 # same nested layout as every sibling repo.
 root = ".."
 version_scheme = "release-branch-semver"
