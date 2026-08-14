@@ -9,7 +9,7 @@ updates:
     commit-message:
       prefix: "ci"
 
-  # Python deps for the MsMoeMakermaker package (pyproject lives in MsMoeMaker/).
+  # Python deps for the MsMoeMaker package (pyproject lives in MsMoeMaker/).
   - package-ecosystem: "pip"
     directory: "/MsMoeMaker"
     schedule:
