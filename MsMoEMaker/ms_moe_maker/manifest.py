@@ -51,7 +51,19 @@ SCHEMA_VERSION = 1
 # The filename, at the root of a RUN directory (one rung). Dot-prefixed so it
 # never collides with a model artifact and never gets mistaken for one by a
 # glob that is looking for directories.
-MANIFEST_NAME = "msmoemaker-run.json"
+# NOT "msmoemaker-run.json". This file describes a RUN THAT PRODUCES A Ms.MoE,
+# so it is named after the OUTPUT, not after the tool that wrote it - the same
+# rule that leaves the `msmoe_{size}` run directories and the recipe's `name:`
+# field alone while the package, module and CLI all became ms-moe-maker.
+#
+# It is also a PUBLISHED WIRE FORMAT. seren-theatre implements an independent
+# reader for it and never imports this package, so renaming this constant on
+# one side silently blinds the other: the viewer finds no manifest, falls back
+# to glob-scraping, and the stage ladder just quietly stops appearing. That
+# happened during the rename and nothing caught it, because the contract test
+# that exists to catch exactly this was keyed on a directory name that changed
+# in the same sweep.
+MANIFEST_NAME = "msmoe-run.json"
 
 # How long a "running" stage may go without a heartbeat before a reader should
 # treat the manifest as abandoned rather than live. Generous on purpose: a
