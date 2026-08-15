@@ -22,6 +22,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, List, Optional
 
 from ._describe import DESCRIBE
 from .events import Events
@@ -84,6 +85,38 @@ def _find_pipeline(explicit: str | None, recipe_path: Path,
     return None
 
 
+class _Tee:
+    """Write to two streams at once, flushing both.
+
+    Deliberately tiny and deliberately NOT `tee(1)` in a shell: a detached
+    build has no shell, and a process-substitution pipeline is one more thing
+    that can die independently of the build it was watching.
+
+    Flushes on every write because these files are what a viewer tails. An
+    unflushed log is a run that looks hung for as long as the buffer takes to
+    fill, which on a slow stage is the entire stage.
+    """
+
+    def __init__(self, primary, secondary):
+        self._a, self._b = primary, secondary
+
+    def write(self, text):
+        n = self._a.write(text)
+        try:
+            self._b.write(text)
+            self._b.flush()
+        except (OSError, ValueError):
+            pass          # a full or closed disk must not kill the build
+        return n
+
+    def flush(self):
+        for s in (self._a, self._b):
+            try:
+                s.flush()
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -116,9 +149,47 @@ def main(argv: list[str] | None = None) -> int:
                     help="run even though some recipe fields cannot be "
                          "honoured. They are recorded in the manifest either "
                          "way; this only removes the stop.")
+    ap.add_argument("--log-file", default=None,
+                    help="append the human prose to this file as well as "
+                         "stderr. THE CHILD OPENS IT - see below.")
+    ap.add_argument("--events-file", default=None,
+                    help="append the JSON Lines events to this file as well "
+                         "as stdout")
     a = ap.parse_args(argv)
 
-    ev = Events(enabled=a.json)
+    # WHY THE CHILD OPENS ITS OWN OUTPUT FILES, rather than the launcher
+    # redirecting into them.
+    #
+    # SerenTheatre has one hard invariant: it never writes inside a directory
+    # it is watching (seren_theatre/stageguard.py). A run's log belongs in the
+    # stage - that is the whole reason Theatre can see it - so if stagehand
+    # opened that file to redirect a detached build into it, THEATRE would be
+    # the process writing into a stage, and the invariant would be true only
+    # by a technicality about which module the file handle lived in.
+    #
+    # So the launcher passes a PATH and opens nothing. The builder writes its
+    # own log, which it was always entitled to do: the thing doing the building
+    # owns its artifacts. Theatre stays a reader in every install shape.
+    #
+    # Append, never truncate: a resumed run must not erase the record of the
+    # attempt before it.
+    _sinks: List[Any] = []
+
+    def _tee(path: Optional[str], base):
+        if not path:
+            return base
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            handle = open(path, "a", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            print(f"could not open {path}: {exc}", file=sys.stderr)
+            return base
+        _sinks.append(handle)
+        return _Tee(base, handle)
+
+    ev = Events(enabled=a.json,
+                stream=_tee(a.events_file, sys.stdout),
+                prose=_tee(a.log_file, sys.stderr))
 
     if a.command == "describe":
         print(json.dumps(DESCRIBE))

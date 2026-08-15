@@ -26,24 +26,37 @@ finetune stages, and a recipe with three means three.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 # -- fixed stages ------------------------------------------------------------
 
 PREFLIGHT = "preflight"
-DATA_CODE = "data.code"
-DATA_AGENT = "data.agent"
+# WAS data.code / data.agent. Renamed while the only consumer was seren-theatre
+# and no stranger's recipe existed yet, because this vocabulary is a public
+# contract and the old spelling had a DOMAIN ASSUMPTION baked into it.
+#
+# Nothing between the corpus and the GGUF knows what the text means - tokenise,
+# finetune, stitch, router-train, export and smoke are all domain-blind. A
+# Ms.MoE built to drill D&D lore, or exam material, or case law, runs the exact
+# same eight stages. Shipping ids that call the corpus "code" would have told
+# every one of those people they were using someone else's tool, permanently,
+# in a wire format that says at the top of this file that renaming is a
+# breaking change.
+#
+# Cheapest it will ever be was the day it was noticed. This is that day.
+DATA_CORPUS = "data.corpus"
+DATA_SYNTH = "data.synth"
 STITCH = "stitch"
 ROUTER = "router"
 EXPORT_GGUF = "export.gguf"
 
-# Templated per expert: finetune.python, finetune.powershell, ...
+# Templated per expert: finetune.python, finetune.powershell, finetune.bestiary
 FINETUNE_PREFIX = "finetune."
 
 LABELS: Dict[str, str] = {
     PREFLIGHT: "Preflight - stamp the levers, check the disk",
-    DATA_CODE: "Collect the code corpora",
-    DATA_AGENT: "Generate the MCP agent traces",
+    DATA_CORPUS: "Collect the expert corpora",
+    DATA_SYNTH: "Generate the synthetic corpora",
     STITCH: "Stitch the MoE skeleton",
     ROUTER: "Train the router",
     EXPORT_GGUF: "Export GGUF and smoke-test it",
@@ -66,28 +79,40 @@ def label_for(stage_id: str) -> str:
     return stage_id
 
 
-def plan(experts: List[str]) -> List[Tuple[str, str]]:
+def plan(experts: List[str],
+         synth: Sequence[str] = ()) -> List[Tuple[str, str]]:
     """The full ordered stage list for a build of these experts.
 
     Returns [(id, label), ...] in execution order, mirroring the orchestrator
-    at the bottom of fraunkenstein_universal.py:
+    at the bottom of the pipeline:
 
-        preflight -> code datasets -> agent dataset
+        preflight -> gather corpora -> generate synthetic corpora
                   -> finetune each specialist
                   -> stitch skeleton -> train router -> export GGUF
 
-    The probes and evals (verify_stitch_complete, probe_*, eval_*) are
-    deliberately NOT here. They are separate commands a person runs afterward
-    to answer separate questions, and folding them into the build would make
-    the build the thing that grades itself. Keeping the evidence layer outside
-    the pipeline is the same reason SerenProbe is its own service.
+    `synth` is the experts whose source has to be GENERATED rather than
+    downloaded, and it is a parameter because it used to be the literal check
+    `if "agentcore" in experts`. That worked exactly as long as the only
+    generated expert in the world was Chad's MCP-trace one. A recipe with a
+    synth expert called anything else got no data.synth stage at all, so the
+    longest phase of its build was invisible in the viewer - the failure being
+    silence, which is the worst shape for it.
+
+    The recipe already knows this (`source.kind == "synth"`), so the caller
+    passes what it knows instead of this module guessing from a name.
+
+    The probes and evals are deliberately NOT here. They are separate commands
+    a person runs afterward to answer separate questions, and folding them in
+    would make the build the thing that grades itself. Keeping the evidence
+    layer outside the pipeline is the same reason SerenProbe is its own
+    service.
     """
     out: List[Tuple[str, str]] = [
         (PREFLIGHT, LABELS[PREFLIGHT]),
-        (DATA_CODE, LABELS[DATA_CODE]),
+        (DATA_CORPUS, LABELS[DATA_CORPUS]),
     ]
-    if "agentcore" in experts:
-        out.append((DATA_AGENT, LABELS[DATA_AGENT]))
+    if synth:
+        out.append((DATA_SYNTH, LABELS[DATA_SYNTH]))
     for expert in experts:
         out.append((finetune_id(expert), finetune_label(expert)))
     out.extend([

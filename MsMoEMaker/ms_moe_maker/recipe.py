@@ -46,6 +46,8 @@ import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import corpus
+
 SCHEMA_VERSION = 1
 
 # ── knobs that are DERIVED, never written by hand ───────────────────────────
@@ -58,21 +60,33 @@ SCHEMA_VERSION = 1
 class Source:
     """Where one expert's training text comes from.
 
-    kind:
-      hf     - a dedicated HuggingFace dataset. Use this for anything the
-               general corpus is thin on. PowerShell runs ~141 files/shard in
-               stack-v3: 80 shards (~45 GB) yielded 11,627. A language-
-               partitioned corpus gave 140,000 in a 392 MB download. ~500x.
-      stack  - scan the general code corpus for a language name. Cheap for
-               Python (~18,000/shard), useless for anything rare.
+    THE KINDS ARE A REGISTRY, NOT A LIST - see corpus.py. They used to be the
+    literal tuple ("hf", "stack", "synth") written down in three places: this
+    docstring, the validator below, and the --describe payload. Adding one
+    meant finding all three, and missing one meant a recipe that validated and
+    then failed at build time.
+
+    Run `ms-moe-maker recipe --describe` for the kinds registered on THIS box,
+    including any a plugin added. The built-ins:
+
+      hf     - any HuggingFace dataset (repo + text_field). Domain-neutral:
+               equally a code corpus, a lore corpus or a pile of lecture notes.
+      stack  - the one code-specific kind; scan the general code corpus for a
+               language name.
       synth  - generate it with a teacher model + a rejection-sampling
-               validator. This is how the agent/tool-use expert is built,
-               because no corpus of correct MCP traces exists to scrape.
+               validator, for a domain no corpus exists to scrape.
+      local  - text already on this box. Nothing leaves the machine.
+
+    The fields below are the union across kinds. A kind declares which it
+    requires; the rest are simply ignored by kinds that do not care.
     """
     kind: str
     # kind=hf
     repo: Optional[str] = None
     split: str = "train"
+    # NOTE the default is "code" for backwards compatibility with every recipe
+    # written so far. A lore corpus will want text_field: text, and validate
+    # says so rather than letting it silently read an absent column.
     text_field: str = "code"
     # kind=stack
     language: Optional[str] = None
@@ -81,6 +95,9 @@ class Source:
     teacher: Optional[str] = None
     generator: Optional[str] = None      # named generator in the pipeline
     examples: int = 15_000
+    # kind=local
+    path: Optional[str] = None
+    glob: str = "**/*.txt"
 
 
 @dataclass
@@ -356,19 +373,21 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             warns.append(f"expert name {e.name!r} is not lowercase; the "
                          f"pipeline lowercases paths and 'C#' becomes 'csharp'")
         s = e.source
-        if s.kind not in ("hf", "stack", "synth"):
-            errs.append(f"{e.name}: source.kind {s.kind!r} must be "
-                        f"hf | stack | synth")
-        elif s.kind == "hf" and not s.repo:
-            errs.append(f"{e.name}: source.kind=hf needs a repo")
-        elif s.kind == "stack" and not s.language:
-            errs.append(f"{e.name}: source.kind=stack needs a language, spelled "
-                        f"EXACTLY as the corpus spells it - an inexact match is "
-                        f"a silent zero for an unrelated-looking reason")
-        elif s.kind == "synth":
-            if not s.teacher:
-                errs.append(f"{e.name}: source.kind=synth needs a teacher")
-            else:
+        # The registry decides what kinds exist and what each one requires, so
+        # a plugin's kind validates here without this file having heard of it.
+        # What stays below is the ADVICE - heuristics about values that are
+        # legal but probably wrong, which is a different job from schema.
+        kind_errs, kind_warns = corpus.check(s.kind, s)
+        errs.extend(f"{e.name}: {m}" for m in kind_errs)
+        warns.extend(f"{e.name}: {m}" for m in kind_warns)
+
+        if s.kind == "stack" and s.language:
+            warns.append(f"{e.name}: source.kind=stack language {s.language!r} "
+                         f"must be spelled EXACTLY as the corpus spells it - an "
+                         f"inexact match is a silent zero for an "
+                         f"unrelated-looking reason")
+        if s.kind == "synth":
+            if s.teacher:
                 small = any(t in s.teacher for t in
                             ("0.5B", "1.5B", "3B", "0.6B", "1B", "2B"))
                 if small:
@@ -487,7 +506,10 @@ def resolve(rec: Recipe) -> Dict[str, Any]:
 DESCRIBE = {
     "name": "ms-moe-maker-recipe",
     "schema_version": SCHEMA_VERSION,
-    "kinds": ["hf", "stack", "synth"],
+    # The live registry, so a plugin's kind is advertised without
+    # this literal being edited. It was a frozen list in three
+    # places; that is how a kind gets supported but not offered.
+    "kinds": corpus.describe(),
     "gates": ["auto", "manual", "skip"],
     "description": "Recipe schema for Ms.MoE. Validate before you burn a "
                    "GPU-week.",

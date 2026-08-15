@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import corpus
 from . import manifest as mf
 from . import stages as st
 from .events import Events
@@ -107,9 +108,21 @@ _SKIP_WHAT = {
     "MoE skeleton": st.STITCH,
     "trained MoE (final)": st.ROUTER,
     "GGUF export": st.EXPORT_GGUF,
-    "agent dataset": st.DATA_AGENT,
-    "MCP agent traces": st.DATA_AGENT,
+    "agent dataset": st.DATA_SYNTH,
+    "MCP agent traces": st.DATA_SYNTH,
 }
+
+
+def _is_generated(source: Any) -> bool:
+    """Does this source have to be GENERATED rather than fetched?
+
+    Asked of the corpus registry, not of the string "synth". A plugin that
+    registers a generated kind gets a data.synth stage in the viewer for free;
+    hardcoding the name here would have meant only OUR generator was visible,
+    and an invisible stage is the longest phase of a build looking like a hang.
+    """
+    kind = corpus.get(getattr(source, "kind", "") or "")
+    return bool(kind and kind.generated)
 
 
 class Runner:
@@ -142,6 +155,12 @@ class Runner:
         self.data_root = self.cwd / roots["data"]
 
         experts = [e.name for e in recipe.experts]
+        # Which experts have to be GENERATED, asked of the recipe rather than
+        # inferred from a name. See stages.plan - this used to be a hardcoded
+        # check for "agentcore", so any other synth expert got no stage and its
+        # longest phase ran invisibly.
+        synth = [e.name for e in recipe.experts
+                 if _is_generated(getattr(e, "source", None))]
         self.manifest = mf.Manifest(
             recipe_id=_recipe_id(recipe),
             name=recipe.name,
@@ -150,7 +169,7 @@ class Runner:
             experts=experts,
             refusals=list(translation.refusals),
             stages=[mf.Stage(id=sid, label=label)
-                    for sid, label in st.plan(experts)],
+                    for sid, label in st.plan(experts, synth)],
         )
         self._current: Optional[str] = None
         self._missing_module: Optional[str] = None
@@ -312,23 +331,23 @@ class Runner:
 
         if _SKIP_ALL_CODE.match(line):
             self._finish_current()
-            self._set(st.DATA_CODE, mf.SKIPPED,
+            self._set(st.DATA_CORPUS, mf.SKIPPED,
                       note="every language already on disk")
             return
 
         if _CODE_START.search(line):
             # Only if it has not already finished - the pipeline prints the
             # shard-count line even on a partial resume.
-            stage = self.manifest.stage(st.DATA_CODE)
+            stage = self.manifest.stage(st.DATA_CORPUS)
             if stage is None or stage.status not in mf.TERMINAL:
                 self._finish_current()
-                self._set(st.DATA_CODE, mf.RUNNING,
+                self._set(st.DATA_CORPUS, mf.RUNNING,
                           note="scanning shards")
             return
 
         m = _CODE_DONE.match(line)
         if m:
-            self._set(st.DATA_CODE, mf.DONE,
+            self._set(st.DATA_CORPUS, mf.DONE,
                       note=f"scanned {m.group(1)} repos across "
                            f"{m.group(2)} shard(s)")
             self._current = None
@@ -357,7 +376,7 @@ class Runner:
 
         if _AGENT_READY.search(line):
             self._finish_current()
-            self._set(st.DATA_AGENT, mf.DONE)
+            self._set(st.DATA_SYNTH, mf.DONE)
             return
 
         if _STITCH.search(line):
@@ -411,13 +430,13 @@ def _skip_to_stage(what: str) -> Optional[str]:
     """Map a `_done()` prose label onto a stage id.
 
     The per-language datasets say "<Language> dataset", which is one stage
-    (data.code) covering several artifacts, so it is matched by suffix rather
+    (data.corpus) covering several artifacts, so it is matched by suffix rather
     than listed.
     """
     if what in _SKIP_WHAT:
         return _SKIP_WHAT[what]
     if what.endswith(" dataset"):
-        return st.DATA_CODE
+        return st.DATA_CORPUS
     return None
 
 

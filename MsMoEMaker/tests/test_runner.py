@@ -143,7 +143,7 @@ def test_a_skipped_dataset_reports_skipped_not_done(lab):
     different fact from 'we just built it' and the manifest keeps them apart -
     a resumed run should not look like a fresh one."""
     _, runner = run(lab)
-    stage = mf.read(runner.run_dir).stage(st.DATA_CODE)
+    stage = mf.read(runner.run_dir).stage(st.DATA_CORPUS)
     assert stage.status == mf.SKIPPED
     assert "already present" in (stage.note or "")
 
@@ -235,7 +235,7 @@ def test_refusals_are_recorded_in_the_manifest(lab):
 
 
 # -- the code-corpus phase ---------------------------------------------------
-# Added after a real gap: data.code only reported on the per-language
+# Added after a real gap: data.corpus only reported on the per-language
 # `_done()` line, so a FRESH run - no cached corpora, 45 GB of shards, the
 # longest phase of a first build - left the stage at `pending` for all of it.
 # The viewer had nothing to say during exactly the wait that most needs an
@@ -269,9 +269,9 @@ def test_a_fresh_shard_scan_reports_running_then_done(tmp_path):
     script = tmp_path / "fraunkenstein_universal.py"
     script.write_text(FRESH_SCAN, encoding="utf-8")
     _, runner = run(script, experts=("python",))
-    stage = mf.read(runner.run_dir).stage(st.DATA_CODE)
+    stage = mf.read(runner.run_dir).stage(st.DATA_CORPUS)
     assert stage.status == mf.DONE, (
-        "a fresh corpus scan left data.code un-reported - that is the longest "
+        "a fresh corpus scan left data.corpus un-reported - that is the longest "
         "phase of a first build and the viewer would show nothing for it")
     assert "14231 repos" in (stage.note or "")
 
@@ -282,7 +282,7 @@ def test_the_summary_skip_line_is_recognised_too(tmp_path):
     script = tmp_path / "fraunkenstein_universal.py"
     script.write_text(ALL_CACHED, encoding="utf-8")
     _, runner = run(script, experts=("python",))
-    stage = mf.read(runner.run_dir).stage(st.DATA_CODE)
+    stage = mf.read(runner.run_dir).stage(st.DATA_CORPUS)
     assert stage.status == mf.SKIPPED
     assert "already on disk" in (stage.note or "")
 
@@ -297,5 +297,5 @@ def test_a_partial_resume_does_not_reopen_a_finished_stage(tmp_path):
         'print("80 shards available; will pull at most 80 shards", flush=True)\n'
         'sys.exit(0)\n', encoding="utf-8")
     _, runner = run(script, experts=("python",))
-    assert mf.read(runner.run_dir).stage(st.DATA_CODE).status == mf.SKIPPED
+    assert mf.read(runner.run_dir).stage(st.DATA_CORPUS).status == mf.SKIPPED
 
