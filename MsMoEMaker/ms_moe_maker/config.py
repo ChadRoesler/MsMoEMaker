@@ -4,7 +4,7 @@ Takes a Recipe dataclass (possibly minimal — just experts) and fills in
 sensible defaults from the target hardware tier.  The result is a single
 frozen config that every pipeline module can consume.
 
-Env vars from FRAUNK_* and MSMOE_* override recipe values, so a human or
+Env vars from MSMOE_* and MSMOE_* override recipe values, so a human or
 seren-theatre can still tweak behaviour without editing files.
 """
 from __future__ import annotations
@@ -268,7 +268,7 @@ def _resolve_base(recipe, size: str, tier_name: str) -> Tuple[str, str]:
         return base_model, safe
 
     # 2. Env override
-    env_base = os.environ.get("FRAUNK_BASE_MODEL", "").strip()
+    env_base = os.environ.get("MSMOE_BASE_MODEL", "").strip()
     if env_base:
         safe, ablated = MODEL_SIZES.get(size, ("", ""))
         if "abliterated" in env_base or "Instruct" in env_base:
@@ -309,7 +309,7 @@ def _auto_name(recipe, expert_names: List[str]) -> str:
 def resolve_dryrun(dryrun: Optional[bool] = None) -> bool:
     """Is this a smallest-rung run?
 
-    THE FLAG HAS TO REACH HERE. build_config used to read FRAUNK_DRYRUN and
+    THE FLAG HAS TO REACH HERE. build_config used to read MSMOE_DRYRUN and
     nothing else, so `--dryrun` was inert: __main__ passed it to run_pipeline,
     which set `config.dryrun = True` AFTER build_config had already resolved
     every budget from the environment - and no stage module reads
@@ -321,11 +321,11 @@ def resolve_dryrun(dryrun: Optional[bool] = None) -> bool:
     wrote all of it into the PRODUCTION run directory rather than the dryrun
     one - so it also collided with, and could be mistaken for, a real run.
 
-    `None` means "ask the environment", which keeps FRAUNK_DRYRUN=1 working
+    `None` means "ask the environment", which keeps MSMOE_DRYRUN=1 working
     for the legacy subprocess path and for anyone who scripted it.
     """
     if dryrun is None:
-        return _env_bool("FRAUNK_DRYRUN", False)
+        return _env_bool("MSMOE_DRYRUN", False)
     return bool(dryrun)
 
 
@@ -394,7 +394,7 @@ def build_config(recipe, force: bool = False,
     collect_token_target = expert_token_budget * recipe.budget.collect_headroom
 
     # Agent samples
-    agent_override = os.environ.get("FRAUNK_AGENT_SAMPLES", "")
+    agent_override = os.environ.get("MSMOE_AGENT_SAMPLES", "")
     if agent_override:
         num_agent_samples = int(agent_override)
     elif dryrun:
@@ -437,17 +437,17 @@ def build_config(recipe, force: bool = False,
     load_4bit = quant in ("Q4_K_M", "Q4_0", "Q4_1") if tier_name == "nano" else False
 
     # Unsoth / vLLM
-    use_unsloth = _env_bool("FRAUNK_UNSLOTH", False)
-    use_vllm = _env_bool("FRAUNK_VLLM", False)
+    use_unsloth = _env_bool("MSMOE_UNSLOTH", False)
+    use_vllm = _env_bool("MSMOE_VLLM", False)
 
     # Optimiser
     optim = "adamw_8bit" if use_unsloth else "adamw_torch"
 
     # Gradient checkpointing
-    grad_ckpt = _env_bool("FRAUNK_GRAD_CKPT", False)
+    grad_ckpt = _env_bool("MSMOE_GRAD_CKPT", False)
 
     # Dense layers from env or recipe
-    env_dense = os.environ.get("FRAUNK_DENSE_LAYERS", "").strip()
+    env_dense = os.environ.get("MSMOE_DENSE_LAYERS", "").strip()
     if env_dense:
         mlp_only_layers = [int(x) for x in env_dense.split(",") if x.strip()]
     else:
@@ -458,10 +458,10 @@ def build_config(recipe, force: bool = False,
         )
 
     # Llama.cpp dir
-    llama_cpp_dir = os.environ.get("FRAUNK_LLAMA_CPP", "llama.cpp")
+    llama_cpp_dir = os.environ.get("MSMOE_LLAMA_CPP", "llama.cpp")
 
     # Smoke timeout
-    smoke_timeout_str = os.environ.get("FRAUNK_SMOKE_TIMEOUT", "")
+    smoke_timeout_str = os.environ.get("MSMOE_SMOKE_TIMEOUT", "")
     smoke_timeout = int(smoke_timeout_str) if smoke_timeout_str else 300
 
     # HF cache

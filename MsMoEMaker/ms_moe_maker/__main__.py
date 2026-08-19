@@ -635,7 +635,7 @@ def main(argv=None):
     # TWO MEANINGS, TWO FLAGS. --dryrun used to do both jobs badly: _cmd_build
     # printed a plan and returned 0 before ever calling the pipeline, while
     # run_pipeline's own signature documents dryrun as "run on the smallest
-    # rung for structural testing" and config reads FRAUNK_DRYRUN the same way.
+    # rung for structural testing" and config reads MSMOE_DRYRUN the same way.
     # So the flag that was supposed to select a cheap REAL build instead
     # guaranteed no build happened, and the smallest-rung path was unreachable
     # from the CLI entirely.

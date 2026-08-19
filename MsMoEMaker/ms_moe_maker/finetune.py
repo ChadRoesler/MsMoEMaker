@@ -161,8 +161,8 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
 
     if want_unsloth and not unsloth_available:
         raise RuntimeError(
-            "FRAUNK_UNSLOTH=1 but unsloth is not installed. "
-            "Either pip install unsloth or unset FRAUNK_UNSLOTH.")
+            "MSMOE_UNSLOTH=1 but unsloth is not installed. "
+            "Either pip install unsloth or unset MSMOE_UNSLOTH.")
 
     # Lazy import TRL
     try:
@@ -425,6 +425,6 @@ def _trim_to_token_budget(dataset, tokenizer, budget: int,
         print(f"   *** {label} is SHORT of budget: corpus holds only "
               f"{corpus/1e6:.2f}M. Trains on {steps}-step schedule vs "
               f"{budget // per_step}. Top up with ~{short_docs:.0f} more docs, "
-              f"or lower FRAUNK_TARGET_STEPS.")
+              f"or lower MSMOE_TARGET_STEPS.")
 
     return dataset.select(range(keep))

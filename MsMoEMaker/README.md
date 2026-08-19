@@ -309,11 +309,11 @@ which you can implement in any language you like.
 | `MSMOE_TIER` | Hardware tier (nano/xavier/spark) |
 | `MSMOE_LORA_R` | LoRA rank (integer) |
 | `HF_HOME` | HuggingFace cache location |
-| `FRAUNK_DRYRUN=1` | Smallest rung (same as `--dryrun`) |
-| `FRAUNK_BASE_MODEL` | Hard-code the base model instead of auto |
-| `FRAUNK_LLAMA_CPP` | Path to llama.cpp |
+| `MSMOE_DRYRUN=1` | Smallest rung (same as `--dryrun`) |
+| `MSMOE_BASE_MODEL` | Hard-code the base model instead of auto |
+| `MSMOE_LLAMA_CPP` | Path to llama.cpp |
 
-The `FRAUNK_*` names are inherited from the script this tool was carved out of
+The `MSMOE_*` names are inherited from the script this tool was carved out of
 and are still read for compatibility. New levers get `MSMOE_*`.
 
 ## Supported base models

@@ -82,7 +82,7 @@ def train_router(config, final_dir: str, safe_names: List[str],
                    "cache_dir": config.hf_home}
 
     # Router 4-bit escape hatch: load frozen experts in nf4, keep router fp32
-    if os.environ.get("FRAUNK_ROUTER_4BIT", "").lower() in ("1", "true", "yes"):
+    if os.environ.get("MSMOE_ROUTER_4BIT", "").lower() in ("1", "true", "yes"):
         from transformers import BitsAndBytesConfig
         load_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -91,10 +91,10 @@ def train_router(config, final_dir: str, safe_names: List[str],
             bnb_4bit_use_double_quant=True,
             llm_int8_skip_modules=["lm_head"],
         )
-        print("   FRAUNK_ROUTER_4BIT: frozen experts in nf4 (~28 GB), router stays fp32")
+        print("   MSMOE_ROUTER_4BIT: frozen experts in nf4 (~28 GB), router stays fp32")
 
     # Try direct load (moe_load) — streams from mmap, much lower peak memory
-    if os.environ.get("FRAUNK_DIRECT_LOAD", "").lower() in ("1", "true", "yes"):
+    if os.environ.get("MSMOE_DIRECT_LOAD", "").lower() in ("1", "true", "yes"):
         import moe_load
         moe = moe_load.load_direct(
             f"{config.output_root}/" + st.ARTIFACTS[st.STITCH],
@@ -113,8 +113,8 @@ def train_router(config, final_dir: str, safe_names: List[str],
         gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # Optionally skip dense-layer backward (saves memory for dense-heavy configs)
-    if os.environ.get("FRAUNK_SKIP_DENSE_BACKWARD", "").lower() in ("1", "true", "yes"):
-        print("   FRAUNK_SKIP_DENSE_BACKWARD: not forcing input grads")
+    if os.environ.get("MSMOE_SKIP_DENSE_BACKWARD", "").lower() in ("1", "true", "yes"):
+        print("   MSMOE_SKIP_DENSE_BACKWARD: not forcing input grads")
     else:
         moe.enable_input_require_grads()
 

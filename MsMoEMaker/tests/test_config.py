@@ -117,21 +117,21 @@ class TestEnvBool:
 
     def test_true_values(self):
         import os
-        old = os.environ.get("FRAUNK_DRYRUN")
+        old = os.environ.get("MSMOE_DRYRUN")
         try:
-            os.environ["FRAUNK_DRYRUN"] = "1"
-            assert config._env_bool("FRAUNK_DRYRUN", False) is True
-            assert config._env_bool("FRAUNK_DRYRUN", False) is True  # "true"
-            os.environ["FRAUNK_DRYRUN"] = "true"
-            assert config._env_bool("FRAUNK_DRYRUN", False) is True
+            os.environ["MSMOE_DRYRUN"] = "1"
+            assert config._env_bool("MSMOE_DRYRUN", False) is True
+            assert config._env_bool("MSMOE_DRYRUN", False) is True  # "true"
+            os.environ["MSMOE_DRYRUN"] = "true"
+            assert config._env_bool("MSMOE_DRYRUN", False) is True
         finally:
             if old is not None:
-                os.environ["FRAUNK_DRYRUN"] = old
+                os.environ["MSMOE_DRYRUN"] = old
             else:
-                os.environ.pop("FRAUNK_DRYRUN", None)
+                os.environ.pop("MSMOE_DRYRUN", None)
 
     def test_false_values(self):
-        assert config._env_bool("FRAUNK_NOPE", False) is False
+        assert config._env_bool("MSMOE_NOPE", False) is False
 
     def test_default_when_unset(self):
         import os
@@ -242,9 +242,9 @@ class TestBuildConfig:
     def test_build_config_sets_data_and_output_roots(self):
         from ms_moe_maker.recipe import Recipe, Expert, Source
         import os
-        old = os.environ.get("FRAUNK_DRYRUN")
+        old = os.environ.get("MSMOE_DRYRUN")
         try:
-            os.environ["FRAUNK_DRYRUN"] = "1"
+            os.environ["MSMOE_DRYRUN"] = "1"
             recipe = Recipe(
                 name="test", base="Qwen/Qwen2.5-0.5B",
                 experts=[Expert(
@@ -258,9 +258,9 @@ class TestBuildConfig:
             assert pc.output_root == roots["output"]
         finally:
             if old is not None:
-                os.environ["FRAUNK_DRYRUN"] = old
+                os.environ["MSMOE_DRYRUN"] = old
             else:
-                os.environ.pop("FRAUNK_DRYRUN", None)
+                os.environ.pop("MSMOE_DRYRUN", None)
 
 
 
@@ -308,7 +308,7 @@ class TestOneRunDirForEverybody:
 class TestDryrunReachesTheBudgets:
     """`--dryrun` has to change what actually runs, not just a flag.
 
-    It did not. build_config read FRAUNK_DRYRUN and nothing else, so the CLI
+    It did not. build_config read MSMOE_DRYRUN and nothing else, so the CLI
     flag was inert: __main__ passed it to run_pipeline, which set
     `config.dryrun = True` AFTER build_config had resolved every budget from
     the environment — and no stage module reads config.dryrun at all.
@@ -330,7 +330,7 @@ class TestDryrunReachesTheBudgets:
         return rec
 
     def test_the_flag_shrinks_the_budgets(self, monkeypatch):
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         rec = self._recipe()
         full = config.build_config(rec, dryrun=False)
         dry = config.build_config(rec, dryrun=True)
@@ -341,13 +341,13 @@ class TestDryrunReachesTheBudgets:
     def test_the_flag_moves_the_run_directory(self, monkeypatch):
         """A dryrun must not write where a real run lives — otherwise a resume
         picks up structural-test artifacts as if they were the real thing."""
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         rec = self._recipe()
         assert "dryrun" in config.build_config(rec, dryrun=True).output_root
         assert "dryrun" not in config.build_config(rec, dryrun=False).output_root
 
     def test_runner_and_builder_agree_on_the_dryrun_directory(self, monkeypatch):
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         rec = self._recipe()
         for flag in (True, False):
             roots = config.resolve_run_roots(rec, dryrun=flag)
@@ -355,15 +355,15 @@ class TestDryrunReachesTheBudgets:
             assert roots["output"] == cfg.output_root
 
     def test_the_env_var_still_works(self, monkeypatch):
-        """FRAUNK_DRYRUN is what the legacy subprocess path sets, and people
+        """MSMOE_DRYRUN is what the legacy subprocess path sets, and people
         have scripted it. None means 'ask the environment'."""
-        monkeypatch.setenv("FRAUNK_DRYRUN", "1")
+        monkeypatch.setenv("MSMOE_DRYRUN", "1")
         cfg = config.build_config(self._recipe())
         assert cfg.dryrun is True
         assert "dryrun" in cfg.output_root
 
     def test_an_explicit_false_beats_the_env_var(self, monkeypatch):
-        monkeypatch.setenv("FRAUNK_DRYRUN", "1")
+        monkeypatch.setenv("MSMOE_DRYRUN", "1")
         assert config.build_config(self._recipe(), dryrun=False).dryrun is False
 
 
@@ -390,14 +390,14 @@ class TestCorpusKnobs:
 
     def test_defaults_are_unchanged_when_unspecified(self, monkeypatch):
         """A recipe that says nothing must behave exactly as before."""
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         c = config.build_config(self._rec(), dryrun=False)
         assert c.min_samples_per_expert == 2_000
         assert c.num_code_samples == 100_000
         assert c.router_mix_total == 12_000
 
     def test_the_recipe_wins(self, monkeypatch):
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         c = config.build_config(self._rec(
             {"min_samples": 300, "max_samples": 3000,
              "router_mix_total": 800}), dryrun=False)
@@ -406,18 +406,18 @@ class TestCorpusKnobs:
 
     def test_a_small_real_run_is_not_a_dryrun(self, monkeypatch):
         """The distinction that matters: small volume, production directory."""
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         c = config.build_config(self._rec({"max_samples": 3000}), dryrun=False)
         assert c.dryrun is False
         assert "dryrun" not in c.output_root
 
     def test_the_recipe_still_wins_under_dryrun(self, monkeypatch):
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         c = config.build_config(self._rec({"min_samples": 42}), dryrun=True)
         assert c.min_samples_per_expert == 42
 
     def test_minus_one_means_you_decide(self, monkeypatch):
-        monkeypatch.delenv("FRAUNK_DRYRUN", raising=False)
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         explicit = config.build_config(
             self._rec({"min_samples": -1}), dryrun=True)
         implicit = config.build_config(self._rec(), dryrun=True)

@@ -281,7 +281,7 @@ def _check_exporter(pf: Preflight, config) -> None:
            f"convert_hf_to_gguf.py not found under {config.llama_cpp_dir}",
            "the build will finish and the export stage will be skipped — you "
            "still get the HF checkpoint. For a GGUF: git clone --depth 1 "
-           "https://github.com/ggml-org/llama.cpp and set FRAUNK_LLAMA_CPP")
+           "https://github.com/ggml-org/llama.cpp and set MSMOE_LLAMA_CPP")
 
 
 def _check_sources(pf: Preflight, recipe) -> None:

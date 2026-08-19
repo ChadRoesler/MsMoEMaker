@@ -63,10 +63,10 @@ def translate(recipe: Any, force: bool = False,
             tr.env["PYTORCH_CUDA_ALLOC_CONF"] = rt.alloc_conf
             agree("runtime.alloc_conf", rt.alloc_conf)
         if getattr(rt, "load_in_4bit", False):
-            tr.env["FRAUNK_LOAD_IN_4BIT"] = "1"
+            tr.env["MSMOE_LOAD_IN_4BIT"] = "1"
             agree("runtime.load_in_4bit", True)
         if getattr(rt, "direct_load", False):
-            tr.env["FRAUNK_DIRECT_LOAD"] = "1"
+            tr.env["MSMOE_DIRECT_LOAD"] = "1"
             agree("runtime.direct_load", True)
         if getattr(rt, "hardware_tier", ""):
             tr.env["MSMOE_TIER"] = rt.hardware_tier
@@ -77,17 +77,17 @@ def translate(recipe: Any, force: bool = False,
                 f"stitch and router stages assume float16 weights")
 
     if bud is not None and getattr(bud, "target_steps", None):
-        tr.env["FRAUNK_TARGET_STEPS"] = str(bud.target_steps)
+        tr.env["MSMOE_TARGET_STEPS"] = str(bud.target_steps)
         agree("budget.target_steps", bud.target_steps)
 
     if moe is not None:
         dense = getattr(moe, "dense_layers", "auto")
         if dense != "auto":
-            tr.env["FRAUNK_DENSE_LAYERS"] = ",".join(str(x) for x in dense)
+            tr.env["MSMOE_DENSE_LAYERS"] = ",".join(str(x) for x in dense)
             agree("moe.dense_layers", dense)
 
     if dryrun:
-        tr.env["FRAUNK_DRYRUN"] = "1"
+        tr.env["MSMOE_DRYRUN"] = "1"
 
     gates = getattr(recipe, "gates", None)
     if gates is not None and getattr(gates, "main_evals", "") == "manual":

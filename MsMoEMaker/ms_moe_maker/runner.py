@@ -338,7 +338,7 @@ class Runner:
         env = dict(os.environ)
         env.update(self.translation.env)
         if self.dryrun:
-            env["FRAUNK_DRYRUN"] = "1"
+            env["MSMOE_DRYRUN"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
 
         self.ev.started(recipe_id=self.manifest.recipe_id,
