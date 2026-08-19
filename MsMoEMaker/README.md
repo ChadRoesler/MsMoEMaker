@@ -37,6 +37,24 @@ install imports cleanly.
 trl — everything the build stages actually touch. The stitcher is vendored, so
 there is nothing else to check out alongside it.
 
+### Who needs which
+
+The machine that *trains* does not have to be the machine you *use*. Rent a GPU
+for the expensive part, or have someone hand you the specialists, and the rest
+still works:
+
+| You have | Install | What runs |
+|---|---|---|
+| A recipe | `ms-moe-maker` | `init`, `validate`, `describe`, `build --plan` |
+| A finished MoE or GGUF | `ms-moe-maker` | ...and **`export`** and **`smoke`** |
+| Specialists someone trained | `ms-moe-maker[train]` | ...and `stitch`, `router`, `eval` |
+| A box with a GPU | `ms-moe-maker[train]` | the whole build |
+
+The second row is the one worth knowing about. `export` and `smoke` shell out to
+llama.cpp and import nothing but the standard library — so a person handed a
+finished MoE can convert it to GGUF and **prove it generates**, with no ML stack
+installed at all. Release CI asserts that, so it stays true.
+
 ## Use
 
 ```bash

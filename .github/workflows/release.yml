@@ -90,6 +90,34 @@ jobs:
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
+      # THE OTHER SHAPE, PROVEN WITHOUT PAYING FOR IT.
+      #
+      # The matrix installs `bare`, which is the shape whose promises matter
+      # most - but it means nothing exercises [train], and an extra that names
+      # a package that does not exist, or pins an impossible version, fails at
+      # the worst possible moment: on someone else's GPU box, after they typed
+      # the command the README told them to.
+      #
+      # Actually installing it costs ~2 GB of torch on every push. `--dry-run`
+      # runs the real resolver against the real index and writes the plan it
+      # WOULD execute, downloading no wheels - so the failure mode this
+      # catches (unresolvable extra) is caught, and the one it does not
+      # (a wheel that installs but does not import) is already covered on the
+      # box that runs a build.
+      - name: Prove [train] resolves (no wheels downloaded)
+        run: |
+          pip install --dry-run --quiet --report /tmp/train.json '.[train]'
+          python - <<'PY'
+          import json
+          plan = json.load(open("/tmp/train.json"))
+          names = sorted(i["metadata"]["name"].lower() for i in plan["install"])
+          assert "torch" in names, f"[train] resolved without torch: {names[:20]}"
+          print(f"[train] resolves: {len(names)} packages, torch included")
+          PY
+        working-directory: MsMoEMaker
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+
       - name: Exercise the CLI OUT OF TREE
         # NOT "import and construct the app". ms-moe-maker has no app, and that is
         # the design rather than an omission: it is a build pipeline's CLI and
@@ -110,7 +138,11 @@ jobs:
           import json
           d = json.load(open("describe.json"))
           assert d["name"] == "ms-moe-maker", d
-          assert set(d["commands"]) == {"build", "validate", "describe"}, d
+          # Pinned EXACTLY, not as a subset: adding a verb is a release
+          # decision, same as bumping the manifest schema. If this fails
+          # because a verb was added on purpose, update the set on purpose.
+          assert set(d["commands"]) == {
+              "init", "build", "smoke", "eval", "validate", "describe"}, d
           # The run manifest schema is a PUBLISHED contract - seren-theatre
           # reads it with an independent implementation and refuses a version
           # it does not understand. Bumping it is a release decision, so it
@@ -139,14 +171,57 @@ jobs:
           HEAVY = ("torch", "transformers", "datasets", "trl", "accelerate",
                    "fastapi", "uvicorn", "seren")
           reqs = distribution("ms-moe-maker").requires or []
-          heavy = [r for r in reqs
+
+          # THE PROMISE IS ABOUT THE BASE INSTALL, so the check is too.
+          #
+          # `pip install ms-moe-maker` must pull nothing heavy - that is what
+          # keeps `validate` runnable before you go near a GPU box. An EXTRA
+          # does not touch that: it is opt-in and additive, and nobody gets it
+          # unless they type it.
+          #
+          # A requirement carrying an `extra == "..."` marker is conditional by
+          # construction, so it is excluded here. Anything without a marker is
+          # unconditional and is exactly what this check exists to catch.
+          unconditional = [r for r in reqs if "extra ==" not in r]
+          heavy = [r for r in unconditional
                    if any(h in r.split(";")[0].lower() for h in HEAVY)]
           assert not heavy, (
-              f"ms-moe-maker declares {heavy}. The CLI and the contract stay small "
-              f"enough to run on a laptop with no GPU - the trainer lives in "
-              f"whatever venv the pipeline trains in. That split is the whole "
-              f"reason this package is separate.")
+              f"ms-moe-maker declares {heavy} UNCONDITIONALLY. The CLI and the "
+              f"contract stay small enough to run on a laptop with no GPU. If "
+              f"a build stage needs this, it belongs in the [train] extra.")
+
+          # AND THE OTHER HALF. Loosening a check without adding one is how a
+          # guarantee quietly becomes a habit. The split is a two-sided claim -
+          # base is clean AND there is a declared, installable way to get what
+          # a build box needs - so assert both. Otherwise [train] could be
+          # dropped tomorrow and nothing would notice until someone tried to
+          # follow the README.
+          extras = distribution("ms-moe-maker").metadata.get_all("Provides-Extra") or []
+          assert "train" in extras, (
+              f"the [train] extra is gone (extras: {extras}). Without it there "
+              f"is no machine-readable statement of what a build box needs, "
+              f"and that knowledge falls back to prose.")
+          train_reqs = [r for r in reqs if 'extra == "train"' in r]
+          assert any("torch" in r for r in train_reqs), (
+              f"[train] does not declare torch: {train_reqs}")
+
+          # THE THIRD TIER, WHICH IS FREE AND WORTH KEEPING. export and smoke
+          # shell out to llama.cpp and import nothing but stdlib, so somebody
+          # handed a finished MoE can convert it and PROVE IT GENERATES on a
+          # bare install. That is not an accident to be discovered later, it is
+          # a property, so it gets a test.
+          import subprocess, sys as _sys
+          probe = subprocess.run(
+              [_sys.executable, "-c",
+               "import ms_moe_maker.export as e; assert e.smoke_gguf and e.export_gguf"],
+              capture_output=True, text=True)
+          assert probe.returncode == 0, (
+              "ms_moe_maker.export no longer imports on a base install:\n"
+              + probe.stderr[-2000:])
+
           print(f"deps declared: {reqs}")
+          print(f"extras: {extras}")
+          print("export/smoke import clean on the base install")
           print(f"imports clean (ms-moe-maker {ms_moe_maker.__version__})")
           PY
 

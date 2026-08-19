@@ -78,52 +78,69 @@ class _Tee:
                 pass
 
 
-# ONE SOURCE OF TRUTH. There used to be three lists of verbs that disagreed:
-# this dict said five, `_describe.COMMANDS` said three, and the module
-# docstring above said "Three verbs: build / smoke / eval". _describe is the
-# canonical one - it is stdlib-only by design so it can answer on a
-# half-installed tool, and its docstring says stagehand checks it to see which
-# contract version the thing it forked speaks. A front-end trusting it would
-# have concluded `eval` and `smoke` did not exist.
+def _corpus_kinds():
+    """The registered corpus kinds. Read from the registry, not a literal, so a
+    kind published by a plugin shows up in `describe` without an edit here."""
+    from . import corpus
+    return corpus.names()
+
+
+# ONE SOURCE OF TRUTH, AND MERGED RATHER THAN RETYPED.
 #
-# The integration test named test_describe_commands_are_current asserted this
-# dict against a hardcoded literal in its own body, so it agreed with the wrong
-# copy and stayed green through the whole drift.
+# There used to be three lists of verbs that disagreed: this dict said five,
+# `_describe.COMMANDS` said three, and the module docstring said "Three verbs".
+# _describe is canonical - it is stdlib-only by design so it can answer on a
+# half-installed tool, and stagehand reads it to check which contract version
+# the thing it forked speaks.
+#
+# The first fix rebuilt this dict by naming _describe's keys ONE BY ONE, and
+# promptly dropped `requires` - a published contract key that release CI
+# asserts. Hand-copying a subset of a source of truth is not using the source
+# of truth, it is making a second one that starts out correct.
+#
+# So: start from _describe.DESCRIBE whole, then add the keys that only the
+# installed CLI can answer. A key added over there can never be lost here.
 DESCRIBE = {
-    "name": _d.NAME,
+    **_d.DESCRIBE,
     "version": _version(),
-    "kinds": ["hf", "stack", "synth", "local"],
+    "kinds": _corpus_kinds(),
     "gates": ["auto", "manual", "skip"],
     "templates": ["code", "dnd", "math", "culinary"],
     "tiers": ["nano", "xavier", "spark"],
-    "commands": list(_d.COMMANDS),
-    "events": list(_d.EVENTS),
-    "modes": ["routing", "quality", "all"],
-    "manifest_schema_version": _d.DESCRIBE["manifest_schema_version"],
-    "recipe_schema_version": _d.DESCRIBE["recipe_schema_version"],
-    "description": _d.DESCRIPTION,
+    "modes": list(_d.EVAL_MODES),
 }
 
 
-def _load_recipe(path):
-    """Load and validate a recipe file. Returns (Recipe, errs, warns) or exits."""
+def _load_recipe(path, quiet: bool = False):
+    """Load and validate a recipe file. Returns (Recipe, errs, warns).
+
+    `quiet` exists because under --json stdout belongs to the event stream and
+    nothing else may write to it. Prose goes to stderr or nowhere; a stray
+    print here would corrupt the very format a consumer is parsing.
+    """
     from .recipe import load, validate as validate_recipe
-    
+
+    def out(msg):
+        if quiet:
+            print(msg, file=sys.stderr)
+        else:
+            print(msg)
+
     try:
         rec, parse_warns = load(path)
     except Exception as exc:
-        print(f"FAILED to parse {path}: {exc}")
+        out(f"FAILED to parse {path}: {exc}")
         return None, None, None
-    
+
     errs, warns = validate_recipe(rec)
     warns = parse_warns + warns
-    
+
     if errs:
-        print(f"\nRecipe has {len(errs)} error(s):")
+        out(f"\nRecipe has {len(errs)} error(s):")
         for e in errs:
-            print(f"  ✗ {e}")
+            out(f"  ✗ {e}")
         return None, errs, warns
-    
+
     return rec, errs, warns
 
 
@@ -515,32 +532,67 @@ def _print_eval_report(report):
 
 
 def _cmd_validate(args):
-    """Validate recipe structure only — no pipeline, no GPU needed."""
-    rec, errs, warns = _load_recipe(args.recipe)
+    """Validate recipe structure only — no pipeline, no GPU, no network.
+
+    --json WORKS HERE TOO, and that is the point of the flag. It used to be
+    wired into `build` alone, so `ms-moe-maker validate r.yaml --json` was
+    accepted by argparse and then printed prose - a machine consumer got an
+    empty event stream and no way to tell "valid" from "the flag did nothing".
+    A wire format that only some verbs speak is not a wire format.
+
+    Validate has no stages, so the stream is short by nature: started, a
+    warning per warning, an error per error, and a terminal done. Terminal is
+    the part that matters - a consumer following the stream needs one event
+    that means "there will be no more".
+    """
+    events = Events(enabled=bool(args.json))
+    say = events.say if args.json else print
+
+    rec, errs, warns = _load_recipe(args.recipe, quiet=bool(args.json))
     if rec is None:
+        events.emit("started", recipe=str(args.recipe))
+        for e in (errs or []):
+            events.error(stage="validate", message=e)
+        if errs is None:
+            events.error(stage="validate", message=f"could not parse {args.recipe}")
+        events.done(ok=False, errors=len(errs or []) or 1, warnings=0)
         return 1
-    
-    print(f"\n  Recipe: {rec.name or '(auto-filled)'}  [{rec.recipe_id()}]")
-    print(f"  Base:   {rec.base or '(auto-filled from tier)'}")
-    print(f"  Size:   {rec.size}")
-    print(f"  Experts: {[e.name for e in rec.experts]}")
-    print(f"  Template: {rec.template or '(none)'}")
-    
+
+    events.emit("started", recipe=str(args.recipe), recipe_id=rec.recipe_id(),
+                name=rec.name, size=rec.size,
+                experts=[e.name for e in rec.experts])
+
+    say(f"\n  Recipe: {rec.name or '(auto-filled)'}  [{rec.recipe_id()}]")
+    say(f"  Base:   {rec.base or '(auto-filled from tier)'}")
+    say(f"  Size:   {rec.size}")
+    say(f"  Experts: {[e.name for e in rec.experts]}")
+    say(f"  Template: {rec.template or '(none)'}")
+
     if warns:
-        print(f"\n  WARNINGS ({len(warns)}):")
+        say(f"\n  WARNINGS ({len(warns)}):")
         for w in warns:
-            print(f"    · {w}")
+            say(f"    · {w}")
+            events.warning(w)
     else:
-        print("\n  ✓ No warnings.")
-    
+        say("\n  No warnings.")
+
+    # Refusals are a legitimate answer, not a failure: they are fields the
+    # recipe asked for that this build cannot honour. Named on the wire so a
+    # consumer can show them without parsing prose.
+    from .levers import translate
+    refusals = translate(rec).refusals
+    if refusals:
+        events.refused(refusals)
+        say(f"\n  REFUSED ({len(refusals)}):")
+        for r in refusals:
+            say(f"    ✗ {r}")
+
     # `errs` is always empty here - _load_recipe returns rec=None whenever it
-    # is not, so this line is only ever reached on a valid recipe. Printing
-    # "0 errors" was theatre; say what is actually true.
-    print(f"\n  Valid. {len(warns)} warning(s).")
+    # is not - so printing "0 errors" was theatre. Say what is true.
+    say(f"\n  Valid. {len(warns)} warning(s).")
+    events.done(ok=True, warnings=len(warns), refusals=len(refusals))
     return 0
 
-
-# ── main ──────────────────────────────────────────────────────────────────────
 
 # The dispatch table, at module scope so it is one definition rather than a
 # local that only main() can see. `describe` is handled before argparse (zero

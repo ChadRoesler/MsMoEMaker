@@ -327,3 +327,85 @@ class TestInitRoundTrip:
     def test_unknown_template_is_refused(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert main(["init", "--template", "nope"]) == 1
+
+
+class TestDescribeIsAContract:
+    """`describe` is what release CI and stagehand read. Keys are promises."""
+
+    def test_no_key_from_describe_is_lost(self):
+        """The regression that broke release CI.
+
+        __main__.DESCRIBE was rebuilt by naming _describe's keys one at a
+        time, which dropped `requires` - a published key the release workflow
+        asserts. Hand-copying a subset of a source of truth is not using the
+        source of truth, it is quietly making a second one. Now it is merged,
+        so a key added over there cannot be lost here.
+        """
+        from ms_moe_maker import _describe
+        missing = set(_describe.DESCRIBE) - set(DESCRIBE)
+        assert not missing, f"describe dropped published key(s): {missing}"
+
+    def test_requires_is_empty(self):
+        """ms-moe-maker requires nothing of anyone. That is the laptop
+        promise, stated on the wire rather than only in a docstring."""
+        assert DESCRIBE["requires"] == []
+
+    def test_describe_is_one_line_of_json(self, capsys):
+        """The Starwright contract: one line, exit 0, zero side effects."""
+        assert main(["--describe"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("\n") == 1
+        json.loads(out)
+
+    def test_kinds_come_from_the_registry(self):
+        from ms_moe_maker import corpus
+        assert DESCRIBE["kinds"] == corpus.names()
+
+
+class TestJsonIsAWireFormatEverywhere:
+    """--json has to mean the same thing on every verb that accepts it."""
+
+    def test_validate_emits_events(self, recipe_yaml, capsys):
+        assert main(["validate", str(recipe_yaml), "--json"]) == 0
+        lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+        kinds = [json.loads(l)["event"] for l in lines]
+        assert kinds, "--json produced no events at all"
+        assert kinds[0] == "started"
+        assert kinds[-1] == "done", (
+            "a consumer following the stream needs one terminal event that "
+            "means 'there will be no more'")
+
+    def test_validate_events_are_one_object_per_line(self, recipe_yaml, capsys):
+        main(["validate", str(recipe_yaml), "--json"])
+        for line in capsys.readouterr().out.splitlines():
+            if line.strip():
+                json.loads(line)          # raises if prose leaked to stdout
+
+    def test_a_bad_recipe_still_terminates_the_stream(self, tmp_path, capsys):
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("schema_version: 1\nname: x\nexperts: []\n", encoding="utf-8")
+        assert main(["validate", str(bad), "--json"]) == 1
+        lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+        events = [json.loads(l) for l in lines]
+        assert events[-1]["event"] == "done"
+        assert events[-1]["ok"] is False
+        assert any(e["event"] == "error" for e in events)
+
+    def test_prose_never_reaches_stdout_under_json(self, recipe_yaml, capsys):
+        """stdout belongs to the machine. A stray print corrupts the format
+        the consumer is parsing."""
+        main(["validate", str(recipe_yaml), "--json"])
+        cap = capsys.readouterr()
+        for line in cap.out.splitlines():
+            if line.strip():
+                json.loads(line)
+
+    def test_every_emitted_kind_is_declared(self, recipe_yaml, capsys):
+        """_describe.EVENTS is a wire contract: a consumer that meets an
+        undeclared kind has no rule for it."""
+        from ms_moe_maker import _describe
+        main(["validate", str(recipe_yaml), "--json"])
+        for line in capsys.readouterr().out.splitlines():
+            if line.strip():
+                kind = json.loads(line)["event"]
+                assert kind in _describe.EVENTS, f"undeclared event {kind!r}"
