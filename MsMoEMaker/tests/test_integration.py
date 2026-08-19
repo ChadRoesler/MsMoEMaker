@@ -1,0 +1,329 @@
+"""CLI integration tests — end-to-end verification of the ms-moe-maker commands.
+
+These tests run against the actual recipe.example.yaml file to verify the
+entire command path from describe → validate → build (dryrun) works without
+missing wiring.  They don't touch a GPU or download data — just confirm the
+CLI contract is sound.
+"""
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from ms_moe_maker.__main__ import main, DESCRIBE
+
+EXAMPLE = Path(__file__).resolve().parent.parent / "recipe.example.yaml"
+
+
+# -- describe ----------------------------------------------------------------
+
+
+def test_describe_returns_valid_json():
+    """--describe outputs parseable JSON and exits 0."""
+    rc = main(["--describe"])
+    assert rc == 0
+    keys = sorted(DESCRIBE.keys())
+    assert "tiers" in keys
+    assert "templates" in keys
+    assert "commands" in keys
+
+
+def test_describe_tiers_match_hardware():
+    """The tier list reflects the current hardware tiers."""
+    from ms_moe_maker import hardware
+
+    tier_names = DESCRIBE.get("tiers", [])
+    assert set(tier_names) == set(hardware.TIERS.keys())
+    # No stale tier names
+    assert "dgx" not in tier_names
+
+
+def test_describe_templates_match_registry():
+    """The template list matches the template registry."""
+    from ms_moe_maker import template
+
+    tpl_names = DESCRIBE.get("templates", [])
+    assert set(tpl_names) == set(template.TEMPLATES.keys())
+
+
+def test_describe_commands_are_current():
+    """The verbs we advertise, the verbs argparse accepts, and the verbs we can
+    actually dispatch are all the same list.
+
+    THIS TEST USED TO CHECK THE WRONG SOURCE. It asserted __main__.DESCRIBE
+    against a hardcoded literal in its own body - one copy of the list against
+    a second copy of the same list - so it stayed green while a THIRD copy,
+    _describe.COMMANDS (the one _describe's own docstring says stagehand reads
+    to check contract version), drifted to three verbs against __main__'s five.
+    The test with exactly the right name was structurally unable to catch the
+    drift it was named for.
+
+    Three sources, checked against each other, so any future drift fails here.
+    """
+    from ms_moe_maker import _describe
+    from ms_moe_maker.__main__ import COMMAND_HANDLERS
+
+    assert list(DESCRIBE["commands"]) == list(_describe.COMMANDS)
+    # `describe` short-circuits before argparse, so it is the one verb with no
+    # handler. Everything else must be dispatchable.
+    assert set(COMMAND_HANDLERS) == set(_describe.COMMANDS) - {"describe"}
+
+
+def test_every_advertised_verb_actually_dispatches(tmp_path, monkeypatch):
+    """Checks the table main() USES, not a table that merely exists.
+
+    Learned the hard way, twice in one day. The first version of this test
+    compared __main__.DESCRIBE to a literal in its own body - two copies of
+    the same list agreeing with each other. The fix compared DESCRIBE to
+    COMMAND_HANDLERS... while main() was still dispatching through a LOCAL
+    cmd_map that had never been updated, so `init` was advertised, accepted by
+    argparse, and then rejected as an unknown command. Both times the test
+    checked a source that was not the one doing the work.
+
+    So: drive main() for every verb and assert none of them dies with "unknown
+    command". A verb we advertise has to run.
+    """
+    from ms_moe_maker import _describe
+
+    monkeypatch.chdir(tmp_path)
+    recipe = tmp_path / "r.yaml"
+    shutil.copy(EXAMPLE, recipe)
+
+    for verb in _describe.COMMANDS:
+        argv = [verb] if verb in ("describe", "init") else [verb, str(recipe)]
+        try:
+            main(argv)
+        except SystemExit as exc:
+            # argparse only exits for a usage error; a verb that runs and
+            # returns a non-zero code is fine here.
+            assert exc.code in (None, 0), (
+                f"verb {verb!r} is advertised but main() rejected it")
+        except Exception:
+            # A real runtime failure (no torch, no data) is not what this
+            # test is about - it only asserts the verb is wired up.
+            pass
+
+
+def test_eval_modes_are_current():
+    """Same rule for --mode: advertised, accepted and honoured must agree."""
+    from ms_moe_maker import _describe
+    assert list(DESCRIBE["modes"]) == list(_describe.EVAL_MODES)
+
+
+# -- validate ----------------------------------------------------------------
+
+
+@pytest.fixture
+def recipe_yaml(tmp_path, monkeypatch):
+    """A copy of the example recipe in a clean directory."""
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "recipe.yaml"
+    shutil.copy(EXAMPLE, target)
+    return target
+
+
+def test_validate_success(recipe_yaml):
+    """A valid recipe returns exit 0 and prints validation info."""
+    rc = main(["validate", str(recipe_yaml)])
+    assert rc == 0
+
+
+def test_validate_invalid_recipe():
+    """A broken recipe returns non-zero."""
+    rc = main(["validate", "nonexistent.yaml"])
+    assert rc == 1
+
+
+# -- build (dryrun) ----------------------------------------------------------
+
+
+def test_plan_runs_anywhere(recipe_yaml):
+    """--plan resolves everything and runs nothing. No GPU, no torch."""
+    assert main(["build", str(recipe_yaml), "--plan"]) == 0
+
+
+def test_build_writes_a_manifest(recipe_yaml, tmp_path):
+    """A build writes msmoe-run.json, even when the build fails.
+
+    THIS TEST USED TO ASSERT NOTHING. It globbed for an output directory,
+    assigned the result to a variable, and ended - with a comment reading
+    "Might not create dir if dryrun skips it; at least assert no exception"
+    standing in for the assertion. It was green the whole time no manifest was
+    written by anything at all, because __main__ had stopped calling Runner and
+    Runner is the only thing that writes one.
+
+    Failure is deliberately the case under test: the manifest is the heartbeat
+    a watcher reads, so it has to exist for a run that DIED, or a dashboard
+    cannot tell "crashed" from "never started".
+    """
+    from ms_moe_maker.manifest import MANIFEST_NAME
+    from ms_moe_maker.config import build_config
+    from ms_moe_maker.recipe import load
+
+    rc = main(["build", str(recipe_yaml), "--dryrun"])
+    rec, _ = load(str(recipe_yaml))
+    # dryrun=True here because that is what the run used. Before the flag was
+    # threaded, a --dryrun build wrote into the PRODUCTION directory, so this
+    # line agreed with it by accident.
+    run_dir = Path(build_config(rec, dryrun=True).output_root)
+
+    manifest = run_dir / MANIFEST_NAME
+    assert manifest.is_file(), (
+        f"no {MANIFEST_NAME} in {run_dir} - a run that produces no manifest is "
+        f"invisible to every watcher, and this is exactly the regression that "
+        f"shipped when _cmd_build stopped going through Runner")
+    body = json.loads(manifest.read_text(encoding="utf-8"))
+    assert body["stages"], "a manifest with no stages tells a watcher nothing"
+    assert "ok" in body
+
+
+# -- recipe parsing end-to-end ------------------------------------------------
+
+
+def test_recipe_example_parses_clean():
+    """recipe.example.yaml loads without errors or warnings."""
+    from ms_moe_maker.recipe import load
+
+    rec, warnings = load(str(EXAMPLE))
+    assert rec is not None
+    # Should have at least 3 experts from the example
+    assert len(rec.experts) >= 3
+
+
+def test_recipe_example_has_correct_tier():
+    """The recipe's hardware_tier is set by template auto-fill."""
+    from ms_moe_maker.recipe import load
+
+    rec, _ = load(str(EXAMPLE))
+    # The example recipe doesn't set template: directly, but the tier
+    # should still have a sensible default (xavier is the middle tier)
+    assert rec.runtime.hardware_tier in ("nano", "xavier", "spark")
+
+
+def test_recipe_example_size_is_auto():
+    """The example recipe uses size=auto and resolves from tier."""
+    from ms_moe_maker.recipe import load
+    from ms_moe_maker import config as cfg_module
+
+    rec, _ = load(str(EXAMPLE))
+    assert rec.size == "auto"
+    cfg = cfg_module.build_config(rec)
+    # The resolved size should be a valid model size string
+    assert cfg.size in cfg_module.MODEL_SIZES
+
+
+# -- template apply via recipe.load --------------------------------------------
+
+
+def test_code_template_applies_clean():
+    """The 'code' template fills all expected fields."""
+    from ms_moe_maker.recipe import load
+    from ms_moe_maker.template import get_template
+
+    # Get the code template to see what it provides
+    tpl = get_template("code")
+    assert tpl is not None
+    assert tpl["default_tier"] == "spark"
+    assert tpl["preferred_size"] == "3B"
+    assert len(tpl.get("default_experts", [])) >= 2
+
+
+def test_dnd_template_applies_clean():
+    """The 'dnd' template fills all expected fields."""
+    from ms_moe_maker.template import get_template
+
+    tpl = get_template("dnd")
+    assert tpl is not None
+    assert tpl["default_tier"] == "nano"
+    assert tpl["preferred_size"] == "0.5B"
+    assert len(tpl.get("default_experts", [])) >= 2
+
+
+def test_template_unknown_raises():
+    """Using an unknown template name raises ValueError."""
+    from ms_moe_maker.template import get_template
+
+    assert get_template("nonexistent") is None
+
+
+def test_recipe_load_with_template_field():
+    """A recipe with template: field resolves its tier correctly."""
+    from io import StringIO
+    from ms_moe_maker.recipe import parse
+
+    yaml_text = """
+schema_version: 1
+name: test-with-template
+template: dnd
+"""
+    rec, warnings = parse(__import__("yaml").safe_load(yaml_text))
+    assert rec is not None
+    assert rec.template == "dnd"
+    # Template should have wired the tier to runtime.hardware_tier
+    assert rec.runtime.hardware_tier == "nano"
+
+
+def test_recipe_load_code_template():
+    """A recipe with template: code resolves spark tier."""
+    from ms_moe_maker.recipe import parse
+    import yaml
+
+    yaml_text = """
+schema_version: 1
+name: code-test
+template: code
+"""
+    rec, warnings = parse(yaml.safe_load(yaml_text))
+    assert rec is not None
+    assert rec.template == "code"
+    assert rec.runtime.hardware_tier == "spark"
+    assert len(rec.experts) >= 2
+
+
+# -- init --------------------------------------------------------------------
+
+class TestInitRoundTrip:
+    """What init writes, validate must accept.
+
+    This caught a real one immediately: the first version joined the source
+    fields with spaces instead of commas, so `init` emitted invalid YAML and
+    the on-ramp fell over on its own first step. A scaffolder whose output does
+    not parse is worse than no scaffolder, because the user assumes the tool
+    works and the recipe is their fault.
+    """
+
+    def test_bare_init_output_validates(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        assert main(["init"]) == 0
+        out = capsys.readouterr().out
+        (tmp_path / "r.yaml").write_text(out, encoding="utf-8")
+        assert main(["validate", str(tmp_path / "r.yaml")]) == 0
+
+    @pytest.mark.parametrize("tpl", ["code", "dnd", "math", "culinary"])
+    def test_every_template_round_trips(self, tpl, tmp_path, monkeypatch):
+        """Every template we advertise has to produce a valid recipe."""
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / f"{tpl}.yaml"
+        assert main(["init", "--template", tpl, "-o", str(target)]) == 0
+        assert main(["validate", str(target)]) == 0
+
+    def test_output_is_parseable_yaml(self, tmp_path, monkeypatch):
+        import yaml
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "r.yaml"
+        main(["init", "--template", "dnd", "-o", str(target)])
+        body = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert body["schema_version"] == 1
+        assert body["template"] == "dnd"
+
+    def test_it_refuses_to_clobber_without_force(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "r.yaml"
+        target.write_text("mine\n", encoding="utf-8")
+        assert main(["init", "-o", str(target)]) == 1
+        assert target.read_text(encoding="utf-8") == "mine\n"
+
+    def test_unknown_template_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert main(["init", "--template", "nope"]) == 1

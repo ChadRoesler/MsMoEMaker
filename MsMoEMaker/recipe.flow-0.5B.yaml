@@ -1,0 +1,80 @@
+# ── Ms.MoE — 0.5B end-to-end flow run ────────────────────────────────────────
+#
+# A REAL build, every stage, small enough to watch it finish. This is not
+# `--dryrun`: the artifacts are real, they land in the production run directory
+# (msmoe_run_0.5B), and the GGUF at the end is a model you can actually load.
+# The only thing turned down is the volume.
+#
+# What it exercises, in order:
+#   preflight -> data.corpus -> finetune x2 -> stitch -> router -> export.gguf
+#
+# and then, separately:
+#   ms-moe-maker eval  recipe.flow-0.5B.yaml --mode routing
+#
+# WHY THESE SOURCES. `stack` with Python and C# is the path your 0.5B rung
+# already proved, and both are dense in the corpus (~18,000 files/shard for
+# Python), so collection is minutes rather than a 45 GB scan. PowerShell is
+# deliberately NOT here: it is the sparse one (~141 files/shard) and it would
+# dominate the wall clock of a run whose whole point is to show you the shape.
+#
+# Two experts is the minimum that is genuinely a MoE. Add a third when you want
+# a stronger routing signal - the enrichment numbers get more interesting the
+# more domains the router has to tell apart.
+
+schema_version: 1
+name: flow-0.5B
+
+size: 0.5B
+# base: ''            # blank -> the 0.5B tier default (a Qwen2.5-Coder 0.5B)
+
+experts:
+  - name: python
+    source: { kind: stack, language: Python }
+  - name: csharp
+    source: { kind: stack, language: C# }
+
+# ── the knobs that make it a SMALL real run, not a fake one ─────────────────
+# Without these you get the production defaults: 100,000 samples per expert and
+# a 2,000-sample floor, which is a real build you will not finish this evening.
+corpus:
+  min_samples: 300          # fail the stage below this, rather than train on scraps
+  max_samples: 3000         # cap per expert
+  router_mix_total: 800     # rows in the router's stratified mix
+
+budget:
+  target_steps: 150         # the rung the proven 0.5B run used
+  max_seq_length: 1024      # half the default; halves the step cost
+  per_device_batch: 4
+  grad_accum: 2
+  collect_headroom: 1.5     # gather 1.5x the tokens the steps will consume
+
+moe:
+  experts_per_tok: 2
+
+runtime:
+  hardware_tier: spark
+
+gates:
+  # 'manual' cannot be honoured by the in-package builder and will be REFUSED
+  # out loud - the build runs end to end with no boundary a gate could pause
+  # at. Left on 'auto' so the run does not start with a refusal.
+  main_evals: auto
+
+eval:
+  mode: all                 # routing + quality
+  num_samples: 16
+  dead_threshold: 1.2       # minimum router enrichment before an expert is dead
+
+# ── other source kinds, for when you want them ──────────────────────────────
+# I could not reach github.com or huggingface.co from where this was written,
+# so every remote id below is a SHAPE, not a verified repo. Check them before
+# use rather than trusting me for them.
+#
+#   - name: llama_docs
+#     source: { kind: gh, repo: OWNER/REPO, glob: "docs/**/*.md" }
+#
+#   - name: my_notes
+#     source: { kind: local, path: /mnt/nvme/corpora/notes, glob: "**/*.md" }
+#
+#   - name: lore
+#     source: { kind: hf, repo: OWNER/DATASET, text_field: text }

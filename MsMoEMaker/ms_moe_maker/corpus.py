@@ -54,7 +54,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 # care. Kept as data so `--describe` can report the whole schema without the
 # caller knowing any kind names.
 KNOWN_FIELDS = ("repo", "split", "text_field", "language", "max_shards",
-                "teacher", "generator", "examples", "path", "glob")
+                "teacher", "generator", "examples", "path", "glob", "ref",
+                "subdir")
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,19 @@ register(Kind(
     notes="For a domain no corpus exists to scrape. This is how the MCP-trace "
           "expert is built, and it is equally how you would build one on "
           "encounter design or worked exam answers."))
+
+register(Kind(
+    name="gh",
+    summary="files out of a public GitHub repository",
+    requires=("repo",),
+    notes="`repo` is owner/name. `glob` picks the files (default **/*.md), "
+          "`ref` picks a branch or tag (default: the repo's default branch), "
+          "`subdir` narrows to one directory. Fetched as a single tarball "
+          "from codeload, not a git clone - one request, no git binary, and "
+          "no .git history to download. The corpus that is documentation, a "
+          "wiki, or a specific project's source rather than a slice of a "
+          "general code dump: use this when the text you want IS a particular "
+          "repository, and `stack` when you want a language in general."))
 
 register(Kind(
     name="local",

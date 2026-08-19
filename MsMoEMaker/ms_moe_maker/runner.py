@@ -47,7 +47,7 @@ from . import corpus
 from . import manifest as mf
 from . import stages as st
 from .events import Events
-from .levers import Translation, resolved_roots
+from .levers import Translation
 
 # -- what the child says, and what it means ----------------------------------
 # Quoted from the pipeline's own prints. Each maps a line to (stage_id, status).
@@ -130,12 +130,14 @@ class Runner:
 
     def __init__(self, recipe: Any, pipeline: Path, translation: Translation,
                  events: Events, cwd: Optional[Path] = None,
-                 dryrun: bool = False, python: Optional[str] = None) -> None:
+                 dryrun: bool = False, python: Optional[str] = None,
+                 builder: bool = False) -> None:
         self.recipe = recipe
-        self.pipeline = Path(pipeline)
+        self.pipeline = Path(pipeline) if pipeline else None
+        self.builder = builder
         self.translation = translation
         self.ev = events
-        self.cwd = Path(cwd or self.pipeline.parent)
+        self.cwd = Path(cwd or (self.pipeline.parent if self.pipeline else Path.cwd()))
         self.dryrun = dryrun
         # WHICH INTERPRETER RUNS THE PIPELINE. Defaults to ours, and that
         # default was a bug for exactly as long as it was the only option.
@@ -150,7 +152,19 @@ class Runner:
         # dependency in the other venv.
         self.python = python or sys.executable
 
-        roots = resolved_roots(recipe.size, dryrun)
+        # ONE RESOLVER, NOT TWO. This used to call
+        # resolve_roots(recipe.size, dryrun) with the RAW recipe size, which is
+        # "auto" in any recipe that lets the tier pick - while the builder gets
+        # its paths from build_config, which resolves "auto" to a concrete size
+        # first. The two then disagreed: the manifest was written to
+        # msmoe_run_auto while every artifact landed in msmoe_run_7B.
+        #
+        # A manifest in a different directory from the run it describes is
+        # worse than no manifest. A watcher finds an empty-looking run and a
+        # resume finds no artifacts, and both look like "nothing happened".
+        # Ask build_config once; it is the thing that decides.
+        from . import config as cfg_module
+        roots = cfg_module.resolve_run_roots(recipe, dryrun=dryrun)
         self.run_dir = self.cwd / roots["output"]
         self.data_root = self.cwd / roots["data"]
 
@@ -230,27 +244,93 @@ class Runner:
     # -- the run ------------------------------------------------------------
 
     def run(self) -> int:
-        env = dict(os.environ)
-        env.update(self.translation.env)
-        if self.dryrun:
-            env["FRAUNK_DRYRUN"] = "1"
-        # Line-buffer the child so we see its output as it happens rather than
-        # in 8 KiB gulps. Without this a stage boundary can arrive minutes
-        # after the child crossed it, and the dashboard lags reality.
-        env["PYTHONUNBUFFERED"] = "1"
+        """Execute the build.
 
-        cmd = [self.python, str(self.pipeline.name)]
+        If self.pipeline is None or the pipeline file doesn't exist, runs
+        the in-package builder (builder.py).  Otherwise forks the pipeline
+        as a subprocess (legacy wrap-then-carve mode).
+        """
+        if self.pipeline is None or not self.pipeline.is_file():
+            return self.run_builder()
+        return self.run_subprocess()
+
+    def run_builder(self) -> int:
+        """Run the in-package builder (builder.py) directly.
+
+        This is the new path: no subprocess, the manifest is updated
+        in-process by the builder's own manifest writes + the Runner's
+        bookkeeping via the manifest reference.
+        """
+        from . import builder as bld_mod
+
+        # Connect builder stage events to manifest bookkeeping
+        def _on_stage(stage_id, status, note=""):
+            self._set(stage_id, status, note=note)
+
         self.ev.started(recipe_id=self.manifest.recipe_id,
                         name=self.manifest.name, size=self.manifest.size,
                         experts=self.manifest.experts,
                         run_dir=str(self.run_dir), data_root=str(self.data_root),
-                        command=" ".join(cmd), cwd=str(self.cwd),
+                        command="ms-moe-builder", cwd=str(self.cwd),
                         env_applied=self.translation.env,
                         agreed=self.translation.agreed)
-        self.ev.say(f"→ {' '.join(cmd)}   (cwd {self.cwd})")
+        self.ev.say("→ builder (in-process)")
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._set(st.PREFLIGHT, mf.RUNNING)
+
+        try:
+            result = bld_mod.run_pipeline(
+                self.recipe,
+                force=self.translation.force,
+                dryrun=self.dryrun,
+                callback=bld_mod.StageCallback(notify=_on_stage),
+            )
+
+            ok = result.ok
+            if not ok:
+                self._finish_current(mf.FAILED, note=result.message or "builder failed")
+                self.ev.error(stage=result.failed_stage or "build",
+                              message=result.message or "builder failed")
+            else:
+                self._finish_current(mf.DONE)
+                self.ev.say(result.message or "build complete")
+
+        except Exception as exc:
+            self._finish_current(mf.FAILED, note=str(exc))
+            self.ev.error(stage=self._current or "build", message=str(exc))
+            ok = False
+
+        self.manifest.finished = time.time()
+        self.manifest.ok = ok
+        self._flush()
+        self.ev.done(ok=ok, run_dir=str(self.run_dir),
+                     stages_done=self.manifest.done_count,
+                     stages_total=len(self.manifest.stages),
+                     refusals=len(self.manifest.refusals))
+        return 0 if ok else 1
+
+    def run_subprocess(self) -> int:
+        """Legacy: fork the pipeline as a subprocess (wrap-then-carve)."""
+        env = dict(os.environ)
+        env.update(self.translation.env)
+        if self.dryrun:
+            env["FRAUNK_DRYRUN"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+
+        self.ev.started(recipe_id=self.manifest.recipe_id,
+                        name=self.manifest.name, size=self.manifest.size,
+                        experts=self.manifest.experts,
+                        run_dir=str(self.run_dir), data_root=str(self.data_root),
+                        command=str(self.pipeline.name), cwd=str(self.cwd),
+                        env_applied=self.translation.env,
+                        agreed=self.translation.agreed)
+
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self._set(st.PREFLIGHT, mf.RUNNING)
+
+        cmd = [self.python, str(self.pipeline.name)]
+        self.ev.say(f"→ {' '.join(cmd)}   (cwd {self.cwd})")
 
         proc = subprocess.Popen(
             cmd, cwd=str(self.cwd), env=env,

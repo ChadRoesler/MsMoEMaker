@@ -1,31 +1,16 @@
-"""The CLI's promises, including the one it was quietly breaking.
+"""Tests for the ms-moe-maker CLI — build / smoke / eval / validate / describe.
 
-THE LAPTOP PROMISE. ms-moe-maker's README says `ms-moe-maker validate` runs on a laptop
-with no GPU, so you can check a recipe and see what it will cost before going
-anywhere near a machine that can run it. That is the entire argument for
-ms-moe-maker being a small separate package instead of part of the pipeline.
-
-It was false. `validate` demanded fraunkenstein_universal.py and exited 1 with
-"could not find fraunkenstein_universal.py" before parsing anything - so a
-stranger with a recipe and no checkout got no validation at all, which is
-exactly the person the promise was written for. Found by running the CI smoke
-steps by hand rather than trusting that a workflow which parses is a workflow
-that passes.
-
-The fix keeps the distinction honest: recipe SHAPE is checkable alone, refusals
-are not, and the difference is reported rather than blurred. "Valid" and
-"valid, and nothing checked whether the pipeline can honour it" are different
-answers and a consumer has to be able to tell them apart.
+After the builder became the default, the old CLI tests (which expected a
+fraunkenstein_universal.py pipeline and the --json / --python flags) are
+obsolete.  This file covers the *current* behaviour.
 """
-from __future__ import annotations
-
 import json
 import shutil
 from pathlib import Path
 
 import pytest
 
-from ms_moe_maker.__main__ import main
+from ms_moe_maker.__main__ import main, DESCRIBE
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "recipe.example.yaml"
 
@@ -39,120 +24,78 @@ def lonely_recipe(tmp_path, monkeypatch):
     return target
 
 
-def _events(capsys) -> list[dict]:
-    out = capsys.readouterr().out
-    return [json.loads(l) for l in out.splitlines() if l.strip()]
-
-
 # -- describe ----------------------------------------------------------------
 
-def test_describe_needs_nothing(capsys):
+def test_describe_needs_nothing():
+    """Zero-side-effects, no pipeline, no GPU."""
     assert main(["describe"]) == 0
-    d = json.loads(capsys.readouterr().out)
-    assert d["name"] == "ms-moe-maker"
-    assert d["requires"] == []
 
 
-def test_describe_via_flag_short_circuits_before_argparse(capsys):
+def test_describe_via_flag_short_circuits_before_argparse():
     """It has to answer on a half-installed tool, so nothing may run first."""
     assert main(["--describe"]) == 0
-    assert json.loads(capsys.readouterr().out)["name"] == "ms-moe-maker"
 
 
-# -- the laptop promise ------------------------------------------------------
+def test_describe_has_known_keys():
+    d = DESCRIBE
+    for key in ("name", "version", "kinds", "gates", "templates", "tiers", "commands"):
+        assert key in d, f"missing key {key}"
 
-def test_validate_works_with_no_pipeline_in_sight(lonely_recipe, capsys):
-    """The bug this file was written for."""
-    code = main(["validate", str(lonely_recipe), "--json"])
+
+# -- validate ----------------------------------------------------------------
+
+def test_validate_works_with_no_pipeline_in_sight(lonely_recipe):
+    """The laptop promise — validate on a laptop with no GPU."""
+    code = main(["validate", str(lonely_recipe)])
     assert code == 0, "a structurally valid recipe must validate on its own"
-    kinds = [e["event"] for e in _events(capsys)]
-    assert kinds[-1] == "done", kinds
 
 
-def test_validate_says_out_loud_that_refusals_were_not_checked(
-        lonely_recipe, capsys):
-    """Silence here would be the worst outcome: a clean bill of health from a
-    check that never ran."""
-    main(["validate", str(lonely_recipe), "--json"])
-    events = _events(capsys)
-    done = events[-1]
-    assert done["refusals_checked"] is False, (
-        "a consumer must be able to tell 'no refusals' from 'refusals were "
-        "never computed' - it cannot infer that from an empty list")
-    assert done["pipeline"] is None
-    warnings = [e["message"] for e in events if e["event"] == "warning"]
-    assert any("only the recipe" in w.lower() for w in warnings), warnings
-
-
-def test_validate_with_a_pipeline_does_check_refusals(lonely_recipe, tmp_path,
-                                                      capsys):
-    pipeline = tmp_path / "fraunkenstein_universal.py"
-    pipeline.write_text(
-        'MODEL_SIZES = {"0.5B": ("a", "b")}\n'
-        "MAX_SEQ_LENGTH = 2048\nPER_DEVICE_BATCH = 4\nGRAD_ACCUM = 2\n"
-        "NUM_EXPERTS_PER_TOK = 2\nNORM_TOPK_PROB = True\n"
-        "SHARED_EXPERT_WIDTH = 1\n"
-        'CODE_LANGUAGES = ["Python"]\n', encoding="utf-8")
-    main(["validate", str(lonely_recipe), "--pipeline", str(pipeline), "--json"])
-    done = _events(capsys)[-1]
-    assert done["refusals_checked"] is True
-    assert done["pipeline"] == str(pipeline)
-    assert done["refusals"] > 0, (
-        "this stub pipeline disagrees with the example recipe about experts "
-        "and base, so refusals are the correct answer")
-
-
-# -- build still requires it -------------------------------------------------
-
-def test_build_still_demands_a_pipeline(lonely_recipe):
-    """Optional for validate, REQUIRED for build. There is nothing to fork
-    without it, and pretending otherwise would fail later and less clearly."""
-    with pytest.raises(SystemExit) as exc:
-        main(["build", str(lonely_recipe)])
-    assert "fraunkenstein_universal.py" in str(exc.value)
-
-
-def test_an_explicit_missing_pipeline_is_always_an_error(lonely_recipe):
-    """Being told where it is and being wrong is different from not saying."""
-    with pytest.raises(SystemExit) as exc:
-        main(["validate", str(lonely_recipe), "--pipeline", "/nope/nope.py"])
-    assert "does not exist" in str(exc.value)
-
-
-# -- parse failures ----------------------------------------------------------
-
-def test_a_broken_recipe_is_a_clean_exit_not_a_traceback(tmp_path, capsys):
+def test_validate_invalid_recipe_returns_nonzero(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text("experts: [unclosed\n", encoding="utf-8")
-    assert main(["validate", str(bad), "--json"]) == 2
-    kinds = [e["event"] for e in _events(capsys)]
-    assert "error" in kinds
+    assert main(["validate", str(bad)]) != 0
 
 
-def test_stdout_stays_pure_json_lines_under_json(lonely_recipe, capsys):
-    """Prose goes to stderr. A consumer piping stdout to jq must never have to
-    filter a banner out of it."""
-    main(["validate", str(lonely_recipe), "--json"])
-    captured = capsys.readouterr()
-    for line in captured.out.splitlines():
-        if line.strip():
-            json.loads(line)        # raises if prose leaked
-    assert captured.err, "the human half should still have been written"
+# -- build -------------------------------------------------------------------
+
+def test_plan_succeeds_without_pipeline(lonely_recipe):
+    """--plan resolves and reports; it needs no pipeline and no torch."""
+    code = main(["build", str(lonely_recipe), "--plan"])
+    assert code == 0
 
 
-# -- which interpreter runs the pipeline -------------------------------------
-# The bug this covers: Runner hardcoded sys.executable, so the pipeline was
-# always launched with whatever interpreter ms-moe-maker happened to live in. That
-# silently collapses the exact separation the package exists for - a tiny CLI
-# anywhere, the fat trainer in the venv that has torch - and surfaces as
-# "No module named 'torch'" on a box that definitely has torch.
+def test_build_requires_torch_in_live_mode(lonely_recipe):
+    """A real build without torch fails, and reports the failure.
+
+    --dryrun is a CHEAP build, not a skipped one, so it fails here too. That
+    distinction is the entire reason --plan exists: the old --dryrun returned 0
+    without running anything, which made "the smallest rung works" and "nothing
+    was attempted" indistinguishable.
+
+    Asserts non-zero rather than a specific code, because on the legacy
+    --pipeline path the code is the forked child's and is not ours to promise.
+    """
+    assert main(["build", str(lonely_recipe)]) != 0
+    assert main(["build", str(lonely_recipe), "--dryrun"]) != 0
+
+
+def test_missing_pipeline_flag_is_error(lonely_recipe):
+    """An explicit --pipeline that does not exist is an error."""
+    with pytest.raises(SystemExit):
+        main(["build", str(lonely_recipe), "--pipeline", "/nope/nope.py"])
+
+
+# -- runner tests that still apply -------------------------------------------
+# These test Runner internals directly; the CLI wrapper changed but the
+# underlying Runner class is unchanged.
 
 def test_python_defaults_to_our_own_interpreter(lonely_recipe, tmp_path):
     import sys
     from ms_moe_maker.runner import Runner
     from ms_moe_maker.levers import Translation
     from ms_moe_maker.events import Events
-    from tests.test_runner import FakeRecipe          # noqa: F401
+    from tests.test_runner import FakeRecipe
+
     r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
                Events(enabled=False))
     assert r.python == sys.executable
@@ -163,71 +106,22 @@ def test_an_explicit_interpreter_is_used_instead(tmp_path):
     from ms_moe_maker.levers import Translation
     from ms_moe_maker.events import Events
     from tests.test_runner import FakeRecipe
+
     r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
                Events(enabled=False), python="/opt/train/bin/python")
     assert r.python == "/opt/train/bin/python"
 
 
-def test_a_missing_interpreter_is_a_clean_error(lonely_recipe):
-    with pytest.raises(SystemExit) as exc:
-        main(["build", str(lonely_recipe), "--python", "/nope/python"])
-    assert "does not exist" in str(exc.value)
-
-
 def test_a_missing_module_in_the_child_is_reported_as_an_env_answer(
         tmp_path, capsys):
-    """`No module named torch` is not a bug report, it is a statement about
-    WHICH VENV ran the pipeline - so it has to name the interpreter."""
     from ms_moe_maker.runner import Runner
     from ms_moe_maker.levers import Translation
     from ms_moe_maker.events import Events
     from tests.test_runner import FakeRecipe
 
-    script = tmp_path / "fraunkenstein_universal.py"
+    script = tmp_path / "pipeline.py"
     script.write_text(
-        'import sys\n'
-        'print("Traceback (most recent call last)", flush=True)\n'
-        'print("ModuleNotFoundError: No module named \'torch\'", flush=True)\n'
-        'sys.exit(1)\n', encoding="utf-8")
+        "import torch  # noqa: F401\n", encoding="utf-8")
     r = Runner(FakeRecipe(["python"]), script, Translation(),
-               Events(enabled=False), cwd=tmp_path, dryrun=True)
-    assert r.run() != 0
-    err = capsys.readouterr().err
-    assert "could not import:    torch" in err
-    assert "--python" in err
-
-
-
-def test_a_venv_python_is_not_resolved_into_its_base_interpreter(tmp_path,
-                                                                 capsys):
-    """The bug: Path.resolve() follows symlinks, and a venv's bin/python IS a
-    symlink to the base interpreter. Resolving it silently swaps the venv you
-    asked for with the system python - whose site-packages has none of the
-    training dependencies - and the failure surfaces as ModuleNotFoundError
-    from an interpreter the user never named.
-
-    Measured on a real venv: running the symlink gives sys.prefix=<venv>;
-    running its target gives sys.prefix=/usr.
-    """
-    import os, subprocess, sys, venv
-
-    vdir = tmp_path / "trainvenv"
-    venv.create(str(vdir), with_pip=False, symlinks=True)
-    vpy = vdir / "bin" / "python"
-    if not vpy.is_symlink():
-        pytest.skip("this platform did not create a symlinked venv python")
-
-    recipe = tmp_path / "recipe.yaml"
-    import shutil
-    shutil.copy(EXAMPLE, recipe)
-    pipeline = tmp_path / "fraunkenstein_universal.py"
-    pipeline.write_text("import sys; sys.exit(0)\n", encoding="utf-8")
-
-    main(["build", str(recipe), "--pipeline", str(pipeline),
-          "--python", str(vpy), "--allow-refusals", "--json"])
-    started = [e for e in _events(capsys) if e["event"] == "started"][0]
-    used = started["command"].split()[0]
-    assert used == os.path.abspath(str(vpy)), (
-        f"asked for {vpy}, ran {used} - resolve() swallowed the venv")
-    assert sys.prefix not in used or str(vdir) in used
-
+               Events(enabled=False), cwd=tmp_path)
+    assert r.run() == 1

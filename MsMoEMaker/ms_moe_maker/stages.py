@@ -128,15 +128,31 @@ def plan(experts: List[str],
 # manifest against the disk instead of trusting it - and what lets the runner
 # recognise that a stage was skipped rather than run.
 #
-# `{expert}` is substituted for per-expert stages. The `qwen_coder_` prefix is
-# the pipeline's own naming and is quoted here rather than reimplemented,
-# because when the carve renames it, THIS is the one place that has to change
-# and a test will say so.
+# THE NAMES ARE OURS NOW. They used to be `qwen_coder_{expert}`,
+# `fraunkenstein_moe_untrained` and `fraunkenstein_agent_final`, inherited from
+# the script this tool was carved out of. Both halves of that were wrong for a
+# published tool, for the same reason `data.code` was renamed to `data.corpus`
+# further up this file:
+#
+#   * `qwen_coder_` bakes in a MODEL FAMILY and a DOMAIN. A recipe that builds
+#     a Monster Manual expert on a non-Qwen base wrote its output to a
+#     directory calling itself a Qwen coder, which tells that user they are
+#     using someone else's tool - permanently, on their own disk.
+#   * `fraunkenstein_` is a project name from a repo the installer does not
+#     ship and the user has never heard of.
+#
+# `specialist_` is what the code already calls them everywhere
+# (fine_tune_specialist, specialist_dirs), so this is the codebase agreeing
+# with itself rather than a new coinage.
+#
+# Renaming is a breaking change for anything holding old paths - which, this
+# early and with no stranger's run on disk, costs one rebuild and buys every
+# future user a directory that is about their project instead of ours.
 ARTIFACTS: Dict[str, str] = {
-    STITCH: "fraunkenstein_moe_untrained",
-    ROUTER: "fraunkenstein_agent_final",
+    STITCH: "moe_untrained",
+    ROUTER: "moe_trained",
 }
-FINETUNE_ARTIFACT = "qwen_coder_{expert}"
+FINETUNE_ARTIFACT = "specialist_{expert}"
 
 
 def artifact_for(stage_id: str) -> str | None:

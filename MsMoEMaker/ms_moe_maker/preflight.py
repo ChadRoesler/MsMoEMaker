@@ -1,0 +1,292 @@
+"""Preflight — find out what will go wrong BEFORE the expensive part.
+
+WHAT PREFLIGHT USED TO BE. A print of the config stamp and free disk, then
+`cb.stage(PREFLIGHT, done, "config stamped")`. Nothing was checked. Every
+failure that could have been caught in two seconds was instead discovered at
+the stage that needed it:
+
+    base model missing / gated / typo'd  -> stage 3, after corpus collection
+    torch not installed                  -> stage 3
+    llama.cpp absent                     -> stage 6, after ALL the training
+    output root not writable             -> stage 3
+    local corpus path does not exist     -> stage 1, but as a bare traceback
+
+The llama.cpp one is the whole argument by itself. A user finishes six hours of
+fine-tuning, the stitch lands, the router trains, and THEN the run reports that
+the converter was never on the box. Everything before it was correct and none
+of it was wasted, which is exactly what makes it infuriating: the answer was
+knowable before a single token was read.
+
+TWO SEVERITIES, AND THE DIFFERENCE MATTERS.
+
+  FAIL  the build cannot succeed. Stop now, having spent nothing.
+  WARN  the build can succeed but will do less than the recipe asks - a
+        missing llama.cpp means no GGUF, which is a real result for someone
+        who only wants the HF checkpoint.
+
+A warning that stops the build is a failure wearing a friendly word, and a
+failure reported as a warning is worse. So they are separate, and only FAIL
+stops anything.
+
+EVERY FAILURE CARRIES ITS REMEDY. "base model not found" is a fact; "base model
+not found - check the id, or run `huggingface-cli login` if it is gated" is an
+answer. The person reading this is usually about to lose an evening, and the
+difference between those two strings is whether they lose it.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from .evalrecord import FAIL, PASS, UNMEASURABLE
+
+WARN = "warn"
+
+
+@dataclass
+class Check:
+    """One preflight answer."""
+    name: str
+    status: str            # pass | warn | fail | unmeasurable
+    detail: str = ""
+    remedy: str = ""
+
+    @property
+    def blocking(self) -> bool:
+        return self.status == FAIL
+
+
+@dataclass
+class Preflight:
+    checks: List[Check] = field(default_factory=list)
+
+    def add(self, name: str, status: str, detail: str = "",
+            remedy: str = "") -> None:
+        self.checks.append(Check(name, status, detail, remedy))
+
+    @property
+    def ok(self) -> bool:
+        return not any(c.blocking for c in self.checks)
+
+    @property
+    def failures(self) -> List[Check]:
+        return [c for c in self.checks if c.status == FAIL]
+
+    @property
+    def warnings(self) -> List[Check]:
+        return [c for c in self.checks if c.status == WARN]
+
+
+def _check_training_stack(pf: Preflight) -> bool:
+    """Can this box train at all? Returns True if torch imported."""
+    try:
+        import torch
+    except ImportError:
+        pf.add("training stack", FAIL,
+               "torch is not installed",
+               "pip install 'ms-moe-maker[train]' on the box that builds. "
+               "`validate` and `build --plan` do not need it.")
+        return False
+
+    try:
+        import transformers  # noqa: F401
+    except ImportError:
+        pf.add("training stack", FAIL,
+               "transformers is not installed",
+               "pip install 'ms-moe-maker[train]'")
+        return False
+
+    try:
+        from safetensors import safe_open  # noqa: F401
+    except ImportError:
+        # Named separately because it is the one people miss: the stitcher
+        # streams tensors out of safetensors files one at a time, and that is
+        # what keeps peak memory at one shard instead of the whole model.
+        pf.add("training stack", FAIL,
+               "safetensors is not installed",
+               "pip install safetensors — the stitcher streams from "
+               "safetensors, it is not an optional accelerator")
+        return False
+
+    cuda = torch.cuda.is_available()
+    pf.add("training stack", PASS if cuda else WARN,
+           f"torch {torch.__version__}, CUDA "
+           f"{'available' if cuda else 'NOT available'}",
+           "" if cuda else "training on CPU is possible and very slow; check "
+                           "your CUDA install if this box has a GPU")
+    return True
+
+
+def _check_base_model(pf: Preflight, config, offline: bool = False) -> None:
+    """Is the base model actually reachable? Stage 3 is too late to ask."""
+    base = config.base
+    if not base:
+        pf.add("base model", FAIL, "no base model resolved",
+               "set `base:` in the recipe or leave `size:` so a tier default "
+               "can fill it")
+        return
+
+    if os.path.isdir(base):
+        pf.add("base model", PASS, f"local path {base}")
+        return
+
+    if offline:
+        pf.add("base model", UNMEASURABLE, f"{base} (offline, not checked)")
+        return
+
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        pf.add("base model", UNMEASURABLE,
+               f"{base} — huggingface_hub not installed, cannot check",
+               "pip install 'ms-moe-maker[train]'")
+        return
+
+    try:
+        HfApi().model_info(base)
+        pf.add("base model", PASS, f"{base} is reachable")
+    except Exception as exc:            # noqa: BLE001 - any failure is the same answer
+        name = exc.__class__.__name__
+        remedy = ("check the repo id for typos; if it is gated, accept the "
+                  "licence on the model page and run `huggingface-cli login`")
+        if "Connection" in name or "Timeout" in name:
+            remedy = ("no network to huggingface.co — pre-cache the model, or "
+                      "point `base:` at a local directory")
+        pf.add("base model", FAIL, f"{base} — {name}: {str(exc)[:120]}", remedy)
+
+
+def _check_roots(pf: Preflight, config) -> None:
+    """Writable, and enough room. Both are cheap to ask and awful to discover."""
+    for label, path in (("data root", config.data_root),
+                        ("output root", config.output_root)):
+        # PROBE THE NEAREST EXISTING PARENT, do not create the directory.
+        # Preflight runs under `--plan` too, and a command whose whole promise
+        # is "resolve everything, run nothing" must not leave run directories
+        # scattered around someone's home folder as the price of telling them
+        # what would happen.
+        probe_dir = os.path.abspath(path)
+        while probe_dir and not os.path.isdir(probe_dir):
+            parent = os.path.dirname(probe_dir)
+            if parent == probe_dir:
+                break
+            probe_dir = parent
+
+        # ASK, DO NOT POKE. This used to write a probe file and delete it,
+        # which is a stronger test and the wrong trade. Some perfectly usable
+        # filesystems refuse to create a dotfile or refuse the unlink - network
+        # mounts and bridged volumes especially - and the probe then reported
+        # "not writable" for a directory that builds fine.
+        #
+        # The two failure modes are not symmetric. A false NO blocks a build
+        # that would have worked, at the very first stage, with a wrong reason.
+        # A false YES costs nothing: the build fails later with the real errno
+        # from the real write. So prefer the check that cannot produce the
+        # expensive mistake, and leave nothing behind either way.
+        if not os.access(probe_dir, os.W_OK):
+            pf.add(label, FAIL, f"{path} is not writable",
+                   "check permissions, or set roots: in the recipe")
+            continue
+
+        try:
+            free_gb = shutil.disk_usage(probe_dir).free / 2 ** 30
+        except OSError:
+            pf.add(label, UNMEASURABLE, f"{path} (free space unreadable)")
+            continue
+
+        # Rough floor. A specialist per expert plus the stitched MoE plus a
+        # GGUF is many times the base model, and running out mid-stitch leaves
+        # a half-written checkpoint that _done() may then treat as finished.
+        need = _estimated_gb(config)
+        if free_gb < need:
+            pf.add(label, FAIL,
+                   f"{path}: {free_gb:.0f} GB free, ~{need:.0f} GB needed",
+                   "free space or move the roots to a bigger volume. Running "
+                   "out mid-stitch can leave a partial checkpoint that looks "
+                   "finished to a resume.")
+        else:
+            pf.add(label, PASS, f"{path}: {free_gb:.0f} GB free "
+                                f"(~{need:.0f} GB estimated)")
+
+
+def _estimated_gb(config) -> float:
+    """A floor, not a forecast. Deliberately crude and deliberately stated."""
+    try:
+        billions = float(str(config.size).rstrip("Bb") or 1)
+    except ValueError:
+        billions = 1.0
+    n = max(len(config.expert_names or []), 1)
+    per_model = billions * 2          # bf16 bytes per param, in GB
+    return per_model * (n + 2) + 5    # specialists + stitched + trained + slack
+
+
+def _check_exporter(pf: Preflight, config) -> None:
+    """llama.cpp — a WARNING, because the checkpoint is still a real result."""
+    conv = os.path.join(config.llama_cpp_dir, "convert_hf_to_gguf.py")
+    if os.path.exists(conv):
+        pf.add("gguf exporter", PASS, config.llama_cpp_dir)
+        return
+    pf.add("gguf exporter", WARN,
+           f"convert_hf_to_gguf.py not found under {config.llama_cpp_dir}",
+           "the build will finish and the export stage will be skipped — you "
+           "still get the HF checkpoint. For a GGUF: git clone --depth 1 "
+           "https://github.com/ggml-org/llama.cpp and set FRAUNK_LLAMA_CPP")
+
+
+def _check_sources(pf: Preflight, recipe) -> None:
+    """Anything checkable about the corpora, without fetching them."""
+    from . import corpus as corpus_mod
+
+    for e in recipe.experts:
+        src = getattr(e, "source", None)
+        kind = getattr(src, "kind", "") if src else ""
+        if not kind:
+            pf.add(f"source/{e.name}", FAIL, "no source kind",
+                   f"give {e.name} a source: with a kind of "
+                   f"{', '.join(corpus_mod.names())}")
+            continue
+        if corpus_mod.get(kind) is None:
+            pf.add(f"source/{e.name}", FAIL, f"unknown kind {kind!r}",
+                   f"known kinds: {', '.join(corpus_mod.names())}")
+            continue
+        if kind == "local":
+            path = getattr(src, "path", "") or ""
+            if not os.path.isdir(path):
+                pf.add(f"source/{e.name}", FAIL,
+                       f"local path does not exist: {path}",
+                       "point `path:` at a directory that exists on THIS box")
+                continue
+            pf.add(f"source/{e.name}", PASS, f"local {path}")
+        else:
+            pf.add(f"source/{e.name}", PASS, f"kind={kind}")
+
+
+def run(config, recipe, offline: bool = False,
+        need_exporter: bool = True) -> Preflight:
+    """Every cheap question worth asking before the expensive part starts."""
+    pf = Preflight()
+    have_torch = _check_training_stack(pf)
+    _check_roots(pf, config)
+    _check_sources(pf, recipe)
+    if have_torch:
+        _check_base_model(pf, config, offline=offline)
+    if need_exporter:
+        _check_exporter(pf, config)
+    return pf
+
+
+def render(pf: Preflight) -> List[str]:
+    """Human lines. Failures last, so the thing to act on is nearest the prompt."""
+    icon = {PASS: "ok  ", WARN: "warn", FAIL: "FAIL", UNMEASURABLE: "?   "}
+    lines = [f"   [{icon.get(c.status, '?')}] {c.name:16} {c.detail}"
+             for c in pf.checks if c.status in (PASS, UNMEASURABLE)]
+    for c in pf.warnings:
+        lines.append(f"   [warn] {c.name:16} {c.detail}")
+        if c.remedy:
+            lines.append(f"          -> {c.remedy}")
+    for c in pf.failures:
+        lines.append(f"   [FAIL] {c.name:16} {c.detail}")
+        if c.remedy:
+            lines.append(f"          -> {c.remedy}")
+    return lines

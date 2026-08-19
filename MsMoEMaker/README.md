@@ -1,4 +1,4 @@
-# Ms.MoE
+# Ms.MoE Maker
 
 **Multi-Specified Mixture of Experts.** Five deliberate experts instead of a
 hundred lottery tickets.
@@ -23,136 +23,291 @@ someone else gets their own Ms.MoE.
 ## Install
 
 ```bash
-pip install ms-moe-maker
+pip install ms-moe-maker            # recipe-side: describe, validate, plan
+pip install ms-moe-maker[train]     # on the box that actually builds
 ```
 
-That gets you the CLI and the contract — about a megabyte, no torch. The heavy
-machinery lives in the pipeline this forks, in whatever venv you train in. That
-split is the point: `ms-moe-maker validate` runs on a laptop, so you can check a
-recipe and see what it will cost before going near a machine that can run it.
+The base install depends only on `pyyaml`, and that is the point:
+`ms-moe-maker validate` and `build --plan` run on a laptop with no GPU, so you
+can check a recipe and read what it will cost before going near a machine that
+can run it. Every torch import in the package is inside a function, so the base
+install imports cleanly.
+
+`[train]` adds torch, transformers, datasets, safetensors, accelerate, peft and
+trl — everything the build stages actually touch. The stitcher is vendored, so
+there is nothing else to check out alongside it.
 
 ## Use
 
 ```bash
-ms-moe-maker describe                  # one line of JSON, exit 0, no side effects
-ms-moe-maker validate recipe.yaml      # parse, check, translate — touches nothing
-ms-moe-maker build recipe.yaml         # run it
-ms-moe-maker build recipe.yaml --json  # JSON Lines on stdout, prose on stderr
+# Start from nothing
+ms-moe-maker init > recipe.yaml
+ms-moe-maker init --template dnd > recipe.yaml
+
+# Discover what's available (zero side-effects, returns JSON)
+ms-moe-maker describe
+
+# Validate recipe structure — no pipeline, no GPU, no network
+ms-moe-maker validate recipe.yaml
+
+# Resolve config + stage plan and run NOTHING. Also no GPU.
+ms-moe-maker build recipe.yaml --plan
+
+# Run the full pipeline (needs torch, GPU, training venv)
+ms-moe-maker build recipe.yaml
+
+# JSON Lines events on stdout, prose on stderr
+ms-moe-maker build recipe.yaml --json
+
+# A real build on the smallest rung — cheap, but still a build
+ms-moe-maker build recipe.yaml --dryrun
+
+# Smoke-test the GGUF — checks it generates real tokens
+ms-moe-maker smoke recipe.yaml
+
+# Does the router prefer each expert on its own ground? (dead-expert check)
+ms-moe-maker eval recipe.yaml --mode routing
+
+# Does it answer better than one expert alone?
+ms-moe-maker eval recipe.yaml --mode quality
 ```
 
-`ms-moe-maker build recipe.yaml` is the literal command. It's what's in this README,
-it's what a person types, and it's exactly what `seren-theatre[stagehand]`
-forks — no separate API path with different defaults. If those two ever
-diverged, the hand-run path would rot, because it's the one with no automated
-users. Making them identical removes the possibility.
+`--plan` and `--dryrun` differ on purpose. `--plan` resolves everything and runs
+nothing, so it works on a laptop. `--dryrun` is a *real* build on the smallest
+rung — cheap, but it needs torch like any other build.
 
 ## The recipe
 
-A build, as a document. The point is that you can hand it to someone who
-doesn't have your box and they get your run — that's the difference between
-"it works, look" and a result.
+A build, as a document. You can hand it to someone who doesn't have your box
+and they get your run.
+
+### Minimal recipe
 
 ```yaml
 schema_version: 1
-name: msmoe-coder-5x-dryrun
-size: 0.5B
-base: huihui-ai/Qwen2.5-Coder-0.5B-Instruct-abliterated
+name: my-moe
 
 experts:
-  - name: powershell
-    source: { kind: hf, repo: SaeedRahmani/codeparrot_github_code_powershell, text_field: code }
   - name: python
     source: { kind: stack, language: Python }
-  # ...
+  - name: csharp
+    source: { kind: stack, language: C# }
+
+size: auto
+```
+
+That's it. The rest auto-fills from your **hardware tier**:
+
+| Tier    | VRAM | Default size | LoRA r | Quant |
+|---------|------|-------------|--------|-------|
+| nano    | 3 GB | 3B          | 32     | Q4_K_M|
+| xavier  | 9 GB | 9B          | 64     | Q5_K_M|
+| spark   | 36 GB| 32B         | 128    | Q8_0  |
+
+If you omit `size`, the tier's default is used. If you omit the tier, the
+middle tier (`xavier`) is the default.
+
+### A small run that is still a real one
+
+The corpus volume defaults to production size. To watch the whole flow finish
+this evening — every stage, real artifacts, a loadable GGUF — turn the volume
+down rather than reaching for `--dryrun`:
+
+```yaml
+corpus:
+  min_samples: 300          # fail the stage below this, not train on scraps
+  max_samples: 3000         # cap per expert
+  router_mix_total: 800     # rows in the router's stratified mix
 
 budget:
-  target_steps: 150        # 1200 for a real rung; 150 is the shakedown
-  max_seq_length: 2048
-  per_device_batch: 4
-  grad_accum: 2
+  target_steps: 150
+  max_seq_length: 1024
 ```
 
-See `recipe.example.yaml` for the annotated version — every field carries the
-measurement that chose it.
+`--dryrun` is a different thing: it also relabels the run and writes to a
+separate directory, because its job is structural testing, not a small build.
+`ms-moe-maker build recipe.yaml --plan` prints the volume back at you, so you
+can tell which of the two you are about to start.
 
-Budgets are in **tokens**, derived from steps. Capping documents instead looked
-like balance and wasn't: at 10,000 documents each, PowerShell received 4.3× the
-gradient updates Shell did, and a different LR curve besides.
+See `recipe.flow-0.5B.yaml` for a complete worked example.
 
-## Refusals — read this bit
+### Using a template
 
-Right now `ms-moe-maker build` drives an existing pipeline script by setting
-environment variables and forking it. That script exposes sixteen levers. A
-recipe declares far more than sixteen things.
+Templates fill in name, base model, expert list, budget, and MoE config so you
+don't have to:
 
-So the naive wrapper would accept `per_device_batch: 8`, run the build at 4,
-and report success — leaving you with a document that *looks* authoritative and
-silently isn't. That's the worst possible place to put that trap, in the one
-file whose entire selling point is reproducing someone else's run.
+```yaml
+template: dnd
 
-**So a recipe field is honoured, or the build refuses. Never ignored.**
-
-The check isn't "is there a lever" — it's "will the run actually do what the
-document says". Ms.MoE reads the pipeline's own constants statically (via
-`ast`, never importing — importing it would cost you a CUDA context) and
-compares each field against the value that will really be used. Agreement is
-silence. Only disagreement refuses.
-
-```
-$ ms-moe-maker build recipe.yaml
-   2 recipe field(s) cannot be honoured by fraunkenstein_universal.py:
-     · budget.per_device_batch=8 cannot be applied: the pipeline uses 4 from
-       PER_DEVICE_BATCH and exposes no environment lever for it.
-     · gates.main_evals='manual' cannot be honoured: the pipeline runs end to
-       end with no stage boundary a gate could pause at.
-   REFUSED - nothing was run.
+experts:
+  - name: monster_manual
+    source: { kind: hf, repo: PleiaSys/DnD-MonsterManual, text_field: text }
+  - name: players_handbook
+    source: { kind: hf, repo: PleiaSys/DnD-PlayersHandbook, text_field: text }
+  - name: dm_guide
+    source: { kind: hf, repo: PleiaSys/DnD-DMG, text_field: text }
 ```
 
-`--allow-refusals` proceeds anyway. The refusals are recorded in the run
-manifest either way, because the person who needs to know a lever was ignored
-is the one reading the dashboard six hours later, not the one who saw the
-terminal at kickoff.
+Available templates: `code`, `dnd`, `math`, `culinary`.
 
-**The refusal list is the roadmap.** Each entry is a field somebody wanted to
-set and couldn't — which is exactly the priority order for pulling that part of
-the script into a real stage. When the list is empty, the decomposition is
-finished, and nobody had to guess when.
+### Source kinds
 
-## The run manifest
+| Kind    | Source | Use case |
+|---------|--------|----------|
+| `stack` | BigQuery code stack-v3 by language | Code specialists |
+| `hf`    | HuggingFace dataset (repo + text_field) | DnD, math, culinary, etc. |
+| `gh`    | Files from a public GitHub repo (repo + glob) | A project's docs or source |
+| `local` | Directory of .txt/.jsonl/.md files | Custom corpora |
+| `synth` | Generate traces from a teacher model | Agentcore / reasoning |
 
-A build writes `msmoe-run.json` into its run directory: what the run is, the
-ordered stage list, each stage's status and artifact, and any refusals.
+Kinds are a **registry**, not a fixed list — another package can publish its own
+via the `ms_moe_maker.corpus_kinds` entry point without sending a PR here.
 
-That file is the **only** interface between this package and any viewer.
-Nothing imports anything. `seren-theatre` reads the manifest when it's there
-and falls back to reading the directory when it isn't — so an instrumented run
-is exact and an uninstrumented directory still works. Neither package is
-required, and neither knows the other exists.
+`gh` fetches one tarball from codeload rather than cloning, so there is no git
+binary needed and no history downloaded. Globs are matched against paths
+**relative to the repo root**, and `**/` means zero-or-more directories the way
+a shell means it:
 
-## Events
+```yaml
+  - name: llama_docs
+    source: { kind: gh, repo: ggml-org/llama.cpp, glob: "docs/**/*.md" }
+  - name: my_wiki
+    source: { kind: gh, repo: me/notes, ref: main, subdir: wiki, glob: "**/*.md" }
+```
 
-Under `--json`: one JSON object per line on stdout, prose on stderr, never
-interleaved.
+Public repos only, deliberately: a recipe is a document people *share*, which
+makes it the wrong object to put a credential in.
 
-| event | when |
-|---|---|
-| `started` | the build begins; carries the resolved env and run dir |
-| `stage` | a stage changes status |
-| `progress` | something worth knowing inside a stage |
-| `refused` | recipe fields that couldn't be honoured |
-| `warning` / `error` | trouble |
-| `done` | terminal, with `ok` |
+See `recipe.example.yaml` for the fully annotated version.
 
-Every line is flushed. A consumer following a six-hour build through a pipe
-would otherwise see nothing until the buffer filled — and that looks exactly
-like a hang.
+## Preflight
 
-## Status
+Every build starts by asking the cheap questions, so the expensive part never
+starts on a box that cannot finish it:
 
-The stage machinery, contract and CLI are real. The pipeline itself is still
-the original 2483-line script, driven from the outside — **wrap-then-carve**.
-The contract is the product; the internals move behind it without anything
-downstream noticing.
+- is torch / transformers / safetensors installed?
+- is the base model reachable (or is it gated, or a typo)?
+- are the roots writable, with enough room for the specialists + the stitched
+  MoE + a GGUF?
+- do the `local` corpus paths exist?
+- is llama.cpp present? — a **warning**, not a failure. Without it you still
+  get the HF checkpoint; you just do not get a GGUF.
+
+`ms-moe-maker build recipe.yaml --plan` runs the same checks and stops there.
+
+Failures carry their remedy, because the person reading one is usually about to
+lose an evening.
+
+## The pipeline
+
+A recipe flows through six stages:
+
+1. **data.corpus** — Collect expert corpora (stack scan, HF download, local files)
+2. **data.synth** — Generate synthetic traces (if `kind: synth` experts)
+3. **finetune.*{expert}*** — LoRA specialist training (one stage per expert)
+4. **stitch** — Assemble the MoE skeleton from specialist checkpoints
+5. **router** — Train the router gate weights (stratified expert mix)
+6. **export.gguf** — Export GGUF and smoke-test it
+
+The pipeline is fully modular. Each stage is an independent Python module. The
+orchestrator (`builder.py`) runs them in order, reports progress via a callback,
+and resumes from where it left off on re-run.
+
+## Evaluation
+
+After a build, you can check whether your experts actually diverged:
+
+```bash
+ms-moe-maker eval recipe.yaml
+```
+
+Two different questions, separately runnable:
+
+```bash
+ms-moe-maker eval recipe.yaml --mode routing   # the dead-expert check
+ms-moe-maker eval recipe.yaml --mode quality   # generation vs held-out refs
+ms-moe-maker eval recipe.yaml                  # both (default)
+```
+
+**Routing** is the one Ms.MoE uniquely claims, and it is why hand-assigned
+experts work at all. A dead expert is not one that writes badly — it is one
+**the router never routes to**. So the measurement is routing, not text
+quality: held-out text from each expert's own domain goes through the MoE, the
+gate decisions are captured, and each expert gets an *enrichment* score — how
+much more it is used on its own domain than on average. Above ~1.2x means the
+router can tell that domain apart. Around 1.0x means it cannot, and that expert
+is dead however well it generates.
+
+The report also names which expert is eating a weak one's traffic, because an
+expert can clear the enrichment bar and still be **outranked on its own
+domain** by a neighbour. That is a different failure, and a column-only read
+misses it.
+
+**Quality** is real generation against held-out references. It needs an answer
+key, and whoever wrote the corpus is the only one who has it — which is exactly
+why this half is meant to be overridden.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | No dead experts, and every check was actually measured |
+| 2 | Dead expert(s) found |
+| 3 | Nothing failed — but something could not be measured |
+
+3 exists on purpose. "We could not measure it" must never share an exit code
+with "it passed."
+
+### Overriding it
+
+We provide the floor. Both halves are yours to replace, from the recipe:
+
+```yaml
+eval:
+  script: my_eval.py        # replaces ours entirely
+  mode: routing             # routing | quality | all
+  held_out_fraction: 0.1
+  num_samples: 20
+  dead_threshold: 1.2       # minimum enrichment before "dead"
+
+smoke:
+  tokens: 48
+  timeout: 300
+  prompt: "Write a function that works."
+```
+
+A custom script is called as
+
+```
+my_eval.py --data-root R --output-root O --held-out F --num-samples N
+```
+
+which you can implement in any language you like.
+
+## Environment variables
+
+| Variable | Overrides |
+|----------|-----------|
+| `MSMOE_TIER` | Hardware tier (nano/xavier/spark) |
+| `MSMOE_LORA_R` | LoRA rank (integer) |
+| `HF_HOME` | HuggingFace cache location |
+| `FRAUNK_DRYRUN=1` | Smallest rung (same as `--dryrun`) |
+| `FRAUNK_BASE_MODEL` | Hard-code the base model instead of auto |
+| `FRAUNK_LLAMA_CPP` | Path to llama.cpp |
+
+The `FRAUNK_*` names are inherited from the script this tool was carved out of
+and are still read for compatibility. New levers get `MSMOE_*`.
+
+## Supported base models
+
+The fine-tune stage is generic — `AutoModelForCausalLM` will train a specialist
+from almost anything. The **stitch** stage is not: it builds a `Qwen2MoeConfig`,
+so today the base has to be a Qwen model.
+
+`validate` refuses an unsupported base up front, deliberately. Without that
+check a Llama base collects its corpora, trains every specialist over several
+hours, and then dies at stage 4 — the most expensive possible place to find
+out.
 
 ## Licence
 

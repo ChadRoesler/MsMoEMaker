@@ -1,121 +1,99 @@
-# Ms.MoE - a build, as a document.
+# Ms.MoE — minimal recipe.
 #
-#   python3 msmoe_recipe.py recipe.example.yaml        # validate + summarise
-#   python3 msmoe_recipe.py recipe.example.yaml --resolve
-#   ms-moe-maker build recipe.example.yaml                   # stagehand runs THIS
+# The bare minimum is: name, one or more experts with sources, and size.
+# Everything else auto-fills from your hardware tier (nano / xavier / spark).
 #
-# The point of a recipe is that you can hand it to someone who does not have
-# your box and they get your run. That is the difference between "it works,
-# look" and a result.
+#   ms-moe-maker validate recipe.example.yaml   # check structure
+#   ms-moe-maker build recipe.example.yaml      # build (needs GPU, torch)
+#   ms-moe-maker smoke recipe.example.yaml      # smoke-test GGUF
+#   ms-moe-maker eval recipe.example.yaml       # eval experts vs MoE
 #
-# This file is the 0.5B rung - the shakedown. Every structural question (do the
-# experts diverge? does the router discriminate? does it convert to GGUF?) is
-# answered here in an afternoon instead of a GPU-week. It is also the only
-# configuration someone with one consumer GPU can reproduce, which is the
-# difference between this being your tool and everyone's tool.
+# Quick start with a template (auto-fills base, size, experts, budget):
+#   ms-moe-maker validate --template dnd recipe.example.yaml
 
 schema_version: 1
-name: msmoe-coder-5x-dryrun
-size: 0.5B
+name: dnd-moe-example
 
-# Downloaded if absent, reused if cached. NOTE the -Instruct-: huihui-ai
-# publishes no base-model abliteration of Qwen2.5-Coder, so the id without it
-# 404s. Abliterated because you cannot red-team your own stack against a model
-# that refuses to play the part.
-base: huihui-ai/Qwen2.5-Coder-0.5B-Instruct-abliterated
+# ── template ──────────────────────────────────────────────────────────────────
+# Pick one: code | dnd | math | culinary
+# This auto-fills base, size, experts, and budget.  You can override any of
+# the fields below after the fact.
+#
+# template: dnd
 
-# ── THE FIVE ───────────────────────────────────────────────────────────────
-# Five deliberate experts, not 128 lottery tickets. Every one is a thing you
-# actually do; none of them can go dead because none of them was speculative.
+# ── experts ──────────────────────────────────────────────────────────────────
+# Each expert needs a name and a source. Source kinds:
+#
+#   stack  — pull from bigquery code stack-v3 by language
+#   hf     — pull from HuggingFace (repo + text_field)
+#   local  — pull from a directory of .txt/.jsonl/.md files
+#   synth  — generate synthetic traces (needs a teacher model)
+#
+# For non-code domains (DnD, math, culinary, etc.), use kind=hf or kind=local.
+
 experts:
-  - name: powershell
+
+  # 1. Monster Manual expert — pulls the official DnD stat block corpus
+  - name: monster_manual
     source:
-      # A language-partitioned corpus beats scanning the general one by ~500x
-      # for anything rare. PowerShell is ~141 files per shard in stack-v3;
-      # 80 shards (~45 GB) yielded 11,627. This is 140,000 in a 392 MB download.
       kind: hf
-      repo: SaeedRahmani/codeparrot_github_code_powershell
-      text_field: code
+      repo: PleiaSys/DnD-MonsterManual
+      text_field: text
 
-  - name: python
+  # 2. Dungeon Master's Guide expert
+  - name: dmd_guide
     source:
-      # Common enough to brute-force: ~18,000 files per shard. The scan stops
-      # as soon as the RAREST language it is still hunting fills up.
-      kind: stack
-      language: Python
+      kind: hf
+      repo: PleiaSys/DnD-DungeonMastersGuide
+      text_field: text
 
-  - name: csharp
+  # 3. Player's Handbook expert
+  - name: players_handbook
     source:
-      kind: stack
-      language: "C#"      # spelled EXACTLY as the corpus spells it
+      kind: hf
+      repo: PleiaSys/DnD-PlayersHandbook
+      text_field: text
 
-  - name: shell
-    source:
-      kind: stack
-      language: Shell
-      # Shell documents are short - ~467 tokens against PowerShell's ~1994.
-      # It therefore needs ~4x the DOCUMENTS to buy the same schedule, which
-      # is precisely why the budget below is in tokens and this number is only
-      # a ceiling.
-      max_shards: 80
+# ── size ─────────────────────────────────────────────────────────────────────
+# Pick from: 0.5B  1.5B  3B  9B  36B
+#
+# If you omit it or write "auto", the hardware tier picks the default.
+#   nano (3GB)   → 3B    (GGUF Q4_K_M)
+#   xavier (9GB) → 9B    (GGUF Q5_K_M)
+#   spark (36GB) → 36B   (GGUF Q8_0)
+#
+# This recipe defaults to auto → picked from tier.
 
-  - name: agentcore
-    source:
-      # No corpus of correct MCP traces exists to scrape, so it gets generated
-      # against fresh synthetic tool surfaces and rejection-sampled against a
-      # schema validator. Server-agnostic on purpose: the expert learns the
-      # PROTOCOL, not one deployment's tool list.
-      kind: synth
-      generator: mcp_traces
-      teacher: Qwen/Qwen2.5-7B-Instruct
-      examples: 2000
+size: auto
 
-# ── HOW MUCH EACH ONE GETS ─────────────────────────────────────────────────
-# In TOKENS, derived from steps. Capping documents instead looked like balance
-# and was not: at 10,000 documents each, PowerShell received 4.3x the gradient
-# updates shell did, and a different LR curve besides.
-budget:
-  target_steps: 150         # 1200 for a real rung; 150 is the shakedown
-  max_seq_length: 2048
-  per_device_batch: 4       # the PRODUCT (8) is what must stay constant
-  grad_accum: 2
-  warmup_ratio: 0.05        # a fraction, so every rung has the same curve SHAPE
-  doc_ceiling: 10000        # ceiling, not target
-
-# ── THE ARCHITECTURE ───────────────────────────────────────────────────────
-moe:
-  experts_per_tok: 2
-  norm_topk_prob: true      # without it the whole thing inits at ~0.40x scale
-  aux_loss_coef: 0.001
-  shared_expert_width: 1    # 0 overflows llama.cpp's loader
-
-  # "auto" = refuse to guess. Dense layers are the only lever that really
-  # shrinks the model and they are fixed at STITCH time - setting them later
-  # does nothing. Pick them from the BOTTOM of a probe_router_discrimination
-  # ranking. Measured on the 0.5B, routing signal peaks MID-STACK (layer 16)
-  # and falls off toward the top, so "make the bottom half dense" throws away
-  # a layer that carries signal and keeps three that carry less.
-  dense_layers: auto
-
-# ── THE THIRD SWITCH ───────────────────────────────────────────────────────
-# Cheap and reversible runs itself. Expensive and irreversible waits for a
-# hand on the surface - same gate as the consolidator's draft review and the
-# tool registry's propose_tool.
-gates:
-  base_evals: auto
-  main_evals: manual
-
-runtime:
-  dtype: bfloat16
-  direct_load: true
-  # Read before torch initialises or it does nothing. Measured on a 1.9B
-  # five-expert MoE generating 66 tokens: 106.6 GB reserved for 6.4 GB of
-  # live tensors, box OOM-killed. With this: 8.3 GB. Same weights.
-  alloc_conf: "expandable_segments:True"
-  export_gguf: true         # prove it leaves Python; three bugs lived there
-
-roots:
-  # A corpus does not care what size model consumes it - scan once, reuse at
-  # every rung. Model artefacts are size-shaped and fork per rung.
-  data: msmoe_data
-  output: msmoe_{size}
+# ── optional overrides ──────────────────────────────────────────────────────
+# These are all optional. The recipe below is fully valid without them.
+#
+# base: huihui-ai/Qwen2.5-3B-Instruct-abliterated
+#
+# budget:
+#   target_steps: 150          # shakedown; 1200+ for production
+#   max_seq_length: 2048
+#   per_device_batch: 4
+#   grad_accum: 2
+#   warmup_ratio: 0.05
+#   doc_ceiling: 5000
+#
+# moe:
+#   experts_per_tok: 2
+#   norm_topk_prob: true
+#   aux_loss_coef: 0.001
+#   shared_expert_width: 1
+#   dense_layers: auto
+#
+# gates:
+#   base_evals: auto
+#   main_evals: manual
+#
+# runtime:
+#   dtype: bfloat16
+#   direct_load: true
+#
+# roots:
+#   data: msmoe_data
+#   output: msmoe_{size}

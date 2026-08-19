@@ -20,10 +20,17 @@ DESCRIPTION = ("Build a mixture of experts from deliberately chosen "
                "specialists. Not a coding model - a coding model shaped like "
                "your stack.")
 
-# The three verbs. Named here so a front-end can offer them without parsing
-# --help, and so `stagehand` can check the tool it forked speaks the version of
-# the contract it expects.
-COMMANDS = ("build", "validate", "describe")
+# The verbs. Named here so a front-end can offer them without parsing --help,
+# and so `stagehand` can check the tool it forked speaks the version of the
+# contract it expects. THIS IS THE CANONICAL LIST - __main__ derives its
+# DESCRIBE from it rather than keeping a second copy, which is how `smoke` and
+# `eval` came to exist in the CLI while this tuple still said three.
+COMMANDS = ("init", "build", "smoke", "eval", "validate", "describe")
+
+# What `eval` can be asked. Two different questions, deliberately separable:
+#   routing - does each expert own its own ground? (the dead-expert claim)
+#   quality - does it answer better than one expert alone? (needs an answer key)
+EVAL_MODES = ("routing", "quality", "all")
 
 # The event vocabulary emitted under --json. A consumer that does not know an
 # event kind must ignore it, so adding one is not a breaking change; removing
@@ -35,6 +42,7 @@ DESCRIBE = {
     "kind": "pipeline",
     "description": DESCRIPTION,
     "commands": list(COMMANDS),
+    "eval_modes": list(EVAL_MODES),
     "events": list(EVENTS),
     # The manifest schema this build writes into a run directory. A reader
     # (seren-theatre) can check compatibility before it trusts a file.

@@ -12,20 +12,40 @@ authors = [{ name = "Chad Roesler" }]
 readme = "README.md"
 keywords = ["moe", "mixture-of-experts", "qwen", "fine-tuning", "gguf", "llm"]
 
-# DELIBERATELY TINY. This is the CLI and the contract - it validates a recipe,
-# translates it, forks the pipeline and reports. The heavy machinery (torch,
-# transformers, datasets, trl, unsloth) belongs to the PIPELINE it forks, in
-# whatever venv that lives in.
+# DELIBERATELY TINY BASE. `describe`, `validate` and `build --plan` need
+# nothing but pyyaml, and that is the reason: someone should be able to check a
+# recipe, read what it will cost and see which fields cannot be honoured on a
+# laptop with no GPU, before they go anywhere near a machine that can run it.
 #
-# That split is not tidiness, it is the reason `ms-moe-maker validate recipe.yaml`
-# runs on a laptop with no GPU. Someone should be able to check a recipe, read
-# what it will cost and see which fields cannot be honoured before they go
-# anywhere near a machine that can run it.
+# (This comment used to say the heavy machinery "belongs to the PIPELINE it
+# forks". That was true under wrap-then-carve, when this package drove
+# fraunkenstein_universal.py as a subprocess. The carve is finished - the
+# pipeline IS this package now - so the honest split is base vs [train], not
+# CLI vs forked script.)
+#
+# Every torch/transformers import in the package is INSIDE a function, so the
+# base install imports cleanly and the training deps are only touched when you
+# actually build.
 dependencies = [
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
+# `pip install ms-moe-maker[train]` on the box that does the work.
+#
+# safetensors is not optional-within-this-extra: the stitcher streams tensors
+# one at a time out of safetensors files, which is what keeps peak memory at
+# roughly one shard instead of the whole model.
+train = [
+    "torch>=2.0",
+    "transformers>=4.40",
+    "datasets>=2.14",
+    "safetensors>=0.4",
+    "accelerate>=0.30",
+    "peft>=0.10",
+    "trl>=0.9",
+    "huggingface-hub>=0.23",
+]
 dev = [
     "pytest>=8.0",
 ]
