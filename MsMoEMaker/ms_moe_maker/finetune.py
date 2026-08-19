@@ -22,25 +22,62 @@ from . import config as cfg_module
 from . import stages as st
 
 
-class HeartbeatCallback:
-    """Trainer callback — prints progress every N steps / minutes."""
+def make_heartbeat_callback(print_interval: int = 100,
+                            checkpoint_interval: float = 300):
+    """A progress callback the Trainer will actually accept.
 
-    def __init__(self, print_interval: int = 100, checkpoint_interval: float = 300):
-        self.print_interval = print_interval
-        self.checkpoint_interval = checkpoint_interval
-        self.last_print = time.time()
-        self.step_count = 0
+    THIS WAS A BARE CLASS, and that is why the first real 0.5B build died at
+    stage 3 with:
 
-    def on_step_end(self, args, state, control, **kwargs):
-        self.step_count += 1
-        if self.step_count % self.print_interval == 0:
-            print(f"   Still training... step {self.step_count}")
-        if time.time() - self.last_print > self.checkpoint_interval:
-            loss_val = "?"
-            if state.log_history:
-                loss_val = state.log_history[-1].get("loss", "?")
-            print(f"   Training checkpoint: step {self.step_count}, loss ≈ {loss_val}")
+        AttributeError: 'HeartbeatCallback' object has no attribute 'on_init_end'
+
+    transformers' CallbackHandler does `getattr(callback, event)(...)` for
+    EVERY lifecycle hook - on_init_end, on_train_begin, on_step_begin,
+    on_optimizer_step and the rest - not just the ones you happened to write.
+    Duck-typing loses against a framework that introspects the full interface;
+    TrainerCallback exists precisely to supply the no-op defaults, and
+    subclassing it is not optional.
+
+    It could not simply subclass at module level, though, and that constraint
+    is real rather than an oversight: `from transformers import TrainerCallback`
+    at import time would put torch behind `ms-moe-maker validate` and break the
+    laptop promise. Hence a FACTORY - a module-level function that imports
+    lazily and builds the subclass on the first call that needs it. The class
+    keeps the full interface, the module keeps its stdlib-only import.
+
+    Worth noting the failure shape: everything before this worked. The corpus
+    collected, the base cached, 1635 docs tokenized and packed - and then the
+    trainer refused to be constructed. Anything that fails at CONSTRUCTION
+    after a long setup is expensive in exactly this way, which is an argument
+    for building the trainer earlier or checking the callback shape at
+    preflight.
+    """
+    from transformers import TrainerCallback
+
+    class HeartbeatCallback(TrainerCallback):
+        """Prints progress every N steps / minutes."""
+
+        def __init__(self):
+            super().__init__()
+            self.print_interval = print_interval
+            self.checkpoint_interval = checkpoint_interval
             self.last_print = time.time()
+            self.step_count = 0
+
+        def on_step_end(self, args, state, control, **kwargs):
+            self.step_count += 1
+            if self.step_count % self.print_interval == 0:
+                print(f"   Still training... step {self.step_count}")
+            if time.time() - self.last_print > self.checkpoint_interval:
+                loss_val = "?"
+                if state.log_history:
+                    loss_val = state.log_history[-1].get("loss", "?")
+                print(f"   Training checkpoint: step {self.step_count}, "
+                      f"loss ~ {loss_val}")
+                self.last_print = time.time()
+            return control
+
+    return HeartbeatCallback()
 
 
 def _ensure_cached(repo_id: str, hf_home: str, retries: int = 4):
@@ -282,7 +319,7 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         model=model,
         train_dataset=dataset,
         args=args,
-        callbacks=[HeartbeatCallback()],
+        callbacks=[make_heartbeat_callback()],
         **{tok_key: tokenizer},
         **sft_extra,
     )
