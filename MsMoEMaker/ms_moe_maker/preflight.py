@@ -157,6 +157,56 @@ def _check_base_model(pf: Preflight, config, offline: bool = False) -> None:
         pf.add("base model", FAIL, f"{base} — {name}: {str(exc)[:120]}", remedy)
 
 
+def _check_datasets(pf: Preflight, recipe, offline: bool = False) -> None:
+    """Do the corpora exist where the recipe says they do?
+
+    THE SAME CHECK AS THE BASE MODEL, AND FOR THE SAME REASON: to say "you did
+    not misspell it" before anything expensive starts. It was missing, and that
+    is exactly what bit a real run - preflight confirmed the base model was
+    reachable, passed, and then stage 1 went looking for a dataset repo and
+    died there instead.
+
+    A dead or renamed dataset id is not hypothetical. The default base model
+    this tool shipped with had already been deleted upstream; ids rot, and the
+    only question is whether you find out in two seconds or after preflight has
+    told you everything is fine.
+    """
+    if offline:
+        pf.add("datasets", UNMEASURABLE, "offline, not checked")
+        return
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        pf.add("datasets", UNMEASURABLE,
+               "huggingface_hub not installed, cannot check")
+        return
+
+    api = HfApi()
+    wanted: Dict[str, str] = {}          # repo id -> which expert wants it
+    for e in recipe.experts:
+        src = getattr(e, "source", None)
+        kind = getattr(src, "kind", "") if src else ""
+        if kind == "hf" and getattr(src, "repo", ""):
+            wanted[src.repo] = e.name
+        elif kind == "stack":
+            from .data import STACK_REPO
+            wanted.setdefault(STACK_REPO, e.name)
+
+    for repo, who in wanted.items():
+        try:
+            api.dataset_info(repo)
+            pf.add(f"dataset/{repo}", PASS, f"reachable (for {who})")
+        except Exception as exc:        # noqa: BLE001
+            name = exc.__class__.__name__
+            remedy = ("check the repo id for typos; if it is gated, accept the "
+                      "terms on its page and run `huggingface-cli login`")
+            if "Connection" in name or "Timeout" in name:
+                remedy = ("no network to huggingface.co - pre-cache the corpus "
+                          "or use a `local` source")
+            pf.add(f"dataset/{repo}", FAIL,
+                   f"{name}: {str(exc)[:140]}", remedy)
+
+
 def _check_roots(pf: Preflight, config) -> None:
     """Writable, and enough room. Both are cheap to ask and awful to discover."""
     for label, path in (("data root", config.data_root),
@@ -271,6 +321,7 @@ def run(config, recipe, offline: bool = False,
     _check_sources(pf, recipe)
     if have_torch:
         _check_base_model(pf, config, offline=offline)
+    _check_datasets(pf, recipe, offline=offline)
     if need_exporter:
         _check_exporter(pf, config)
     return pf

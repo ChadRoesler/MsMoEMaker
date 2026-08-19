@@ -20,11 +20,33 @@ import random
 import time
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+# MODULE LEVEL ON PURPOSE. `cfg` used to be imported inside collect_corpus and
+# three other functions, and then referenced from _collect_from_shards, which
+# imported nothing - so `cfg.safe_name(...)` there was a NameError that only
+# fired once a real build reached the shard scan. Killed Chad's first Spark run
+# at stage 1.
+#
+# Same shape as the `import moe_stitch` bug in stitch.py: a module bound LOCAL
+# to one function and read as a GLOBAL in another. Python does not complain
+# until the line executes, so a rarely-taken branch hides it indefinitely.
+#
+# config imports only the standard library at module scope, so hoisting it
+# costs the no-torch-on-a-laptop promise nothing and removes the whole class of
+# failure for this name. Heavy imports (torch, transformers, datasets) stay
+# inside their functions, where they belong.
+from . import config as cfg
 
 # ---------------------------------------------------------------------------
 # Corpus collection
 # ---------------------------------------------------------------------------
+
+# THE STACK CORPUS, NAMED ONCE. Preflight has to check the same string the
+# scan will actually request - a reachability check against a repo id that is
+# merely similar to the real one is worse than no check, because it passes.
+STACK_REPO = "HuggingFaceCode/stack-v3-train"
+
 
 def collect_corpus(config, languages: Optional[List[str]] = None,
                    sources: Optional[Dict[str, Any]] = None,
@@ -39,7 +61,6 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
     ``callback(name, stage, note)`` is called after each language is finished
     so the runner can update manifest stage notes.
     """
-    from . import config as cfg
 
     sources = sources or {}
     safe_map = {lang: cfg.safe_name(lang) for lang in (languages or [])}
@@ -157,7 +178,6 @@ def _expert_to_code_lang(expert_name: str) -> Optional[str]:
     'python' → 'Python', 'csharp' → 'C#', etc.
     Returns None if no mapping exists.
     """
-    from . import config as cfg
     # Reverse lookup: lowercase expert name → CODE_LANGUAGE
     for lang in cfg.CODE_LANGUAGES:
         if cfg.safe_name(lang) == expert_name.lower():
@@ -168,7 +188,6 @@ def _expert_to_code_lang(expert_name: str) -> Optional[str]:
 def _collect_from_dedicated(lang: str, source: Any,
                             config, callback=None) -> Optional[str]:
     """Pull one language from its own corpus (HuggingFace dataset or local)."""
-    from . import config as cfg
     import sys
 
     safe = cfg.safe_name(lang)
@@ -511,7 +530,7 @@ def _collect_from_shards(languages: List[str], config,
             print(f"          {l:12} {n:>7} samples  ({p})")
         return {safe_map[l]: p for l, p in existing.items()}
 
-    repo_id = "HuggingFaceCode/stack-v3-train"
+    repo_id = STACK_REPO
     all_files = list_repo_files(repo_id, repo_type="dataset")
     shard_files = sorted(f for f in all_files if f.startswith("data/part-") and f.endswith(".parquet"))
     if not shard_files:
@@ -649,7 +668,6 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
 
     Returns path to the final JSONL, or None if generation was skipped.
     """
-    from . import config as cfg
     import sys
 
     out_path = f"{config.data_root}/agentcore_code.jsonl"
@@ -1082,6 +1100,12 @@ class _VLLMTeacher:
 
     def __init__(self, config):
         from vllm import LLM, SamplingParams
+        # AutoTokenizer was imported in _HFTeacher.__init__ and used here,
+        # where nothing binds it - a NameError waiting for the first recipe
+        # with a synth expert on the vLLM path. transformers cannot move to
+        # module level (that would put torch behind `ms-moe-maker validate`),
+        # so it is imported here, in the function that uses it.
+        from transformers import AutoTokenizer
         self._SamplingParams = SamplingParams
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.teacher_model, cache_dir=config.hf_home)

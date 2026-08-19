@@ -409,3 +409,42 @@ class TestJsonIsAWireFormatEverywhere:
             if line.strip():
                 kind = json.loads(line)["event"]
                 assert kind in _describe.EVENTS, f"undeclared event {kind!r}"
+
+
+class TestFailuresReachTheHuman:
+    """A build that fails must SAY so, on the channel a person is reading.
+
+    It did not. Events.emit() is gated on --json, and the failure path used
+    ev.error() alone - so without that flag a failed build wrote the reason
+    into the manifest, emitted nothing, and returned exit 1 with zero output.
+    Success printed. Failure did not. To the person at the prompt it read as
+    "it just stopped", which is indistinguishable from a hang.
+    """
+
+    def test_the_failure_path_uses_the_unconditional_channel(self):
+        import inspect
+        from ms_moe_maker import runner
+        src = inspect.getsource(runner.Runner.run_builder)
+        head, _, tail = src.partition("except Exception as exc:")
+        assert tail, "run_builder no longer has a failure branch"
+        assert ".say(" in tail, (
+            "the failure branch must use ev.say() - ev.error() is emit(), "
+            "which is silent unless --json was passed")
+
+    def test_a_terminal_line_is_always_printed(self):
+        import inspect
+        from ms_moe_maker import runner
+        src = inspect.getsource(runner.Runner.run_builder)
+        assert src.count(".say(") >= 2, (
+            "'did it finish?' must never be answered by absence of output")
+
+    def test_say_is_not_gated_but_emit_is(self):
+        """The property the fix relies on."""
+        import io
+        from ms_moe_maker.events import Events
+        out, prose = io.StringIO(), io.StringIO()
+        ev = Events(enabled=False, stream=out, prose=prose)
+        ev.error(stage="x", message="boom")
+        ev.say("boom")
+        assert out.getvalue() == "", "emit must stay silent without --json"
+        assert "boom" in prose.getvalue(), "say must never be silent"

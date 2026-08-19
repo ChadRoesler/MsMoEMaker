@@ -161,3 +161,128 @@ class TestRender:
         out = pf.Preflight()
         out.add("x", FAIL, "broken", "do the thing")
         assert any("do the thing" in l for l in pf.render(out))
+
+
+class TestDatasetReachability:
+    """The check that was missing when a real run died at stage 1.
+
+    Preflight confirmed the base model was reachable, reported everything
+    green, and then corpus collection went looking for a dataset repo and
+    failed there. Same class of rot, same two-second check, not applied.
+    """
+
+    def _recipe(self, experts):
+        from ms_moe_maker.recipe import parse
+        rec, _ = parse({"schema_version": 1, "name": "t", "experts": experts})
+        return rec
+
+    def test_offline_reports_unmeasurable_not_pass(self):
+        """Skipping a check is not the same as passing it."""
+        out = pf.Preflight()
+        pf._check_datasets(out, self._recipe([
+            {"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+            {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]),
+            offline=True)
+        assert [c.status for c in out.checks] == [UNMEASURABLE]
+        assert out.ok, "an unchecked dataset must not block the build"
+
+    def _fake_hub(self, monkeypatch, api):
+        """Inject a stand-in huggingface_hub.
+
+        monkeypatch.setattr on the real module is not an option: these tests
+        have to pass on the BASE install, where huggingface_hub is not present
+        at all - which is the same laptop promise the package makes. Stubbing
+        sys.modules tests our code rather than the hub client.
+        """
+        import sys
+        import types
+        mod = types.ModuleType("huggingface_hub")
+        mod.HfApi = lambda: api
+        monkeypatch.setitem(sys.modules, "huggingface_hub", mod)
+
+    def test_a_dead_repo_is_a_failure_with_a_remedy(self, monkeypatch):
+        import ms_moe_maker.preflight as mod
+
+        class _Api:
+            def dataset_info(self, repo):
+                raise RuntimeError("404 Not Found")
+
+        self._fake_hub(monkeypatch, _Api())
+        out = pf.Preflight()
+        mod._check_datasets(out, self._recipe([
+            {"name": "a", "source": {"kind": "hf", "repo": "nope/gone"}},
+            {"name": "b", "source": {"kind": "hf", "repo": "nope/gone2"}}]))
+        assert not out.ok
+        assert all(c.remedy for c in out.failures), (
+            "a dead repo id must come with what to do about it")
+
+    def test_stack_sources_check_the_corpus_repo(self, monkeypatch):
+        """A `stack` expert names a language, not a repo - but the scan still
+        pulls from one, so that is what gets checked."""
+        import ms_moe_maker.preflight as mod
+        from ms_moe_maker.data import STACK_REPO
+        seen = []
+
+        class _Api:
+            def dataset_info(self, repo):
+                seen.append(repo)
+
+        self._fake_hub(monkeypatch, _Api())
+        out = pf.Preflight()
+        mod._check_datasets(out, self._recipe([
+            {"name": "python", "source": {"kind": "stack", "language": "Python"}},
+            {"name": "csharp", "source": {"kind": "stack", "language": "C#"}}]))
+        assert seen == [STACK_REPO], seen
+        assert out.ok
+
+    def test_one_request_per_repo_not_per_expert(self, monkeypatch):
+        """Four stack experts is still one corpus."""
+        import ms_moe_maker.preflight as mod
+        seen = []
+
+        class _Api:
+            def dataset_info(self, repo):
+                seen.append(repo)
+
+        self._fake_hub(monkeypatch, _Api())
+        out = pf.Preflight()
+        mod._check_datasets(out, self._recipe([
+            {"name": n, "source": {"kind": "stack", "language": n}}
+            for n in ("python", "csharp", "shell", "powershell")]))
+        assert len(seen) == 1, seen
+
+    def test_the_checked_id_is_the_one_data_py_requests(self):
+        """A reachability check against a merely-similar id is worse than none,
+        because it passes."""
+        import inspect
+        from ms_moe_maker import data
+        src = inspect.getsource(data._collect_from_shards)
+        assert "STACK_REPO" in src
+        assert data.STACK_REPO.count("/") == 1
+
+    def test_local_sources_need_no_network(self, monkeypatch):
+        import ms_moe_maker.preflight as mod
+        calls = []
+
+        class _Api:
+            def dataset_info(self, repo):
+                calls.append(repo)
+
+        self._fake_hub(monkeypatch, _Api())
+        out = pf.Preflight()
+        mod._check_datasets(out, self._recipe([
+            {"name": "a", "source": {"kind": "local", "path": "/tmp"}},
+            {"name": "b", "source": {"kind": "local", "path": "/tmp"}}]))
+        assert calls == [], "a local corpus must not touch the network"
+        assert out.ok
+
+    def test_a_missing_hub_is_unmeasurable_not_a_failure(self, monkeypatch):
+        """On a base install the client is absent. That blocks nothing."""
+        import sys
+        import ms_moe_maker.preflight as mod
+        monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+        out = pf.Preflight()
+        mod._check_datasets(out, self._recipe([
+            {"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+            {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]))
+        assert out.ok

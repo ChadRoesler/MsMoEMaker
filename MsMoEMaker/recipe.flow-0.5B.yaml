@@ -25,7 +25,7 @@ schema_version: 1
 name: flow-0.5B
 
 size: 0.5B
-# base: ''            # blank -> the 0.5B tier default (a Qwen2.5-Coder 0.5B)
+base: 'huihui-ai/Qwen2.5-0.5B-Instruct-abliterated-v3'            # blank -> the 0.5B tier default (a Qwen2.5-Coder 0.5B)
 
 experts:
   - name: python

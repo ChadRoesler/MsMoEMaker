@@ -343,7 +343,16 @@ def _cmd_build(args):
         from . import preflight as _pf
         from . import stages as _st
 
-        checks = _pf.run(config, rec, offline=True, need_exporter=True)
+        # NOT offline. --plan exists to answer "what would stop this", and a
+        # dead model or dataset id is the most common answer. It used to skip
+        # every reachability check, so a plan could come back clean and the
+        # build then die at stage 1 on a repo that does not exist - which is
+        # exactly what happened on the first real run.
+        #
+        # `validate` stays network-free: that is the laptop promise, and
+        # corpus.py's Kind contract is declarative precisely so validation can
+        # be answered by reading. --offline restores the old behaviour here.
+        checks = _pf.run(config, rec, offline=args.offline, need_exporter=True)
         say("")
         for line in _pf.render(checks):
             say(line)
@@ -635,6 +644,8 @@ def main(argv=None):
     #   --dryrun  a real build on the smallest rung. Needs torch, like a build.
     ap.add_argument("--plan", action="store_true",
                     help="resolve config and stages, run nothing (no GPU)")
+    ap.add_argument("--offline", action="store_true",
+                    help="skip reachability checks (no network calls)")
     ap.add_argument("--dryrun", action="store_true",
                     help="real build on the smallest rung (still needs torch)")
     ap.add_argument("--force", action="store_true",

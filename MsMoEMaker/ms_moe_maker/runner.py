@@ -297,8 +297,26 @@ class Runner:
                 self.ev.say(result.message or "build complete")
 
         except Exception as exc:
+            # BOTH CHANNELS, ALWAYS. `ev.error` is emit(), which is gated on
+            # --json - so without that flag a failed build recorded the reason
+            # in the manifest, emitted nothing, and returned exit 1 with ZERO
+            # output. Success printed; failure did not. Exactly backwards, and
+            # it reads to the person running it as "it just stopped".
+            #
+            # `say` is the human channel and is never gated. An error has to
+            # reach a human on the channel a human is reading, and the machine
+            # stream is an addition to that, never a replacement for it.
+            stage = self._current or "build"
             self._finish_current(mf.FAILED, note=str(exc))
-            self.ev.error(stage=self._current or "build", message=str(exc))
+            self.ev.error(stage=stage, message=str(exc))
+            self.ev.say(f"\nBUILD FAILED at {stage}: "
+                        f"{exc.__class__.__name__}: {exc}")
+            # The traceback too. This is a developer tool driving other
+            # people's training runs; `str(exc)` on a bare HTTP or KeyError
+            # names the symptom and hides the location.
+            import traceback
+            self.ev.say(traceback.format_exc().rstrip())
+            self.ev.say(f"\n  manifest: {self.run_dir / mf.MANIFEST_NAME}")
             ok = False
 
         self.manifest.finished = time.time()
@@ -308,6 +326,11 @@ class Runner:
                      stages_done=self.manifest.done_count,
                      stages_total=len(self.manifest.stages),
                      refusals=len(self.manifest.refusals))
+        # A terminal line for the human too, so "did it finish?" is never
+        # answered by the absence of output.
+        self.ev.say(f"{'OK' if ok else 'FAILED'} - "
+                    f"{self.manifest.done_count}/{len(self.manifest.stages)} "
+                    f"stages, run_dir {self.run_dir}")
         return 0 if ok else 1
 
     def run_subprocess(self) -> int:
