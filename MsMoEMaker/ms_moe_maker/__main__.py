@@ -387,6 +387,9 @@ def _cmd_smoke(args):
     if rec is None:
         return 1
     
+    from .config import build_config
+    config = build_config(rec)
+
     output_dir = _build_output_dir(rec)
     if not output_dir:
         print("ERROR: could not resolve output directory from recipe.")
@@ -407,10 +410,20 @@ def _cmd_smoke(args):
         return 0
     
     try:
+        # THE RECIPE IS THE FLOOR, THE FLAGS OVERRIDE IT. rec.smoke was
+        # documented, parsed, and then ignored here - exactly the gap eval had,
+        # where a block the README tells people to write reached nothing.
+        #
+        # llama_cpp_dir is passed because smoke previously searched PATH alone
+        # while the build searched the llama.cpp tree, so an ordinary checkout
+        # worked during a build and not for the command whose whole job is to
+        # run it.
         ok = smoke_gguf(
             gguf_path,
-            tokens=args.tokens,
-            timeout=args.timeout,
+            tokens=args.tokens or rec.smoke.tokens,
+            timeout=args.timeout or rec.smoke.timeout,
+            prompt=rec.smoke.prompt,
+            llama_cpp_dir=config.llama_cpp_dir,
         )
     except Exception as exc:
         print(f"\nSmoke test FAILED: {exc}", file=sys.stderr)
@@ -667,10 +680,13 @@ def main(argv=None):
                          "CLI does not have to.")
     
     # Smoke args
-    ap.add_argument("--tokens", type=int, default=48,
-                    help="smoke test token count (default: 48)")
-    ap.add_argument("--timeout", type=int, default=300,
-                    help="smoke test timeout in seconds (default: 300)")
+    # Default 0, not the real default: it is the only way to tell "the user
+    # did not say" from "the user asked for the same number", and the recipe
+    # has to win when they did not say.
+    ap.add_argument("--tokens", type=int, default=0,
+                    help="smoke test token count (default: the recipe's, or 48)")
+    ap.add_argument("--timeout", type=int, default=0,
+                    help="smoke timeout in seconds (default: the recipe's, or 300)")
     
     # init args
     ap.add_argument("--template", dest="template", default="",

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import subprocess
 import time
 from pathlib import Path
@@ -44,6 +45,29 @@ def _longest_char_run(text: str):
         if run > best:
             best, worst = run, ch
     return best, worst
+
+
+def resolve_llama_binary(llama_cpp_dir: str, name: str) -> str:
+    """Find a llama.cpp executable. One resolver, every caller.
+
+    There were two. export_gguf checked
+    `<llama_cpp_dir>/build/bin/<name>` and then PATH; smoke_gguf checked PATH
+    and nothing else. So a llama.cpp built in the ordinary way - binaries in
+    `build/bin`, not installed system-wide - was findable during a build and
+    invisible to `ms-moe-maker smoke`, which is the one command whose entire
+    job is to run it. Two functions answering the same question differently is
+    the shape of half the bugs in this project.
+
+    Order: the build tree, then an installed prefix, then PATH. `build/bin` is
+    first because that is where `cmake --build build` puts things and almost
+    nobody installs llama.cpp system-wide.
+    """
+    for cand in (os.path.join(llama_cpp_dir, "build", "bin", name),
+                 os.path.join(llama_cpp_dir, "bin", name),
+                 os.path.join(llama_cpp_dir, name)):
+        if llama_cpp_dir and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return shutil.which(name) or ""
 
 
 def gguf_path_for(config) -> str:
@@ -101,11 +125,30 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
     # Convert if needed
     if not os.path.exists(gguf_path):
         print(f"\nExporting GGUF → {gguf_path}")
+        # BOTH OF THESE USED TO BE `config.base`, which is the HUGGINGFACE
+        # MODEL ID. It was argv[0] - so the run tried to EXECUTE
+        # "goblinModeMan/Qwen2.5-0.5B-Instruct-abliterated-v3" as a program -
+        # and it was PYTHONPATH as well. The errno names the model id, which
+        # reads like a missing model and is actually a missing interpreter.
+        #
+        # What the two slots actually want:
+        #   argv[0]     an interpreter that can run convert_hf_to_gguf.py.
+        #               Ours by default; the converter needs torch, and if we
+        #               are running the build we have it.
+        #   PYTHONPATH  llama.cpp's gguf-py, because convert_hf_to_gguf.py
+        #               does `import gguf` and that package ships INSIDE the
+        #               llama.cpp checkout rather than on PyPI. Without it the
+        #               converter fails with ModuleNotFoundError: gguf, which
+        #               is its own confusing errand.
+        gguf_py = os.path.join(config.llama_cpp_dir, "gguf-py")
+        env = {**os.environ}
+        if os.path.isdir(gguf_py):
+            env["PYTHONPATH"] = os.pathsep.join(
+                [gguf_py] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
         r = subprocess.run(
-            [config.base, conv, final_dir,
+            [sys.executable, conv, final_dir,
              "--outfile", gguf_path, "--outtype", "f16"],
-            capture_output=True, text=True,
-            env={**os.environ, "PYTHONPATH": config.base},
+            capture_output=True, text=True, env=env,
         )
         if r.returncode != 0:
             tail = "\n".join((r.stderr or r.stdout).splitlines()[-25:])
@@ -117,7 +160,7 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
               f"({os.path.getsize(gguf_path) / 1e9:.2f} GB)")
 
     # Find llama-cli
-    cli = os.path.join(config.llama_cpp_dir, "build", "bin", "llama-cli")
+    cli = resolve_llama_binary(config.llama_cpp_dir, "llama-cli")
     if not os.path.exists(cli):
         cli = shutil.which("llama-cli") or ""
     if not os.path.exists(cli):
@@ -228,18 +271,28 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
 def smoke_gguf(gguf_path: str,
                tokens: int = 48, timeout: int = 300,
                prompt: str = "Write a function that works.",
-               degenerate_run: int = 32) -> bool:
+               degenerate_run: int = 32,
+               llama_cpp_dir: str = "") -> bool:
     """Smoke-test a standalone GGUF file.  Returns True on pass.
 
     Proves the model generates OUTSIDE Python — the boundary where
     our nastiest bugs live (shared_expert=0, tie_word_embeddings,
     all-zero gates → NaN forever).
+
+    `llama_cpp_dir` was not a parameter, so this looked on PATH alone while
+    export_gguf looked in the build tree first. A perfectly normal llama.cpp
+    checkout was therefore usable by the build and not by `ms-moe-maker
+    smoke` - the command that exists to run it.
     """
     import subprocess
 
-    cli = shutil.which("llama-cli") or ""
+    cli = resolve_llama_binary(llama_cpp_dir, "llama-cli")
     if not cli:
-        print("[smoke] llama-cli not found — installing llama.cpp is required")
+        looked = (f" (looked in {llama_cpp_dir}/build/bin, "
+                  f"{llama_cpp_dir}/bin and PATH)") if llama_cpp_dir else ""
+        print(f"[smoke] llama-cli not found{looked}")
+        print("[smoke] Point at it with runtime.llama_cpp in the recipe, or")
+        print("[smoke] MSMOE_LLAMA_CPP, or put it on PATH.")
         print("[smoke]   git clone --depth 1 https://github.com/ggml-org/llama.cpp")
         print("[smoke]   cd llama.cpp && cmake -B build -DGGML_CUDA=ON")
         print("[smoke]       && cmake --build build --config Release -j")

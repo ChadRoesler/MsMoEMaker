@@ -198,6 +198,25 @@ makes it the wrong object to put a credential in.
 
 See `recipe.example.yaml` for the fully annotated version.
 
+## Where llama.cpp lives
+
+The GGUF export shells out to `convert_hf_to_gguf.py`, which lives in a
+llama.cpp checkout rather than on PyPI. That path is the most box-specific
+thing in a build, so a recipe can carry it:
+
+```yaml
+runtime:
+  llama_cpp: /mnt/nvme/llama.cpp
+```
+
+Resolution order is **recipe → `MSMOE_LLAMA_CPP` → a short search** of
+`./llama.cpp`, `../llama.cpp`, `~/llama.cpp` and `/opt/llama.cpp`. The search
+looks for the converter itself, not just a directory with the right name.
+
+Not finding it is a **warning**, never a failure: you still get the HF
+checkpoint, which is a real result. `export` and `smoke` are also the only two
+verbs that need no ML stack at all — see the install table above.
+
 ## Preflight
 
 Every build starts by asking the cheap questions, so the expensive part never

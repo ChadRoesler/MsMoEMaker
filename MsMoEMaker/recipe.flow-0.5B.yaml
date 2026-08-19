@@ -49,10 +49,26 @@ budget:
   collect_headroom: 1.5     # gather 1.5x the tokens the steps will consume
 
 moe:
-  experts_per_tok: 2
+  # ONE, NOT TWO, AND THIS MATTERS. top-k must be BELOW the expert count or
+  # the router is a no-op: top-2 of 2 experts selects both on every token, so
+  # the shares come out 0.5/0.5 and the JS divergence 0.000 by arithmetic -
+  # numbers identical to a router that ignores its input entirely, and
+  # impossible to tell apart from one.
+  #
+  # The first real run of this recipe had experts_per_tok: 2 and eval duly
+  # reported INPUT-BLIND for a router that had never been asked to choose.
+  # `validate` warns about this now.
+  #
+  # With three or more experts, top-2 is the usual shape.
+  experts_per_tok: 1
 
 runtime:
   hardware_tier: spark
+  # Where llama.cpp lives. Blank means: look in ./llama.cpp, ../llama.cpp,
+  # ~/llama.cpp and /opt/llama.cpp, then give up with a warning. Absence is
+  # never fatal - no converter means no GGUF, and the HF checkpoint is still a
+  # real result.
+  # llama_cpp: /mnt/nvme/llama.cpp
 
 gates:
   # 'manual' cannot be honoured by the in-package builder and will be REFUSED

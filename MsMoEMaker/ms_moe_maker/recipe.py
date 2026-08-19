@@ -121,6 +121,11 @@ class Runtime:
     direct_load: bool = False
     alloc_conf: str = ""
     hardware_tier: str = "xavier"  # nano | xavier | spark
+    # WHERE llama.cpp LIVES. Previously env-only (MSMOE_LLAMA_CPP), which
+    # makes the one path most likely to differ per box the one thing a recipe
+    # could not carry - so a recipe you hand someone else silently exports
+    # nothing on their machine. Empty means: look in the usual places.
+    llama_cpp: str = ""
 
 
 @dataclass
@@ -364,6 +369,25 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
                 f"Supported today: "
                 f"{', '.join(sorted(SUPPORTED_MOE_ARCHS.values()))}. "
                 f"Leave `base` empty to get a supported default for your size.")
+
+    # -- routing measurability ----------------------------------------------
+    #
+    # top-k == expert count is legal and runs fine - it is just a dense
+    # ensemble of every expert - but it makes the ROUTER a no-op, and it makes
+    # the dead-expert measurement impossible rather than merely difficult:
+    # every expert is selected on every token, so the shares are 1/E by
+    # arithmetic and read exactly like a router that ignores its input.
+    #
+    # A warning, not an error, because someone may genuinely want the dense
+    # ensemble. But they should know they have given up the thing this project
+    # is for.
+    if rec.experts and rec.moe.experts_per_tok >= len(rec.experts):
+        warns.append(
+            f"moe.experts_per_tok={rec.moe.experts_per_tok} equals the expert "
+            f"count ({len(rec.experts)}), so every expert is selected on every "
+            f"token and the router cannot discriminate. `eval --mode routing` "
+            f"will report UNMEASURABLE. Use experts_per_tok=1 for a 2-expert "
+            f"MoE, or add a third expert and keep top-2.")
 
     # -- experts ------------------------------------------------------------
     if not rec.experts:

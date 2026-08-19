@@ -278,9 +278,7 @@ def probe_router_discrimination(moe_dir: str,
                 "experts": {}}
 
     try:
-        tok = AutoTokenizer.from_pretrained(moe_dir)
-        model = AutoModelForCausalLM.from_pretrained(
-            moe_dir, dtype=torch.float32).to(device).eval()
+        model, tok, device = _load_model(moe_dir, device=device)
     except Exception as exc:
         return {"status": UNMEASURABLE,
                 "reason": f"could not load MoE from {moe_dir}: {exc}",
@@ -290,10 +288,37 @@ def probe_router_discrimination(moe_dir: str,
     E = getattr(cfg, "num_experts", 0)
     K = getattr(cfg, "num_experts_per_tok", 0)
     if not E or not K:
-        model_cleanup(model)
+        model = None
+        release_memory()
         return {"status": UNMEASURABLE,
                 "reason": "model has no num_experts - it is not a MoE",
                 "experts": {}}
+
+    # TOP-K == EXPERT COUNT IS UNMEASURABLE, NOT INPUT-BLIND.
+    #
+    # torch.topk(logits, K) with K == E returns EVERY expert, on every token,
+    # whatever the logits say. The selection counts are then 1/E each by
+    # arithmetic, enrichment is exactly 1.00x, and the pairwise JS divergence
+    # is exactly 0.000 - the same numbers a completely input-blind router
+    # would produce, and utterly indistinguishable from them.
+    #
+    # Reporting that as "the router ignores its input entirely" is a false
+    # diagnosis of a possibly-healthy router, and it is the worst kind because
+    # the numbers look decisive. The router was never asked to choose.
+    #
+    # A 2-expert MoE therefore needs experts_per_tok=1 to be measurable at all,
+    # and the usual shape is 3+ experts with top-2.
+    if K >= E:
+        model = None
+        release_memory()
+        return {"status": UNMEASURABLE,
+                "reason": (f"experts_per_tok={K} with num_experts={E}: top-{K} "
+                           f"of {E} selects every expert on every token, so "
+                           f"routing cannot discriminate BY CONSTRUCTION. The "
+                           f"0.5/0.5 shares and JS=0 this would report are "
+                           f"arithmetic, not measurement. Set "
+                           f"moe.experts_per_tok below {E}, or add experts."),
+                "experts": {}, "n_experts": E, "top_k": K}
 
     dense = set(getattr(cfg, "mlp_only_layers", None) or [])
     moe_layers = [i for i in range(cfg.num_hidden_layers) if i not in dense]
@@ -305,7 +330,8 @@ def probe_router_discrimination(moe_dir: str,
     names_from_cfg = list(getattr(cfg, "expert_names", None) or [])
     expert_names = names_from_cfg or list(expert_order)
     if len(expert_names) != E:
-        model_cleanup(model)
+        model = None
+        release_memory()
         return {"status": UNMEASURABLE,
                 "reason": (f"expert order has {len(expert_names)} names but the "
                            f"model has {E} experts: {expert_names}"),
@@ -332,7 +358,8 @@ def probe_router_discrimination(moe_dir: str,
                 out = model(**enc, output_router_logits=True)
             router_logits = getattr(out, "router_logits", None)
             if not router_logits:
-                model_cleanup(model)
+                model = None
+                release_memory()
                 return {"status": UNMEASURABLE,
                         "reason": ("model returned no router_logits - not a MoE, "
                                    "or this transformers version does not expose "
@@ -348,7 +375,8 @@ def probe_router_discrimination(moe_dir: str,
         if callback:
             callback("eval.routing", "running", f"routed {s}")
 
-    model_cleanup(model)
+    model = None
+    release_memory()
 
     # source x expert, pooled over layers
     avg: Dict[str, List[float]] = {}
@@ -426,22 +454,55 @@ def probe_router_discrimination(moe_dir: str,
     }
 
 
-def model_cleanup(model) -> None:
-    """Drop a loaded model and give the allocator its memory back.
+def release_memory() -> None:
+    """Collect and hand memory back. TAKES NO ARGUMENTS, AND THAT IS THE FIX.
 
-    Note what this does NOT do: `del` the torch module. See builder.py - that
-    unbinds a local name, frees nothing, and raises UnboundLocalError on the
-    next use.
+    This was `model_cleanup(model)`, which did `del model` on its own
+    PARAMETER. That drops one name inside the function while the CALLER still
+    holds the object, so the gc.collect() immediately after ran with the model
+    fully reachable and freed nothing. Every cleanup in the eval path was a
+    no-op, and on a 121 GB unified-memory box that ends at the OOM killer.
+
+    It is the same wrong-scope `del` as `del torch` in builder.py - which this
+    function's own docstring cited as a cautionary tale while committing the
+    identical mistake one level up. Deleting a NAME is not freeing an OBJECT,
+    and a function cannot drop a reference it does not own.
+
+    So the contract is explicit now: the caller sets its own reference to None
+    and then calls this. Uglier at the call site, and it actually frees.
     """
+    import gc
+    gc.collect()
     try:
-        import gc
         import torch
-        del model
-        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+
+def _load_model(model_dir: str, dtype_name: str = "float16", device: str = ""):
+    """Load a model for evaluation. One loader, one set of decisions.
+
+    NO device_map="auto", AND NOT float32 - both were in here, and on unified
+    memory both are traps this project has already paid for. fp32 doubles a
+    checkpoint for no benefit when there are no gradients, and `auto` sharding
+    on a box where host and device memory are the same pool produces an
+    allocation profile that shows up in no process's RSS and takes the machine
+    down instead of raising.
+
+    Evaluation is forward passes only, so half precision is the right default
+    and an explicit device beats a planner that assumes two memory spaces.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    dtype = getattr(torch, dtype_name, torch.float16)
+    if not device:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    tok = AutoTokenizer.from_pretrained(model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=dtype)
+    return model.to(device).eval(), tok, device
 
 
 def _sample_texts(path: str, num_samples: int) -> List[str]:
@@ -465,11 +526,58 @@ def _sample_texts(path: str, num_samples: int) -> List[str]:
     return out
 
 
+def _prompt_and_reference(item: Dict[str, Any],
+                          completion_split: float = 0.5) -> Tuple[str, str]:
+    """Get (prompt, reference) out of a corpus row, whatever shape it is.
+
+    TWO KINDS OF CORPUS, AND ONLY ONE HAS AN ANSWER KEY.
+
+    A QA-shaped dataset has prompt/answer (or input/output, question/
+    reference) and the reference is exactly what the model should say. That is
+    the easy case and it was the only case handled - so a run on a `stack` or
+    `gh` corpus, whose rows are just {"text": ...}, reported
+
+        no sample had both a prompt and a reference
+
+    for every expert. Which is true, and useless: the corpus most people will
+    actually build an expert from cannot be scored at all.
+
+    A RAW TEXT corpus has an answer key hiding in it. Hold back the second
+    half of a held-out document and the first half becomes the prompt: score
+    the continuation against what really followed. That is a completion task,
+    it needs no annotation, and for code it is close to what you want to know -
+    given the top of this file, does the model write the rest of it like this
+    project does?
+
+    It is a WEAKER claim than exact-match QA and should be read as one. Exact
+    match on a continuation is near zero for anything but boilerplate; ROUGE
+    and BLEU carry the signal.
+    """
+    for pk, rk in (("prompt", "answer"), ("input", "output"),
+                   ("question", "reference"), ("prompt", "reference")):
+        prompt, reference = item.get(pk), item.get(rk)
+        if prompt and reference:
+            return str(prompt), str(reference)
+
+    text = item.get("text") or item.get("content") or ""
+    if not text:
+        return "", ""
+
+    # Split on a line boundary so the prompt ends somewhere a model would
+    # plausibly be asked to continue from, rather than mid-token.
+    lines = str(text).splitlines(keepends=True)
+    if len(lines) < 4:
+        return "", ""
+    cut = max(1, int(len(lines) * completion_split))
+    return "".join(lines[:cut]), "".join(lines[cut:])
+
+
 def eval_generation(model_dir: str, test_data_path: str,
                     label: str, domain: str,
                     num_samples: int = 10,
                     max_new_tokens: int = 256,
-                    callback=None) -> EvalResult:
+                    callback=None,
+                    loaded=None) -> EvalResult:
     """Generate real tokens from a real model and score them against references.
 
     Replaces the prompt/reference overlap proxy. Every number here comes from
@@ -502,15 +610,20 @@ def eval_generation(model_dir: str, test_data_path: str,
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    try:
-        tok = AutoTokenizer.from_pretrained(model_dir)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir, torch_dtype=torch.float16, device_map="auto")
-        model.eval()
-    except Exception as exc:
-        result.status = UNMEASURABLE
-        result.note = f"could not load {model_dir}: {exc}"
-        return result
+    # `loaded` lets a caller hand in a model it wants to reuse across several
+    # calls. Whoever loads it frees it: this function releases only what it
+    # opened itself, so a shared model is not pulled out from under the next
+    # call.
+    owns_model = loaded is None
+    if loaded is not None:
+        model, tok, device = loaded
+    else:
+        try:
+            model, tok, device = _load_model(model_dir)
+        except Exception as exc:
+            result.status = UNMEASURABLE
+            result.note = f"could not load {model_dir}: {exc}"
+            return result
 
     random.seed(42)
     samples = random.sample(lines, min(num_samples, len(lines)))
@@ -520,16 +633,18 @@ def eval_generation(model_dir: str, test_data_path: str,
     bl: List[float] = []
     lengths: List[int] = []
     scored = 0
+    completion_mode = False
 
     for line in samples:
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        prompt = item.get("prompt") or item.get("input") or item.get("question") or ""
-        reference = item.get("answer") or item.get("output") or item.get("reference") or ""
+        prompt, reference = _prompt_and_reference(item)
         if not prompt or not reference:
             continue
+        if "prompt" not in item and "input" not in item:
+            completion_mode = True
 
         batch = tok(prompt, return_tensors="pt", truncation=True, max_length=1024)
         batch = {k: v.to(model.device) for k, v in batch.items()}
@@ -548,12 +663,18 @@ def eval_generation(model_dir: str, test_data_path: str,
         if callback and scored % 5 == 0:
             callback("eval.quality", "running", f"{label}: {scored}/{len(samples)}")
 
-    model_cleanup(model)
+    # Only free what this call opened. Releasing a BORROWED model here would
+    # pull it out from under the caller's next call, which is the bug that
+    # sharing was introduced to avoid.
+    if owns_model:
+        model = None
+        release_memory()
 
     if not scored:
         result.status = UNMEASURABLE
-        result.note = ("no sample had both a prompt and a reference - a quality "
-                       "eval needs an answer key, see the recipe's eval: block")
+        result.note = ("no sample yielded a prompt and a reference - rows need "
+                       "prompt/answer keys, or a `text` field long enough "
+                       "(4+ lines) to split into a completion task")
         return result
 
     result.exact_match = sum(em) / scored
@@ -561,7 +682,10 @@ def eval_generation(model_dir: str, test_data_path: str,
     result.bleu = sum(bl) / scored
     result.avg_length = sum(lengths) / scored
     result.status = "done"
-    result.note = f"{scored} samples generated"
+    result.note = (f"{scored} samples generated"
+                   + (" (completion: second half of each held-out doc; "
+                      "read ROUGE/BLEU, exact-match is near zero by nature)"
+                      if completion_mode else ""))
     return result
 
 
@@ -712,25 +836,56 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
 
     # ── quality: real generation against held-out references ───────────────
     if do_quality:
+        # ONE MODEL IN MEMORY AT A TIME, AND THE MoE LOADED ONCE.
+        #
+        # This loop used to call eval_generation(moe_dir, ...) INSIDE the
+        # per-expert loop, so the MoE was loaded once per expert - plus once
+        # more for the routing probe. With two experts that is five loads for
+        # three distinct models, and because the old cleanup freed nothing,
+        # every one of them stayed resident. On a 121 GB unified-memory Spark
+        # the OOM killer arrived on the third.
+        #
+        # Now: each specialist is loaded, scored on its own held-out set, and
+        # released before the next one; then the MoE is loaded ONCE and scored
+        # against every domain. Peak is one model, and the cost of eval stops
+        # scaling with the number of experts.
         for expert_name in expert_order:
-            held_path = held_paths[expert_name]
             expert_dir = str(output_root /
                              st.FINETUNE_ARTIFACT.format(expert=expert_name))
             res = eval_generation(
-                model_dir=expert_dir, test_data_path=held_path,
+                model_dir=expert_dir, test_data_path=held_paths[expert_name],
                 label=expert_name, domain=expert_name,
                 num_samples=num_samples)
             report.stages[expert_name] = res
             if res.status == UNMEASURABLE:
                 report.unmeasured.append(f"quality/{expert_name}: {res.note}")
+            release_memory()
 
-            moe_res = eval_generation(
-                model_dir=moe_dir, test_data_path=held_path,
-                label="moe", domain=expert_name,
-                num_samples=num_samples)
-            report.stages[f"moe/{expert_name}"] = moe_res
-            if moe_res.status == UNMEASURABLE:
-                report.unmeasured.append(f"quality/moe/{expert_name}: {moe_res.note}")
+        moe_model = moe_tok = None
+        try:
+            moe_model, moe_tok, moe_device = _load_model(moe_dir)
+        except Exception as exc:
+            for expert_name in expert_order:
+                report.stages[f"moe/{expert_name}"] = EvalResult(
+                    expert_name="moe", domain=expert_name,
+                    status=UNMEASURABLE,
+                    note=f"could not load {moe_dir}: {exc}")
+                report.unmeasured.append(
+                    f"quality/moe/{expert_name}: could not load the MoE")
+
+        if moe_model is not None:
+            for expert_name in expert_order:
+                moe_res = eval_generation(
+                    model_dir=moe_dir, test_data_path=held_paths[expert_name],
+                    label="moe", domain=expert_name,
+                    num_samples=num_samples,
+                    loaded=(moe_model, moe_tok, moe_device))
+                report.stages[f"moe/{expert_name}"] = moe_res
+                if moe_res.status == UNMEASURABLE:
+                    report.unmeasured.append(
+                        f"quality/moe/{expert_name}: {moe_res.note}")
+            moe_model = moe_tok = None
+            release_memory()
 
     # ── verdict ────────────────────────────────────────────────────────────
     if do_routing:

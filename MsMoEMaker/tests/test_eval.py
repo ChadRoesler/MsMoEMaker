@@ -1,5 +1,6 @@
 """Tests for the eval pipeline."""
 import json
+import random
 import os
 import tempfile
 from pathlib import Path
@@ -307,3 +308,207 @@ class TestReportSerialization:
         report = eval_from_manifest(tmp_path)
         assert not report.ok
         assert "no eval report" in report.message.lower()
+
+
+class TestDegenerateRoutingIsUnmeasurable:
+    """top-k == expert count is not a finding, it is an absence of one.
+
+    The first real run reported "INPUT-BLIND - the router ignores its input
+    entirely" for a router that had never been asked to choose: the recipe set
+    experts_per_tok=2 on a 2-expert MoE, so topk() returned BOTH experts on
+    every token. Shares 0.5/0.5, enrichment 1.00x, JS exactly 0.000 - all
+    arithmetic, none of it measurement, and numerically identical to the
+    genuine failure it was misreported as.
+
+    A false diagnosis backed by decisive-looking numbers is the worst output
+    this tool can produce; it is the same sin as the fabricated scores this
+    module was built to replace.
+    """
+
+    def test_topk_equal_to_expert_count_selects_everything(self):
+        """The arithmetic, stated plainly so the reason survives."""
+        def topk(vals, k):
+            return [i for i, _ in sorted(enumerate(vals), key=lambda p: -p[1])[:k]]
+        E = K = 2
+        counts = [0] * E
+        for seed in range(200):
+            random.seed(seed)
+            logits = [random.gauss(0, 10) for _ in range(E)]
+            for e in topk(logits, K):
+                counts[e] += 1
+        total = sum(counts)
+        assert [c / total for c in counts] == [0.5, 0.5], (
+            "with K == E every expert is selected every time, whatever the "
+            "logits - so the shares cannot carry information")
+
+    def test_topk_below_expert_count_can_differ(self):
+        def topk(vals, k):
+            return [i for i, _ in sorted(enumerate(vals), key=lambda p: -p[1])[:k]]
+        counts = [0, 0]
+        for seed in range(200):
+            random.seed(seed)
+            logits = [random.gauss(0, 10) for _ in range(2)]
+            for e in topk(logits, 1):
+                counts[e] += 1
+        assert counts[0] != counts[1], "top-1 of 2 must be able to prefer one"
+
+    def test_validate_warns_before_the_build(self):
+        from ms_moe_maker.recipe import parse, validate
+        rec, _ = parse({
+            "schema_version": 1, "name": "t", "moe": {"experts_per_tok": 2},
+            "experts": [
+                {"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]})
+        errs, warns = validate(rec)
+        assert errs == [], "a dense ensemble is legal, just not measurable"
+        assert any("experts_per_tok" in w and "cannot discriminate" in w
+                   for w in warns), warns
+
+    def test_the_shipped_flow_recipe_is_measurable(self):
+        import pathlib
+        from ms_moe_maker.recipe import load
+        p = (pathlib.Path(__file__).resolve().parent.parent
+             / "recipe.flow-0.5B.yaml")
+        if not p.is_file():
+            pytest.skip("flow recipe not in this checkout")
+        rec, _ = load(str(p))
+        assert rec.moe.experts_per_tok < len(rec.experts), (
+            "the recipe we hand people must produce a measurable router")
+
+
+class TestQualityOnRawTextCorpora:
+    """A stack/gh corpus is {"text": ...} and has no answer key.
+
+    Every quality row came back "no sample had both a prompt and a reference",
+    which is true and useless: the corpus most people will actually build an
+    expert from could not be scored at all. Raw text has an answer key hiding
+    in it - hold back the second half of a document.
+    """
+
+    def test_qa_shaped_rows_are_used_directly(self):
+        from ms_moe_maker.eval import _prompt_and_reference
+        for keys in (("prompt", "answer"), ("input", "output"),
+                     ("question", "reference")):
+            row = {keys[0]: "Q", keys[1]: "A"}
+            assert _prompt_and_reference(row) == ("Q", "A"), keys
+
+    def test_text_rows_become_a_completion_task(self):
+        from ms_moe_maker.eval import _prompt_and_reference
+        text = "".join(f"line{i}\n" for i in range(10))
+        prompt, ref = _prompt_and_reference({"text": text})
+        assert prompt and ref
+        assert prompt + ref == text, "the split must lose nothing"
+        assert prompt.endswith("\n"), "split on a line boundary, not mid-token"
+
+    def test_content_field_works_too(self):
+        from ms_moe_maker.eval import _prompt_and_reference
+        text = "".join(f"line{i}\n" for i in range(10))
+        assert all(_prompt_and_reference({"content": text}))
+
+    def test_a_document_too_short_to_split_is_skipped(self):
+        """Two lines cannot be halved into a prompt and a meaningful reference."""
+        from ms_moe_maker.eval import _prompt_and_reference
+        assert _prompt_and_reference({"text": "a\nb\n"}) == ("", "")
+
+    def test_an_empty_row_is_skipped(self):
+        from ms_moe_maker.eval import _prompt_and_reference
+        assert _prompt_and_reference({}) == ("", "")
+
+
+class TestEvalMemoryDiscipline:
+    """The eval path OOM-killed a 121 GB Spark. Three causes, all here.
+
+    The load trace told the story: 387 weights, 290, 387 - the MoE was being
+    loaded once per expert on top of once for routing, and nothing was ever
+    actually freed between them.
+    """
+
+    def test_cleanup_takes_no_model_argument(self):
+        """`model_cleanup(model)` did `del model` on its own PARAMETER.
+
+        That drops one name inside the function while the caller still holds
+        the object, so the gc.collect() right after ran with the model fully
+        reachable and freed nothing. Same wrong-scope `del` as the `del torch`
+        in builder.py - a function cannot drop a reference it does not own.
+        """
+        import inspect
+        from ms_moe_maker import eval as ev
+        assert hasattr(ev, "release_memory")
+        assert not hasattr(ev, "model_cleanup"), (
+            "model_cleanup could not free anything; taking the object is the "
+            "bug, not an implementation detail")
+        assert list(inspect.signature(ev.release_memory).parameters) == []
+
+    def test_a_del_on_a_parameter_frees_nothing(self):
+        """The mechanism, pinned down so nobody reintroduces it."""
+        freed = []
+
+        class Big:
+            def __del__(self):
+                freed.append(True)
+
+        def bad_cleanup(obj):
+            import gc
+            del obj
+            gc.collect()
+
+        def caller():
+            model = Big()
+            bad_cleanup(model)
+            return not freed          # still alive after "cleanup"?
+
+        assert caller(), "the object must still be alive - that is the bug"
+
+    def test_the_loader_does_not_use_device_map_auto_or_float32(self):
+        """Both are traps on unified memory, and both were in this file.
+
+        Checks CODE, not prose: the docstrings deliberately name both traps to
+        explain them, and a grep over the raw source flags its own
+        explanation. Stripping docstrings and comments first is the difference
+        between a guard and a gag order on the comments.
+        """
+        import ast
+        import inspect
+        from ms_moe_maker.eval import _load_model, probe_router_discrimination
+
+        def code_only(fn):
+            tree = ast.parse(inspect.getsource(fn).lstrip())
+            for node in ast.walk(tree):
+                # drop docstrings
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef, ast.Module)):
+                    body = node.body
+                    if (body and isinstance(body[0], ast.Expr)
+                            and isinstance(body[0].value, ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        node.body = body[1:]
+            return ast.unparse(tree)
+
+        for fn in (_load_model, probe_router_discrimination):
+            src = code_only(fn)
+            assert "device_map" not in src, f"{fn.__name__} uses device_map"
+            assert "float32" not in src, f"{fn.__name__} loads in float32"
+
+    def test_the_moe_is_loaded_once_not_once_per_expert(self):
+        import inspect
+        from ms_moe_maker.eval import run_eval
+        src = inspect.getsource(run_eval)
+        body = src[src.index("if do_quality:"):]
+        # the MoE load happens outside the per-expert loop
+        assert "_load_model(moe_dir)" in body
+        assert body.count("_load_model(moe_dir)") == 1, (
+            "loading the MoE per expert is what filled 121 GB")
+
+    def test_eval_generation_can_borrow_a_model(self):
+        import inspect
+        from ms_moe_maker.eval import eval_generation
+        assert "loaded" in inspect.signature(eval_generation).parameters
+
+    def test_a_borrowed_model_is_not_freed_by_the_borrower(self):
+        """Whoever loads it frees it. Releasing a shared model mid-loop would
+        pull it out from under the next call."""
+        import inspect
+        from ms_moe_maker.eval import eval_generation
+        src = inspect.getsource(eval_generation)
+        assert "owns_model" in src
+        assert "if owns_model:" in src

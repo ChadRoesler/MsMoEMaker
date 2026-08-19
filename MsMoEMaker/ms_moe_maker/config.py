@@ -306,6 +306,39 @@ def _auto_name(recipe, expert_names: List[str]) -> str:
     return f"moe-{'-'.join(parts)}-{ts}"
 
 
+def _resolve_llama_cpp(recipe) -> str:
+    """Where llama.cpp is, asked in the order a person would ask it.
+
+    RECIPE > ENV > THE OBVIOUS PLACES. It used to be env-only, which made the
+    single most box-specific path in the whole build the one thing a recipe
+    could not carry: hand your recipe to someone else and their export stage
+    silently skips, or - before the argv[0] fix - dies naming your model id.
+
+    The search exists because "I cloned llama.cpp right here" is what almost
+    everyone does, and making them export a variable to say so is a papercut
+    with no upside. Absence is still only a WARNING at preflight: no converter
+    means no GGUF, and the HF checkpoint is a real result on its own.
+    """
+    rt = getattr(recipe, "runtime", None)
+    asked = (getattr(rt, "llama_cpp", "") or "").strip() if rt else ""
+    if asked:
+        return os.path.expanduser(asked)
+
+    env = os.environ.get("MSMOE_LLAMA_CPP", "").strip()
+    if env:
+        return os.path.expanduser(env)
+
+    # Cheap, ordered, and it stops at the first one that looks real - a
+    # directory holding the converter, not merely a directory called llama.cpp.
+    for cand in ("llama.cpp",
+                 os.path.join("..", "llama.cpp"),
+                 os.path.expanduser("~/llama.cpp"),
+                 "/opt/llama.cpp"):
+        if os.path.isfile(os.path.join(cand, "convert_hf_to_gguf.py")):
+            return cand
+    return "llama.cpp"
+
+
 def resolve_dryrun(dryrun: Optional[bool] = None) -> bool:
     """Is this a smallest-rung run?
 
@@ -458,7 +491,7 @@ def build_config(recipe, force: bool = False,
         )
 
     # Llama.cpp dir
-    llama_cpp_dir = os.environ.get("MSMOE_LLAMA_CPP", "llama.cpp")
+    llama_cpp_dir = _resolve_llama_cpp(recipe)
 
     # Smoke timeout
     smoke_timeout_str = os.environ.get("MSMOE_SMOKE_TIMEOUT", "")

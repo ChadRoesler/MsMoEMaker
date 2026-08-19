@@ -272,10 +272,31 @@ def _estimated_gb(config) -> float:
 
 
 def _check_exporter(pf: Preflight, config) -> None:
-    """llama.cpp — a WARNING, because the checkpoint is still a real result."""
+    """llama.cpp — a WARNING, because the checkpoint is still a real result.
+
+    TWO BINARIES, TWO ANSWERS. The converter and llama-cli are separate
+    things and can be separately missing: a checkout with
+    convert_hf_to_gguf.py but no built binaries converts a GGUF and then
+    cannot prove it generates. export.py is explicit that "converted" and
+    "smoke-passed" are different states, so preflight should not collapse
+    them into one green tick.
+    """
+    from .export import resolve_llama_binary
+
     conv = os.path.join(config.llama_cpp_dir, "convert_hf_to_gguf.py")
-    if os.path.exists(conv):
-        pf.add("gguf exporter", PASS, config.llama_cpp_dir)
+    cli = resolve_llama_binary(config.llama_cpp_dir, "llama-cli")
+
+    if os.path.exists(conv) and cli:
+        pf.add("gguf exporter", PASS, f"{config.llama_cpp_dir} (+ {cli})")
+        return
+    if os.path.exists(conv) and not cli:
+        pf.add("gguf exporter", WARN,
+               f"converter found, but no llama-cli under "
+               f"{config.llama_cpp_dir}",
+               "the GGUF will convert and the smoke test will be skipped - "
+               "so it ships UNPROVEN outside Python, which is where this "
+               "project's nastiest bugs live. Build it: cmake --build build "
+               "--config Release -j")
         return
     pf.add("gguf exporter", WARN,
            f"convert_hf_to_gguf.py not found under {config.llama_cpp_dir}",

@@ -438,3 +438,37 @@ class TestCorpusKnobs:
         c = config.build_config(rec, dryrun=False)
         assert c.size == "0.5B"
         assert c.num_code_samples == 3000, "the flow recipe must stay small"
+
+
+
+def test_no_test_still_names_the_old_env_prefix():
+    """The env-prefix cutover to MSMOE_ has to reach the tests too.
+
+    A test that sets the OLD dryrun variable after the rename does not fail - it
+    sets a variable nothing reads, and then asserts the DEFAULT behaviour while
+    appearing to test the override. Green, and measuring nothing.
+    """
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent
+    # Built at runtime, so this file does not itself contain the literal it is
+    # looking for - otherwise the guard flags its own docstring and the only
+    # way to make it pass is to stop describing what it does.
+    old = "FRAUNK" + "_"
+    stale = []
+    for f in here.glob("test_*.py"):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if old in line:
+                stale.append(f"{f.name}:{i}")
+    assert not stale, f"tests still using the retired prefix: {stale}"
+
+
+def test_no_source_still_names_the_old_env_prefix():
+    import pathlib
+    pkg = pathlib.Path(config.__file__).parent
+    old = "FRAUNK" + "_"
+    stale = []
+    for f in pkg.glob("*.py"):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if old in line:
+                stale.append(f"{f.name}:{i}")
+    assert not stale, f"source still using the retired prefix: {stale}"

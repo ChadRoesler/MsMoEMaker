@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # failure for this name. Heavy imports (torch, transformers, datasets) stay
 # inside their functions, where they belong.
 from . import config as cfg
+from . import stages as st
 
 # ---------------------------------------------------------------------------
 # Corpus collection
@@ -58,7 +59,16 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
 
     Returns ``{safe_name: path, ...}`` for every language in the recipe.
 
-    ``callback(name, stage, note)`` is called after each language is finished
+    ``callback(stage_id, status, note)`` reports progress against a REAL STAGE
+    ID from `stages`, with the expert named in the note.
+
+    It used to pass the EXPERT NAME as the stage id - callback("python", ...) -
+    and the manifest writer creates a stage for any id it does not recognise,
+    so a two-expert run grew phantom "python" and "csharp" stages alongside
+    the eight real ones. The count then read 8/9 with nine entries, and any
+    viewer painting from the manifest would draw stages that do not exist in
+    stages.plan(). Corpus collection is progress WITHIN data.corpus, not a
+    stage of its own.
     so the runner can update manifest stage notes.
     """
 
@@ -76,7 +86,7 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
             kind = getattr(src, 'kind', '') if hasattr(src, 'kind') else src.get('kind', '')
             print(f"[skip] {expert_name} dataset already present at {out_path}")
             if callback:
-                callback(expert_name, "skipped", f"already present")
+                callback(st.DATA_CORPUS, "running", f"{expert_name}: already present")
             results[safe] = out_path
             continue
 
@@ -269,7 +279,7 @@ def _collect_hf(repo: str, text_field: str, split: str,
     print(f"   [{lang}] {len(kept)} samples, ~{kept_chars/config.chars_per_token_est/1e6:.1f}M "
           f"est. tokens → {out_path}  ({stop_reason})")
     if callback:
-        callback(lang, "done", f"{len(kept)} samples → {out_path}")
+        callback(st.DATA_CORPUS, "running", f"{lang}: {len(kept)} samples")
     return out_path
 
 
@@ -458,7 +468,7 @@ def _collect_gh(repo: str, glob_pattern: str, ref: Optional[str],
 
     print(f"   [{lang}] {len(kept)} samples from {repo} → {out_path}")
     if callback:
-        callback(lang, "done", f"{len(kept)} samples from {repo}")
+        callback(st.DATA_CORPUS, "running", f"{lang}: {len(kept)} samples from {repo}")
     return out_path
 
 
@@ -507,7 +517,7 @@ def _collect_local(path: str, glob_pattern: str, out_path: str,
 
     print(f"   [{lang}] {len(kept)} local samples → {out_path}")
     if callback:
-        callback(lang, "done", f"{len(kept)} local samples")
+        callback(st.DATA_CORPUS, "running", f"{lang}: {len(kept)} local samples")
     return out_path
 
 
@@ -648,7 +658,7 @@ def _collect_from_shards(languages: List[str], config,
                 fh.write(json.dumps(s_, ensure_ascii=False) + "\n")
         print(f"Saved {safe} → {out_path} ({len(buckets[lang][:config.num_code_samples])} samples)")
         if callback:
-            callback(lang, "done", f"{len(buckets[lang])} docs → {out_path}")
+            callback(st.DATA_CORPUS, "running", f"{lang}: {len(buckets[lang])} docs")
         paths[safe] = out_path
         buckets[lang].clear()  # free memory
 
@@ -703,7 +713,7 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
             os.replace(partial_path, out_path)
             print(f"   resumed a complete .partial ({kept}) → {out_path}")
             if callback:
-                callback("agentcore", "done", f"{kept} traces")
+                callback(st.DATA_SYNTH, "running", f"agentcore: {kept} traces")
             return out_path
         print(f"   resuming from {partial_path} with {kept} traces already banked")
 
@@ -784,7 +794,7 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
     acc_rate = 100.0 * (kept - t_kept0) / max(attempted, 1)
     print(f"   accept rate {acc_rate:.1f}%  top rejections: {rejects}")
     if callback:
-        callback("agentcore", "done", f"{kept} traces")
+        callback(st.DATA_SYNTH, "running", f"agentcore: {kept} traces")
     return out_path
 
 
