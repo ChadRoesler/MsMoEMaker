@@ -31,15 +31,37 @@ def router_is_done(config) -> bool:
 
 
 def train_router(config, final_dir: str, safe_names: List[str],
-                 expert_paths: Dict[str, str]) -> str:
+                 expert_corpus_paths: Dict[str, str]) -> str:
     """Train the MoE router on a stratified mix of expert corpora.
 
-    The specialists are loaded frozen.  Only the router gate weights train.
-
+    The specialists are loaded frozen. Only the router gate weights train.
     Saves to OUTPUT_ROOT/moe_trained.
 
-    Returns the output directory path.
+    `expert_corpus_paths` maps expert name -> the JSONL CORPUS FILE that expert
+    was trained on. It was called `expert_paths`, and the builder passed
+    `specialist_dirs` - the MODEL directories - into it. Two different things
+    with names close enough to slide past a reader, and the mistake surfaced
+    ten minutes into a run as
+
+        IsADirectoryError: [Errno 21] Is a directory: '.../specialist_python'
+
+    which names the symptom and not one word of the cause. Renamed so the call
+    site has to say which it means, and checked FIRST so a wrong one is
+    refused immediately with the reason rather than at the open().
     """
+    # ARGUMENTS BEFORE IMPORTS. A caller's mistake should cost nothing to
+    # detect. Checked here rather than lower down because below this line is
+    # `import torch` and a multi-gigabyte model load - so a guard placed after
+    # them is unreachable on a box without a GPU stack, and on a box with one
+    # it only speaks after the caller has already waited. Same rule as
+    # verify_stitch: structural checks first, machinery second.
+    wrong = {n: p for n, p in expert_corpus_paths.items() if os.path.isdir(p)}
+    if wrong:
+        raise RuntimeError(
+            f"train_router needs the JSONL CORPUS each expert trained on, but "
+            f"got directories: {wrong}. That is almost always specialist_dirs "
+            f"(the model checkpoints) passed where the corpus paths belong.")
+
     import torch
 
     out_dir = router_dir(config)
@@ -122,7 +144,7 @@ def train_router(config, final_dir: str, safe_names: List[str],
     # Build stratified data mix
     pools: Dict[str, List[str]] = {}
     for name in safe_names:
-        path = expert_paths.get(name)
+        path = expert_corpus_paths.get(name)
         if not path or not os.path.exists(path):
             print(f"   WARNING: no data for expert {name!r} at {path}")
             continue

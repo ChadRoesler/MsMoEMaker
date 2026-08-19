@@ -229,6 +229,11 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     print(f"{'=' * 60}")
 
     specialist_dirs: Dict[str, str] = {}
+    # The corpus each expert actually trained on. Tracked rather than
+    # reconstructed later, because for a synth expert it is the generated
+    # trace file and not code_paths[name] - so re-deriving it downstream would
+    # quietly train the router on a different mix than the experts saw.
+    expert_corpus_paths: Dict[str, str] = {}
     for i, safe_name in enumerate(expert_names):
         print(f"\n  [{i+1}/{len(expert_names)}] {safe_name}")
         cb.stage(f"finetune.{safe_name}", "running",
@@ -264,6 +269,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         # "already present on disk; the pipeline's _done() fired". The
         # vocabulary was never the missing part.
         was_present = finetune_mod.specialist_is_done(config, safe_name)
+        expert_corpus_paths[safe_name] = data_path
         out_dir = finetune_mod.fine_tune_specialist(
             config, safe_name, data_path,
             expert_display=DISPLAY_LANG.get(safe_name, safe_name),
@@ -332,8 +338,10 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     print(f"{'=' * 60}")
 
     router_was_present = router_mod.router_is_done(config)
+    # CORPORA, not specialist dirs. Passing specialist_dirs here is what made
+    # a ten-minute run die on `open()` at stage 5.
     router_dir = router_mod.train_router(
-        config, moe_dir, list(specialist_dirs.keys()), specialist_dirs)
+        config, moe_dir, list(specialist_dirs.keys()), expert_corpus_paths)
     if not router_dir:
         result.failed_stage = stages.ROUTER
         result.message = "Router training failed"
