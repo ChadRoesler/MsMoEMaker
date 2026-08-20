@@ -1120,14 +1120,36 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
         report.dead_experts = []
         return []
 
-    # Input-blind routing is not "no dead experts", it is every expert dead at
-    # once and the enrichment table meaning nothing. Say so before reading it.
-    if routing.get("mean_js_bits", 1.0) < 1e-3:
+    # INPUT-BLINDNESS KILLS ENRICHMENT, NOT SHARE, AND THIS USED TO KILL BOTH.
+    #
+    # The early return here threw the whole table away and reported zero dead
+    # experts. On a real run that printed
+    #
+    #     csharp  own 0.045  share 0.043      <- 4.3% against 0.50 for uniform
+    #     python  own 0.957  share 0.955
+    #     INPUT-BLIND - the router ignores its input entirely
+    #     Eval complete. 0 dead expert(s).
+    #
+    # which is a router collapsed onto one expert, reported as a clean bill.
+    # The two numbers answer different questions and only one of them depends
+    # on the input:
+    #
+    #   ENRICHMENT is own-source share divided by other-source share. If
+    #   routing does not vary with the source, both terms are the same number
+    #   and the ratio is noise. Correctly discarded.
+    #
+    #   SHARE is how often the expert is selected AT ALL. It is a marginal, it
+    #   does not reference the source, and an expert selected on 4% of tokens
+    #   when uniform is 50% is a passenger whether or not the router reads its
+    #   input. That measurement was fine and we deleted it.
+    #
+    # So blindness now suppresses the SPECIALISATION verdict and nothing else.
+    blind = routing.get("mean_js_bits", 1.0) < 1e-3
+    if blind:
         report.unmeasured.append(
-            "dead-expert check: routing is input-blind (mean JS ~ 0) - the "
-            "router ignores its input, so per-expert enrichment is noise")
-        report.dead_experts = []
-        return []
+            "specialisation: routing is input-blind (mean JS ~ 0) - the router "
+            "ignores its input, so per-expert enrichment is noise. Selection "
+            "share is still measurable and is read below.")
 
     # TWO FAILURES, TWO WORDS. This used to call both of them dead.
     #
@@ -1158,6 +1180,10 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
             why = (f"dead: selected on {share:.3f} of tokens against "
                    f"{uniform:.3f} for uniform routing - the router does not "
                    f"route to it")
+        elif blind:
+            # Used enough to be alive; whether it SPECIALISES is unanswerable
+            # here, and saying nothing beats guessing from a noise ratio.
+            continue
         elif enrichment < threshold or info.get("outranked"):
             weak.append(name)
             why = (f"not specialised: enrichment {enrichment:.2f}x < "
@@ -1179,6 +1205,24 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
     # chance. At E=2 that is 0.25 - the headline can never be significant, no
     # matter how clean the table looks. Say it next to the result rather than
     # leaving the reader to notice p=0.25 on their own.
+    # COLLAPSE IS ITS OWN DIAGNOSIS AND DESERVES ITS OWN SENTENCE. "n-1 dead
+    # experts" is technically what happened; "the router put 96% of every
+    # source's tokens through one expert" is what a person can act on, and it
+    # points at the load-balancing coefficient rather than at the stitch.
+    hog = max(experts.items(),
+              key=lambda kv: kv[1].get("marginal_share",
+                                       kv[1].get("own_share", 0.0)),
+              default=(None, {}))
+    hog_share = hog[1].get("marginal_share", hog[1].get("own_share", 0.0)) if hog[0] else 0.0
+    if hog[0] and E >= 2 and hog_share > 1.0 - floor:
+        report.caveats.append(
+            f"router collapsed onto {hog[0]}: it takes {hog_share:.1%} of all "
+            f"tokens regardless of source ({uniform:.1%} is uniform). This is "
+            f"rich-get-richer in a top-{K} router, not a stitch problem - the "
+            f"load-balancing loss is what holds it off, and "
+            f"router.aux_loss_coef controls how hard. Switch used 0.01, "
+            f"Mixtral 0.02.")
+
     p_floor = 1.0 / (E ** E) if E else 1.0
     if p_floor > 0.05:
         report.caveats.append(

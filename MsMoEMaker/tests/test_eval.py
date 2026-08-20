@@ -574,3 +574,71 @@ class TestEvalMemoryDiscipline:
         src = inspect.getsource(eval_generation)
         assert "owns_model" in src
         assert "if owns_model:" in src
+
+
+class TestCollapsedRouter:
+    """A router that puts everything through one expert, reported as clean.
+
+    These are the real numbers from the first build after the top-1 gradient
+    fix: the gate finally MOVED (uniform 0.50/0.50 -> 0.96/0.04) and then
+    collapsed onto one expert instead of specialising. The eval printed
+
+        csharp  own 0.045  share 0.043
+        python  own 0.957  share 0.955
+        INPUT-BLIND - the router ignores its input entirely
+        Eval complete. 0 dead expert(s).
+
+    Four percent of uniform, called alive, because the input-blind guard
+    returned early and discarded the share column along with the enrichment
+    column. Only one of those two depends on the input.
+    """
+
+    def _collapsed(self):
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.00, "own_share": 0.957,
+                    "marginal_share": 0.955, "top_competitor": "csharp",
+                    "top_competitor_share": 0.955, "outranked": False},
+            csharp={"enrichment": 1.04, "own_share": 0.045,
+                    "marginal_share": 0.043, "top_competitor": "python",
+                    "top_competitor_share": 0.043, "outranked": False})
+        report.routing["mean_js_bits"] = 0.0007
+        return report
+
+    def test_the_starved_expert_is_dead_even_when_routing_is_input_blind(self):
+        report = self._collapsed()
+        assert detect_dead_experts(report) == ["csharp"], (
+            "4.3% of tokens against 50% for uniform is a passenger, and "
+            "whether the router reads its input has no bearing on that")
+
+    def test_blindness_still_suppresses_the_specialisation_verdict(self):
+        report = self._collapsed()
+        detect_dead_experts(report)
+        assert report.undiscriminating == [], (
+            "enrichment is a per-source ratio; with input-blind routing both "
+            "terms are the same number and the ratio is noise")
+        assert any("input-blind" in u for u in report.unmeasured)
+
+    def test_collapse_is_named_as_collapse_not_just_as_a_dead_expert(self):
+        """'one dead expert' points at the stitch. 'the router put 96% of every
+        source through one expert' points at the aux-loss coefficient."""
+        report = self._collapsed()
+        detect_dead_experts(report)
+        assert any("collapsed onto python" in c for c in report.caveats), \
+            report.caveats
+        assert any("aux_loss_coef" in c for c in report.caveats)
+
+    def test_a_healthy_blind_router_reports_nothing_dead(self):
+        """Input-blind but BALANCED is the earlier failure, and it has no dead
+        expert in it - both are used exactly as often as uniform predicts."""
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.00, "own_share": 0.499,
+                    "marginal_share": 0.498, "outranked": False},
+            csharp={"enrichment": 1.00, "own_share": 0.502,
+                    "marginal_share": 0.501, "outranked": False})
+        report.routing["mean_js_bits"] = 0.0007
+        assert detect_dead_experts(report) == []
+        assert not any("collapsed" in c for c in report.caveats)
