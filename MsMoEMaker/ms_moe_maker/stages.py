@@ -46,6 +46,12 @@ PREFLIGHT = "preflight"
 # Cheapest it will ever be was the day it was noticed. This is that day.
 DATA_CORPUS = "data.corpus"
 DATA_SYNTH = "data.synth"
+# A GATE, NOT A PROBE, AND THE DIFFERENCE IS WHICH SIDE OF THE WORK IT SITS ON.
+# See the note in plan() about why the evals stay out of this list. This one
+# is allowed in for the same reason preflight is: it grades the build's INPUTS
+# (are these specialists actually different, and is there anything for a router
+# to learn from them) before the expensive stages spend a night finding out.
+GATE_EXPERTS = "gate.experts"
 STITCH = "stitch"
 ROUTER = "router"
 EXPORT_GGUF = "export.gguf"
@@ -57,6 +63,7 @@ LABELS: Dict[str, str] = {
     PREFLIGHT: "Preflight - stamp the levers, check the disk",
     DATA_CORPUS: "Collect the expert corpora",
     DATA_SYNTH: "Generate the synthetic corpora",
+    GATE_EXPERTS: "Check the experts diverged and can be routed between",
     STITCH: "Stitch the MoE skeleton",
     ROUTER: "Train the router",
     EXPORT_GGUF: "Export GGUF and smoke-test it",
@@ -80,7 +87,8 @@ def label_for(stage_id: str) -> str:
 
 
 def plan(experts: List[str],
-         synth: Sequence[str] = ()) -> List[Tuple[str, str]]:
+         synth: Sequence[str] = (),
+         gates: bool = True) -> List[Tuple[str, str]]:
     """The full ordered stage list for a build of these experts.
 
     Returns [(id, label), ...] in execution order, mirroring the orchestrator
@@ -89,6 +97,14 @@ def plan(experts: List[str],
         preflight -> gather corpora -> generate synthetic corpora
                   -> finetune each specialist
                   -> stitch skeleton -> train router -> export GGUF
+
+    `gates=False` drops the gate stages, and exists for ONE caller: the runner
+    that wraps the legacy `fraunkenstein_universal.py`. That script predates
+    the gate and cannot emit it, so planning it there would seed a stage
+    nothing can ever close - and "a stage that never reaches a terminal state"
+    is precisely the failure the runner's own tests exist to catch. Better to
+    say out loud that this pipeline has no gate than to let the manifest carry
+    one that hangs forever.
 
     `synth` is the experts whose source has to be GENERATED rather than
     downloaded, and it is a parameter because it used to be the literal check
@@ -106,6 +122,21 @@ def plan(experts: List[str],
     would make the build the thing that grades itself. Keeping the evidence
     layer outside the pipeline is the same reason SerenProbe is its own
     service.
+
+    GATE_EXPERTS IS THE ONE EXCEPTION, AND THE RULE ABOVE IS WHY IT QUALIFIES.
+    The objection to folding evidence in is self-grading: a build that decides
+    whether its own output is good has marked its own homework. A gate that
+    measures its INPUTS has not.
+
+        preflight     grades the machine    before we use it
+        gate.experts  grades the specialists before we stitch them
+        eval          grades the MoE        after it exists      <- self-grading
+
+    The first two answer "should we proceed"; only the third answers "was it
+    any good". eval stays outside. This does not, because the alternative is
+    learning that two experts were interchangeable after paying for a stitch,
+    a router train and a GGUF export - which is exactly how it was learned the
+    first time.
     """
     out: List[Tuple[str, str]] = [
         (PREFLIGHT, LABELS[PREFLIGHT]),
@@ -115,6 +146,8 @@ def plan(experts: List[str],
         out.append((DATA_SYNTH, LABELS[DATA_SYNTH]))
     for expert in experts:
         out.append((finetune_id(expert), finetune_label(expert)))
+    if gates and len(experts) >= 2:
+        out.append((GATE_EXPERTS, LABELS[GATE_EXPERTS]))
     out.extend([
         (STITCH, LABELS[STITCH]),
         (ROUTER, LABELS[ROUTER]),

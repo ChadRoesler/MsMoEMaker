@@ -183,7 +183,7 @@ class Runner:
             experts=experts,
             refusals=list(translation.refusals),
             stages=[mf.Stage(id=sid, label=label)
-                    for sid, label in st.plan(experts, synth)],
+                    for sid, label in st.plan(experts, synth, gates=False)],
         )
         self._current: Optional[str] = None
         self._missing_module: Optional[str] = None

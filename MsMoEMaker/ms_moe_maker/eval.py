@@ -90,6 +90,14 @@ class EvalReport:
     """
     caveats: List[str] = field(default_factory=list)
     """Measured, but with a limit the reader has to know about."""
+    experts: Dict[str, Any] = field(default_factory=dict)
+    """The pre-stitch expert checks, re-run against an existing run dir.
+
+    Same measurements the build gate makes - weight divergence, cross-domain
+    loss, config audit - available afterward without a rebuild, because the
+    question "was there ever anything to route on" is usually asked while
+    staring at a disappointing routing table.
+    """
     unmeasured: List[str] = field(default_factory=list)
     """Things we could not measure, and therefore did not score."""
 
@@ -1206,9 +1214,10 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     num_samples = spec.get("num_samples", 20)
     dead_threshold = spec.get("dead_threshold", 1.2)
     mode = spec.get("mode", "all")
-    if mode not in ("routing", "quality", "all"):
+    if mode not in ("routing", "quality", "experts", "all"):
         report.ok = False
-        report.message = f"unknown eval mode {mode!r} (expect routing|quality|all)"
+        report.message = (f"unknown eval mode {mode!r} "
+                          f"(expect routing|quality|experts|all)")
         return report
 
     # Custom script replaces us entirely. We provide the floor; this is the
@@ -1253,6 +1262,27 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
 
     do_routing = mode in ("routing", "all")
     do_quality = mode in ("quality", "all")
+    do_experts = mode in ("experts", "all")
+
+    # ── experts: was there ever anything to route on? ──────────────────────
+    #
+    # FIRST, because it is the question the other two make you ask. A routing
+    # table at 1.00x enrichment sends you to router hyperparameters; whether
+    # that is the right place to go depends entirely on whether the experts
+    # differ and whether routing correctly lowers the loss - and those are
+    # measured here.
+    if do_experts:
+        from . import experts as experts_mod
+        expert_dirs = {
+            n: str(output_root / st.FINETUNE_ARTIFACT.format(expert=n))
+            for n in expert_order}
+        _trace("expert checks")
+        gate = experts_mod.run_experts(
+            config, expert_dirs, held_paths=held_paths, moe_dir=moe_dir,
+            spec={"num_samples": num_samples})
+        report.experts = gate.to_dict()
+        report.caveats.extend(gate.findings)
+        report.unmeasured.extend(f"experts/{u}" for u in gate.unmeasured)
 
     # ── routing: the dead-expert measurement ───────────────────────────────
     if do_routing:
@@ -1415,6 +1445,7 @@ def eval_from_manifest(run_dir: Path) -> EvalReport:
     report.dead_experts = data.get("dead_experts", [])
     report.undiscriminating = data.get("undiscriminating", [])
     report.caveats = data.get("caveats", [])
+    report.experts = data.get("experts", {})
 
     for name, info in data.get("stages", {}).items():
         r = EvalResult(
@@ -1440,6 +1471,7 @@ def save_eval_report(report: EvalReport, path: Path) -> None:
         "dead_experts": report.dead_experts,
         "undiscriminating": report.undiscriminating,
         "caveats": report.caveats,
+        "experts": report.experts,
         "stages": {
             name: {
                 "expert_name": r.expert_name,

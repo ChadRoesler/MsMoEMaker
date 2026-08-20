@@ -27,10 +27,20 @@ DESCRIPTION = ("Build a mixture of experts from deliberately chosen "
 # `eval` came to exist in the CLI while this tuple still said three.
 COMMANDS = ("init", "build", "smoke", "eval", "validate", "describe")
 
-# What `eval` can be asked. Two different questions, deliberately separable:
+# What `eval` can be asked. Three different questions, deliberately separable:
 #   routing - does each expert own its own ground? (the dead-expert claim)
 #   quality - does it answer better than one expert alone? (needs an answer key)
-EVAL_MODES = ("routing", "quality", "all")
+#   experts - was there ever anything to route on? (divergence + cross-loss)
+#
+# `experts` answers the question the other two make you ask. A routing table at
+# 1.00x enrichment reads as a router problem, and whether it IS one depends on
+# whether the specialists differ and whether routing correctly lowers the loss.
+# Those are separate measurements and they were three separate hand-run probes
+# before they were a mode.
+#
+# Adding a mode is additive: a consumer that does not know it will not ask for
+# it, and stagehand's existing --mode values keep meaning what they meant.
+EVAL_MODES = ("routing", "quality", "experts", "all")
 
 # The event vocabulary emitted under --json. A consumer that does not know an
 # event kind must ignore it, so adding one is not a breaking change; removing

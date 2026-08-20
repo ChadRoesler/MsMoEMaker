@@ -532,7 +532,22 @@ def _cmd_eval(args):
 
 
 def _print_eval_report(report):
-    """Print an EvalReport. Routing first - it is the claim."""
+    """Print an EvalReport. Experts first, then routing - it is the claim."""
+    # EXPERTS BEFORE ROUTING, because it is the question routing makes you ask.
+    # Reading "1.00x enrichment" before "the experts are interchangeable" sends
+    # you to the router; reading them the other way round does not.
+    if report.experts:
+        from . import experts as _ex
+        rep = _ex.ExpertsReport(
+            status=report.experts.get("status", _ex.OK),
+            divergence=report.experts.get("divergence", {}),
+            pairwise=report.experts.get("pairwise", {}),
+            cross_loss=report.experts.get("cross_loss", {}),
+            config_audit=report.experts.get("config_audit", {}),
+            findings=report.experts.get("findings", []),
+            unmeasured=report.experts.get("unmeasured", []))
+        print(_ex.format_report(rep))
+
     routing = report.routing or {}
     experts = routing.get("experts") or {}
     if experts:

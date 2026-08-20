@@ -111,6 +111,17 @@ class Gates:
     """Eval gate config."""
     base_evals: str = "auto"
     main_evals: str = "auto"
+    # The pre-stitch expert check. `auto` runs weight divergence AND the
+    # cross-domain loss matrix; `cheap` runs only the weight comparisons (CPU,
+    # seconds); `skip` runs neither.
+    #
+    # Three settings rather than a bool because the two halves have wildly
+    # different costs. The weight side is free at any model size. The loss side
+    # loads every specialist and scores it on every domain - trivial at 0.5B,
+    # a real bill at 32B - and it is also the ONLY one that can answer whether
+    # the router has a gradient at all. Someone on a big run should be able to
+    # keep the free half without buying the expensive one.
+    experts: str = "auto"
 
 
 @dataclass
@@ -554,6 +565,9 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
                  ("main_evals", rec.gates.main_evals)):
         if v not in ("auto", "manual", "skip"):
             errs.append(f"gates.{g} must be auto | manual | skip, got {v!r}")
+    if rec.gates.experts not in ("auto", "cheap", "skip"):
+        errs.append(f"gates.experts must be auto | cheap | skip, got "
+                    f"{rec.gates.experts!r}")
     if rec.gates.main_evals == "auto":
         warns.append("gates.main_evals=auto removes the third switch. The "
                      "expensive suite will run unattended on whatever the "

@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import shutil
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import config as cfg_module
@@ -300,6 +301,56 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    # ── Gate: do the experts differ, and can a router learn from them? ────
+    #
+    # BEFORE THE STITCH, ON PURPOSE. Everything downstream of here - stitch,
+    # router train, GGUF export, smoke, eval - runs identically on two experts
+    # that learned different things and on two that learned the same thing.
+    # The first time that happened it was found after all of it, by hand, with
+    # three separate probes. This is those probes, run at the one moment the
+    # answer can still save the work.
+    #
+    # WARN, NEVER REFUSE. Someone may genuinely want a dense ensemble, and
+    # mandate is not ethos: the job is to make sure they know what they are
+    # getting, not to decide for them.
+    gate_mode = getattr(getattr(recipe, "gates", None), "experts", "auto")
+    if len(specialist_dirs) >= 2 and gate_mode != "skip":
+        cb.stage(stages.GATE_EXPERTS, "running", "comparing the specialists")
+        try:
+            from . import experts as experts_mod
+            from . import eval as eval_mod
+
+            held: Dict[str, str] = {}
+            if gate_mode == "auto":
+                data_root = Path(config.data_root)
+                for name in specialist_dirs:
+                    for cand in (data_root / f"{name}.jsonl",
+                                 data_root / f"{name}_code.jsonl"):
+                        if cand.is_file():
+                            _, hp = eval_mod._load_or_split(str(cand), 0.1)
+                            held[name] = hp
+                            break
+
+            gate = experts_mod.run_experts(
+                config, dict(specialist_dirs), held_paths=held or None,
+                spec={"num_samples": 12}, callback=cb.stage)
+            print(experts_mod.format_report(gate))
+            result.artifacts[stages.GATE_EXPERTS] = gate.status
+            if gate.findings:
+                cb.stage(stages.GATE_EXPERTS, "done",
+                         f"{len(gate.findings)} finding(s) - see the report; "
+                         f"building anyway")
+            else:
+                cb.stage(stages.GATE_EXPERTS, "done", "experts look routable")
+        except Exception as exc:                      # never fail the build
+            # A GATE THAT CRASHES MUST NOT TAKE THE BUILD WITH IT. It is
+            # advisory by design, so its own failure is reported as "not
+            # measured" - the one thing it must never do is look like a pass.
+            print(f"[warn] expert gate could not run: {exc}", file=sys.stderr)
+            cb.stage(stages.GATE_EXPERTS, "skipped", f"gate error: {exc}")
+    elif len(specialist_dirs) >= 2:
+        cb.stage(stages.GATE_EXPERTS, "skipped", "gates.experts: skip")
 
     # ── Stage 4: Stitch MoE ───────────────────────────────────────────────
     cb.stage(stages.STITCH, "running", "stitching MoE skeleton")
