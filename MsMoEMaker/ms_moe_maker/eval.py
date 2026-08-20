@@ -704,12 +704,31 @@ def probe_router_discrimination(moe_dir: str,
         oavg = sum(others) / max(len(others), 1)
         top = max(col, key=col.get)
         r = own / max(oavg, 1e-9)
-        enrich.append(r)
+
+        # A STARVED EXPERT HAS NO ENRICHMENT, ONLY A RATIO OF TWO NOISES.
+        #
+        # A collapsed run printed `python own 0.001 others 0.000 enrich 2.15x`
+        # - the largest enrichment on the board, from 0.001 / 0.0005, on an
+        # expert the router had abandoned. It also pulled the MEAN from ~1.0
+        # to 1.57, so the one summary number a reader is most likely to quote
+        # was set by the expert with the least data behind it.
+        #
+        # Below the same floor `dead` uses, the division is unstable by
+        # construction: numerator and denominator are both a handful of token
+        # selections out of tens of thousands. Compute it, flag it, and keep
+        # it out of the mean.
+        marginal = sum(col.values()) / max(len(col), 1)
+        starved = marginal < (K / max(E, 1)) * 0.2
+        if not starved:
+            enrich.append(r)
         hits += (top == en)
         rivals = sorted(((s, v) for s, v in col.items() if s != en),
                         key=lambda kv: kv[1], reverse=True)
         experts[en] = {
             "enrichment": r,
+            # False when the expert is selected too rarely for the ratio above
+            # to mean anything. Read the share instead.
+            "enrichment_reliable": not starved,
             "own_share": own,
             # Selection share averaged over EVERY source - the number that
             # answers "is this expert used at all", which is what dead means.
@@ -730,6 +749,8 @@ def probe_router_discrimination(moe_dir: str,
             "outranked": bool(rivals) and rivals[0][1] > own * 1.02,
         }
 
+    # n counts only the experts whose enrichment is readable, so the mean is
+    # over the same set the table asks you to believe.
     n = len(enrich)
     mean_enrichment = sum(enrich) / max(n, 1)
 

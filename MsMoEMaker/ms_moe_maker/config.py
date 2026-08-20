@@ -187,6 +187,10 @@ class PipelineConfig:
 
     # Router
     router_mix_total: int = 12_000
+    per_repo_cap: int = 20
+    router_init: str = "zero"
+    router_init_std: float = 0.02
+    seed: int = 42
     agent_mix_fraction: float = 0.15
     router_batch: int = 1
     router_accum: int = 8
@@ -463,6 +467,7 @@ def build_config(recipe, force: bool = False,
         return dry if dryrun else prod
 
     num_code_samples = _corpus_knob("max_samples", 10_000, 100_000)
+    per_repo_cap = _corpus_knob("per_repo_cap", 20, 20)
 
     # Hardware-appropriate defaults
     tier_spec = _TIER_HINTS.get(tier_name, _TIER_HINTS["spark"])
@@ -579,6 +584,7 @@ def build_config(recipe, force: bool = False,
         expert_token_budget=expert_token_budget,
         warmup_steps=warmup_steps,
         # Router
+        per_repo_cap=per_repo_cap,
         router_mix_total=_corpus_knob("router_mix_total", 4_000, 12_000),
         agent_mix_fraction=0.15,
         # RECIPE FIRST, DEFAULT SECOND. `-1` means "you pick", which is how a
@@ -592,6 +598,8 @@ def build_config(recipe, force: bool = False,
         # MoE
         experts_per_tok=recipe.moe.experts_per_tok,
         norm_topk_prob=recipe.moe.norm_topk_prob,
+        router_init=recipe.moe.router_init,
+        router_init_std=recipe.moe.router_init_std,
         shared_expert_width=recipe.moe.shared_expert_width,
         shared_expert_gate_fill=0.02,
         mlp_only_layers=mlp_only_layers,

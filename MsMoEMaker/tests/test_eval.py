@@ -716,3 +716,50 @@ def test_a_floating_point_tie_is_not_an_outranking():
                 "outranked": False})
     report.routing["mean_js_bits"] = 0.4
     assert detect_dead_experts(report) == []
+
+
+class TestStarvedEnrichment:
+    """An abandoned expert's enrichment is one noise over another.
+
+    A collapsed run printed `python own 0.001 others 0.000 enrich 2.15x` - the
+    largest enrichment in the table, computed from a handful of selections,
+    on the expert the router had abandoned. It also pulled the reported MEAN
+    from ~1.0 to 1.57, so the single number a reader is most likely to quote
+    was set by the expert with the least evidence behind it.
+    """
+
+    def test_a_starved_expert_prints_noise_not_a_ratio(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            csharp={"enrichment": 1.00, "own_share": 1.000,
+                    "others_share": 0.999, "marginal_share": 0.999,
+                    "enrichment_reliable": True, "own_is_column_max": True},
+            python={"enrichment": 2.15, "own_share": 0.001,
+                    "others_share": 0.000, "marginal_share": 0.001,
+                    "enrichment_reliable": False, "own_is_column_max": True})
+        report.routing.update({"mean_js_bits": 0.0001, "moe_layers": 24,
+                               "named_experts": 2, "own_is_max_count": 2,
+                               "mean_enrichment": 1.00, "p_value": 0.25})
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "2.15" not in out, "a starved expert must not advertise a ratio"
+        assert "noise" in out
+        assert "STARVED" in out
+
+    def test_a_healthy_expert_still_prints_its_enrichment(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=3, top_k=2,
+            a={"enrichment": 2.10, "own_share": 0.55, "others_share": 0.26,
+               "marginal_share": 0.35, "enrichment_reliable": True,
+               "own_is_column_max": True})
+        report.routing.update({"mean_js_bits": 0.4, "moe_layers": 24,
+                               "named_experts": 1, "own_is_max_count": 1,
+                               "mean_enrichment": 2.10, "p_value": 0.037})
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "2.10x" in out
+        assert "STARVED" not in out

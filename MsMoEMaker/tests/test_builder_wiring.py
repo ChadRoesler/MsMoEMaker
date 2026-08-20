@@ -65,7 +65,9 @@ def wired(tmp_path, monkeypatch):
     stitch = types.ModuleType("stitch")
     stitch.stitch_is_done = lambda config: False
     stitch.stitch_moe = lambda config, names: str(out_root / "moe_untrained")
-    stitch.verify_stitch = lambda d, output_root=None, gate_fill=0.02: True
+    # **kw so a new verify option does not break the fake. The fake's job
+    # is to say 'the stitch was fine', not to mirror a signature.
+    stitch.verify_stitch = lambda d, **kw: True
 
     router = types.ModuleType("router")
     router.router_is_done = lambda config: False

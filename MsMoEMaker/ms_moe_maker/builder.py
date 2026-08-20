@@ -370,7 +370,9 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     # Pass output_root explicitly so verification finds the specialists to
     # compare against, rather than guessing from the MoE dir's parent.
     if stitch_mod.verify_stitch(moe_dir, output_root=config.output_root,
-                                gate_fill=config.shared_expert_gate_fill):
+                                gate_fill=config.shared_expert_gate_fill,
+                                router_init=getattr(config, "router_init",
+                                                    "zero")):
         cb.stage(stages.STITCH,
                  mf.SKIPPED if stitch_was_present else mf.DONE,
                  f"skeleton → {moe_dir}")

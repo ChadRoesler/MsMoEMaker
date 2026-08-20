@@ -86,6 +86,14 @@ class MoE:
     """MoE routing architecture."""
     experts_per_tok: int = 2
     norm_topk_prob: bool = True
+    # zero | random. Zero makes the untrained MoE reproduce one expert exactly
+    # and lets verify_stitch assert bit-equality; it is also a perfectly
+    # symmetric starting point that a top-k router can only leave via the
+    # load-balancing loss. Three router trainings on one zero-init skeleton all
+    # collapsed onto a single expert, with a different winner each time.
+    # `random` seeds small noise, as Switch and Mixtral do.
+    router_init: str = "zero"
+    router_init_std: float = 0.02
     shared_expert_width: int = 1
     shared_expert_gate_fill: float = 0.02
     # ANNOTATED, AND THAT IS THE FIX. This was `dense_layers = "auto"` with no
@@ -160,6 +168,12 @@ class Corpus:
     min_samples: int = -1        # floor per expert before the stage fails
     max_samples: int = -1        # cap per expert
     router_mix_total: int = -1   # rows in the router's stratified mix
+    # Max files taken from ONE repository, per language. The token quota can
+    # otherwise be satisfied entirely from a single large codebase - measured
+    # at 78% of a C# corpus from one enterprise application, which trained a
+    # house-style expert that passed every downstream check. Lower is more
+    # diverse and needs more shards.
+    per_repo_cap: int = -1
 
 
 @dataclass
@@ -556,6 +570,13 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     # The scaling warning applies to top-k >= 2, where normalisation is a real
     # choice. At top-1 it is the ONLY correct setting, so warning about it
     # there pushed users straight into the error above.
+    if m.router_init not in ("zero", "random"):
+        errs.append(f"moe.router_init must be zero | random, got "
+                    f"{m.router_init!r}")
+    if m.router_init == "random" and not (0 < m.router_init_std <= 0.5):
+        errs.append(f"moe.router_init_std {m.router_init_std} must be in "
+                    f"(0, 0.5] - larger and the untrained MoE routes on noise")
+
     if not m.norm_topk_prob and m.experts_per_tok >= 2:
         warns.append("moe.norm_topk_prob=false scales the stitched model to "
                      "~0.40x at init, so the router trains on the wrong problem")

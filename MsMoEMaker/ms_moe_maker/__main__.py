@@ -561,8 +561,16 @@ def _print_eval_report(report):
                 flag = "  OUTRANKED ON ITS OWN GROUND"
             elif e.get("own_is_column_max"):
                 flag = "  <- own is top"
+            # An abandoned expert's enrichment is one noise divided by
+            # another. Printing "2.15x" next to a 0.001 share invites the
+            # reader to quote the best-looking number in the table.
+            if e.get("enrichment_reliable", True):
+                enrich = f"{e['enrichment']:>8.2f}x"
+            else:
+                enrich = f"{'noise':>9}"
+                flag = "  STARVED - enrichment unreadable, read the share"
             print(f"  {name:16} {e['own_share']:>7.3f} {e.get('others_share', 0):>8.3f} "
-                  f"{e['enrichment']:>8.2f}x {str(e.get('top_competitor','')):>14} "
+                  f"{enrich} {str(e.get('top_competitor','')):>14} "
                   f"{e.get('top_competitor_share', 0):>7.3f}{flag}")
         n = routing.get("named_experts") or 0
         if n:

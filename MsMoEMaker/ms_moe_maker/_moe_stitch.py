@@ -171,7 +171,8 @@ def plan_from_meta(model_cls, moe_config):
 
 def stream_stitch(out_dir, anchor_dir, spec_dirs, expert_names,
                   model_cls, moe_config, shared_gate_fill,
-                  num_layers, tokenizer_src=None, max_shard_bytes=4_000_000_000):
+                  num_layers, tokenizer_src=None, max_shard_bytes=4_000_000_000,
+                  router_init="zero", router_init_std=0.02, router_seed=0):
     """Build the MoE checkpoint on disk. Never holds the model in memory.
 
     spec_dirs / expert_names are parallel and IN EXPERT INDEX ORDER.
@@ -241,9 +242,32 @@ def stream_stitch(out_dir, anchor_dir, spec_dirs, expert_names,
             stats["expert"] += 1
 
         elif key.endswith(".mlp.gate.weight"):
-            # The router. Qwen2MoeTopKRouter initialises this to zeros anyway,
-            # and train_router is what fills it.
-            t = torch.zeros(shape, dtype=dtype)
+            # THE ROUTER, AND WHY ZERO IS NOT OBVIOUSLY RIGHT.
+            #
+            # Zeros make the untrained MoE reproduce one expert exactly, which
+            # is a genuinely useful property: verify_stitch can assert it, and
+            # a stitch is either bit-perfect or it is not. That is why it is
+            # still the default.
+            #
+            # But zeros are also a PERFECTLY SYMMETRIC starting point, and a
+            # top-k router has no way out of perfect symmetry except the
+            # load-balancing loss. Measured across three router trainings on
+            # one skeleton: every run collapsed onto a single expert, the
+            # winner differed between runs (python, csharp, csharp), and JS
+            # divergence stayed at 0.0001 every time. Whichever side the first
+            # optimizer step happened to favour took everything.
+            #
+            # Switch and Mixtral initialise their routers with small random
+            # noise for exactly this reason. `random` trades the bit-perfect
+            # assertion for a starting point that can actually be descended
+            # from - which is the right trade once you are training rather
+            # than verifying.
+            if router_init == "random":
+                g = torch.Generator().manual_seed(router_seed + (li or 0))
+                t = (torch.randn(shape, generator=g, dtype=torch.float32)
+                     * router_init_std).to(dtype)
+            else:
+                t = torch.zeros(shape, dtype=dtype)
             stats["router"] += 1
 
         elif ".mlp.shared_expert." in key:

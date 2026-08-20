@@ -521,6 +521,54 @@ def _collect_local(path: str, glob_pattern: str, out_path: str,
     return out_path
 
 
+def _repo_label(repo: Dict[str, Any]) -> str:
+    """A name for the repo this shard row represents.
+
+    The row IS the repo, so identity never depends on finding a name field -
+    that is only for the report. file_path's first two components are the
+    owner/name of a github-derived corpus and a readable fallback otherwise.
+    """
+    for key in ("repo_name", "repo", "repository", "name", "id"):
+        v = repo.get(key)
+        if isinstance(v, str) and v:
+            return v
+    files = repo.get("files") or []
+    if files:
+        path = (files[0].get("file_path") or "").strip("/")
+        parts = [p for p in path.split("/") if p]
+        if parts:
+            return "/".join(parts[:2])
+    return "<unnamed>"
+
+
+def _diversity(counter, total: int) -> Tuple[int, str, float]:
+    """(distinct repos, biggest contributor, its share of the corpus)."""
+    if not counter or not total:
+        return (0, "", 0.0)
+    name, n = counter.most_common(1)[0]
+    return (len(counter), name, n / total)
+
+
+def _line_reuse(docs: List[Dict[str, Any]], sample: int = 300) -> float:
+    """Fraction of non-blank lines that are repeats, over a sample.
+
+    The cheap tell for a templated corpus. On a real build this separated a
+    C# bucket at 82.4% from a Python bucket at 34.1% - and the 82.4% one was
+    a single company's application, where 78% of files opened with the same
+    proprietary `using` and every method was wrapped in the same trace-log
+    call. It trained beautifully and learned a house style.
+    """
+    lines: List[str] = []
+    for d in docs[:sample]:
+        for line in (d.get("text") or "").splitlines():
+            line = line.strip()
+            if line:
+                lines.append(line)
+    if not lines:
+        return 0.0
+    return 1.0 - (len(set(lines)) / len(lines))
+
+
 def _collect_from_shards(languages: List[str], config,
                          callback=None) -> Dict[str, str]:
     """Adaptive shard scan — fetch stack-v3-train shards until every language is satisfied."""
@@ -551,9 +599,30 @@ def _collect_from_shards(languages: List[str], config,
           f"(~{cap * 0.57:.0f} GB) until every language holds "
           f"~{config.collect_token_target/1e6:.1f}M est. tokens")
 
+    # ONE REPO MUST NOT BE THE CORPUS.
+    #
+    # The quota is in TOKENS and a single large repository can satisfy it
+    # before the scan ever reaches a second one. Measured: a C# bucket hit its
+    # 1.8M-token target from 658 files in shard 1, of which 515 imported the
+    # same proprietary namespace - one Japanese enterprise application, 78% of
+    # the corpus, held-out perplexity 1.33. Every downstream check passed. The
+    # expert trained, diverged from its neighbour at 263x chance, and won its
+    # own domain by 0.43 nats. It was an expert in one company's house style
+    # and nothing in the pipeline could tell.
+    #
+    # Verbose languages are where this bites: C#, Java, Go with generated
+    # bindings, anything with a codegen culture. Python needed 1754 files for
+    # the same token count and got real spread for free.
+    #
+    # The cap is per repo PER LANGUAGE, so a monorepo that legitimately holds
+    # both still contributes to both - it just cannot BE either.
+    per_repo_cap = getattr(config, "per_repo_cap", 0) or 20
+
     buckets = {lang: [] for lang in languages}
     chars = {lang: 0 for lang in languages}
     seen = {lang: set() for lang in languages}
+    repos_for = {lang: Counter() for lang in languages}
+    capped_hits = {lang: 0 for lang in languages}
     done = set()
     repos_scanned = 0
     shards_used = 0
@@ -599,11 +668,16 @@ def _collect_from_shards(languages: List[str], config,
 
         for repo in ds:
             repos_scanned += 1
+            rlabel = _repo_label(repo)
+            taken_here = {lang: 0 for lang in languages}
             for f in repo.get("files", []):
                 lang = f.get("language")
                 if lang not in languages or lang in done:
                     continue
                 if f.get("is_vendor"):
+                    continue
+                if taken_here[lang] >= per_repo_cap:
+                    capped_hits[lang] += 1
                     continue
                 cid = f.get("content_id")
                 if not cid or cid in seen[lang]:
@@ -617,6 +691,8 @@ def _collect_from_shards(languages: List[str], config,
                 seen[lang].add(cid)
                 buckets[lang].append({"text": content})
                 chars[lang] += len(content)
+                taken_here[lang] += 1
+                repos_for[lang][rlabel] += 1
 
                 est_tok = chars[lang] / config.chars_per_token_est
                 if est_tok >= config.collect_token_target:
@@ -636,10 +712,33 @@ def _collect_from_shards(languages: List[str], config,
             break
 
     print(f"\nScanned {repos_scanned} repos across {shards_used} shard(s).")
+    health: Dict[str, Dict[str, Any]] = {}
     for lang in languages:
         n = len(buckets[lang])
         est = chars[lang] / config.chars_per_token_est
-        print(f"   {lang}: {n} docs, ~{est/1e6:.1f}M est. tokens")
+        nrepos, top_repo, top_share = _diversity(repos_for[lang], n)
+        reuse = _line_reuse(buckets[lang])
+        health[lang] = {"docs": n, "est_tokens": est, "repos": nrepos,
+                        "top_repo": top_repo, "top_repo_share": top_share,
+                        "line_reuse": reuse, "capped": capped_hits[lang]}
+        print(f"   {lang}: {n} docs, ~{est/1e6:.1f}M est. tokens, "
+              f"{nrepos} repos "
+              f"(largest {top_share:.0%}), line reuse {reuse:.0%}"
+              + (f", {capped_hits[lang]} files skipped by the "
+                 f"{per_repo_cap}/repo cap" if capped_hits[lang] else ""))
+
+        # WARN, DO NOT REFUSE. Someone may want one codebase on purpose -
+        # that is a legitimate expert. They should just never get it by
+        # accident, which is what happened.
+        if nrepos and top_share > 0.25:
+            print(f"   [warn] {lang}: {top_share:.0%} of this corpus is one "
+                  f"repo ({top_repo}). The expert will learn that project's "
+                  f"house style as if it were the language. Raise "
+                  f"corpus.per_repo_cap's strictness or widen the source.")
+        if reuse > 0.7:
+            print(f"   [warn] {lang}: {reuse:.0%} of lines are repeats - this "
+                  f"reads as generated or templated code. Expect a very low "
+                  f"held-out loss that means memorised form, not fluency.")
 
     # Minimum viable bucket check
     starved = {l: len(buckets[l]) for l in languages if len(buckets[l]) < config.min_samples_per_expert}

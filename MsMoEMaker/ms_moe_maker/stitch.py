@@ -159,6 +159,8 @@ def stitch_moe(config, safe_names: List[str]) -> str:
         model_cls=Qwen2MoeForCausalLM,
         moe_config=moe_config,
         shared_gate_fill=config.shared_expert_gate_fill,
+        router_init=getattr(config, 'router_init', 'zero'),
+        router_seed=getattr(config, 'seed', 42),
         num_layers=config_dict.get("num_hidden_layers", 32),
         tokenizer_src=anchor_dir,
     )
@@ -189,7 +191,9 @@ def _get(m: Dict[str, str], k: str):
 
 
 def verify_stitch(out_dir: str, output_root: Optional[str] = None,
-                  gate_fill: float = 0.02) -> bool:
+                  gate_fill: float = 0.02,
+                  router_init: str = "zero",
+                  router_init_std: float = 0.02) -> bool:
     """Is every tensor in the stitched model bit-identical to its source?
 
     PORTED FROM verify_stitch_complete.py, the Lab script that actually
@@ -311,7 +315,24 @@ def verify_stitch(out_dir: str, output_root: Optional[str] = None,
 
         elif key.endswith(".mlp.gate.weight"):
             t = _get(M, key)
-            if t.abs().sum().item() != 0.0:
+            # WHAT "CORRECT" MEANS HERE DEPENDS ON WHAT WAS ASKED FOR.
+            #
+            # zero  -> exactly zero, and the check stays as strict as it was.
+            # random -> small noise. Still checkable, just not by equality: it
+            #   must be non-zero (or the init silently did nothing) and it must
+            #   be SMALL (or the untrained MoE is routing on garbage before a
+            #   single step). A range check is a weaker claim than bit-equality
+            #   and is labelled as one rather than quietly widened.
+            if router_init == "random":
+                amax = t.abs().max().item()
+                if amax == 0.0:
+                    fail(key, "router_init=random but the gate is all zeros - "
+                              "the init did not run")
+                elif amax > router_init_std * 12:
+                    fail(key, f"router noise absmax {amax:.3e} is far beyond "
+                              f"std {router_init_std} - the untrained MoE will "
+                              f"route on this")
+            elif t.abs().sum().item() != 0.0:
                 fail(key, f"router not zero (absmax {t.abs().max().item():.3e})")
             checked["router"] += 1
 
