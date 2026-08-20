@@ -576,6 +576,20 @@ def _print_eval_report(report):
                        if js < 1e-3 else "routing depends on the input")
             print(f"    mean pairwise JS divergence {js:.4f} bits over "
                   f"{routing.get('moe_layers', 0)} MoE layers — {verdict}")
+
+        # CONFIDENCE SITS NEXT TO JS ON PURPOSE. Saturated-and-blind is a
+        # different diagnosis from balanced-and-blind, and share cannot tell
+        # them apart: the first is a gate maximising its own output scale
+        # (norm_topk_prob=false gives it a free multiplicative gain on a frozen
+        # expert), the second is a gate that never left its initialisation.
+        # Same enrichment table, opposite fixes.
+        conf = routing.get("mean_gate_confidence")
+        unif = routing.get("uniform_confidence")
+        if conf is not None and unif:
+            note = ("  <- SATURATED: the gate is not choosing, it is "
+                    "maximising its own output scale" if conf > 0.95 else "")
+            print(f"    mean gate confidence {conf:.3f} "
+                  f"(uniform would be {unif:.3f}){note}")
     elif routing.get("status") == "unmeasurable":
         print(f"\n  Router discrimination: UNMEASURABLE - {routing.get('reason')}")
 

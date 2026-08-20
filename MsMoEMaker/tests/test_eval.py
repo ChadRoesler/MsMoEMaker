@@ -642,3 +642,77 @@ class TestCollapsedRouter:
         report.routing["mean_js_bits"] = 0.0007
         assert detect_dead_experts(report) == []
         assert not any("collapsed" in c for c in report.caveats)
+
+
+class TestGateConfidence:
+    """Confidence answers a question share and enrichment cannot.
+
+    With norm_topk_prob=false the selected weight MULTIPLIES the frozen
+    expert's output, so the gate probability is a free scalar gain. At init
+    p=1/E, which scales down an FFN contribution the base model expects at
+    full strength, and the cheapest repair is p -> 1 on every token regardless
+    of input. The result is a collapsed, input-blind router that got there for
+    reasons unrelated to routing - indistinguishable from any other collapse
+    by share alone, obvious the moment confidence is next to JS.
+    """
+
+    def test_saturated_confidence_is_surfaced(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.0, "own_share": 0.958,
+                    "marginal_share": 0.957, "outranked": False},
+            csharp={"enrichment": 1.0, "own_share": 0.043,
+                    "marginal_share": 0.042, "outranked": False})
+        report.routing.update({"mean_js_bits": 0.0001, "moe_layers": 24,
+                               "mean_gate_confidence": 0.998,
+                               "uniform_confidence": 0.5})
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "mean gate confidence" in out
+        assert "SATURATED" in out
+
+    def test_healthy_confidence_is_reported_without_alarm(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.4, "own_share": 0.6,
+                    "marginal_share": 0.5, "outranked": False},
+            csharp={"enrichment": 1.4, "own_share": 0.6,
+                    "marginal_share": 0.5, "outranked": False})
+        report.routing.update({"mean_js_bits": 0.4, "moe_layers": 24,
+                               "mean_gate_confidence": 0.62,
+                               "uniform_confidence": 0.5})
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "0.620" in out
+        assert "SATURATED" not in out
+
+    def test_a_probe_without_confidence_prints_nothing(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.4, "own_share": 0.6,
+                    "marginal_share": 0.5, "outranked": False})
+        report.routing.update({"mean_js_bits": 0.4, "moe_layers": 24})
+        _print_eval_report(report)
+        assert "gate confidence" not in capsys.readouterr().out
+
+
+def test_a_floating_point_tie_is_not_an_outranking():
+    """Both experts printed OUTRANKED ON ITS OWN GROUND with own and rival
+    equal to four decimals. A tie is not a finding."""
+    report = EvalReport(ok=True)
+    report.routing = _routing(
+        n_experts=2, top_k=1,
+        python={"enrichment": 1.00, "own_share": 0.4999, "marginal_share": 0.4999,
+                "top_competitor": "csharp", "top_competitor_share": 0.5001,
+                "outranked": False},
+        csharp={"enrichment": 1.00, "own_share": 0.5001, "marginal_share": 0.5001,
+                "top_competitor": "python", "top_competitor_share": 0.4999,
+                "outranked": False})
+    report.routing["mean_js_bits"] = 0.4
+    assert detect_dead_experts(report) == []

@@ -32,10 +32,40 @@ def stitch_dir(config) -> str:
 
 
 def stitch_is_done(config) -> bool:
-    """Is the MoE skeleton already on disk? See finetune.specialist_is_done."""
+    """Is the MoE skeleton already on disk AND does it match this recipe?
+
+    PRESENCE IS NOT ENOUGH, AND THAT COST A RUN. The skip used to test only
+    that a config.json existed. Someone editing the expert list, deleting
+    moe_trained and rebuilding got the OLD skeleton silently reused - so a
+    recipe saying [csharp, python] trained a router whose gate axis was still
+    [python, csharp], and every routing number downstream carried the wrong
+    name. Nothing failed. The build said 8/8 stages done.
+
+    The skeleton stamps `expert_names` precisely so this is answerable. If the
+    names or their ORDER differ from the recipe, the artifact on disk is not
+    the artifact this recipe describes and the skip has to decline - order
+    matters as much as membership, because it IS the expert axis of the
+    router's gate matrix.
+    """
     if config.force:
         return False
-    return os.path.exists(os.path.join(stitch_dir(config), "config.json"))
+    cfg_path = os.path.join(stitch_dir(config), "config.json")
+    if not os.path.exists(cfg_path):
+        return False
+
+    want = list(getattr(config, "expert_names", []) or [])
+    if not want:
+        return True
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            have = list(json.load(fh).get("expert_names") or [])
+    except (OSError, ValueError):
+        return True          # unreadable: let the stitch decide, not the skip
+    if have and have != want:
+        print(f"[restitch] skeleton on disk was built for {have}, recipe says "
+              f"{want} - the gate axis would not match the names. Restitching.")
+        return False
+    return True
 
 
 def _specialist_dir(output_root: str, expert: str) -> str:

@@ -528,6 +528,10 @@ def probe_router_discrimination(moe_dir: str,
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    # One-element lists so the inner loop can accumulate without `nonlocal`.
+    conf_sum = [0.0]
+    conf_n = [0]
+
     trained_on = trained_on or set()
 
     # Held out BY CONSTRUCTION: drop any row the router actually trained on.
@@ -656,10 +660,25 @@ def probe_router_discrimination(moe_dir: str,
             for li, logits in enumerate(router_logits):
                 if logits is None or li >= L:
                     continue
-                sel = torch.topk(logits.float(), K, dim=-1).indices.flatten()
+                probs = torch.softmax(logits.float(), dim=-1)
+                top = torch.topk(probs, K, dim=-1)
+                sel = top.indices.flatten()
                 for e in sel.tolist():
                     counts[s][li][e] += 1
                 totals[s][li] += sel.numel() // K
+                # GATE CONFIDENCE - how sure the router is, separate from
+                # whether it is RIGHT. With norm_topk_prob=false the selected
+                # weight multiplies the expert's output, so p is a free scalar
+                # gain on a frozen FFN: at init p=1/E halves (or worse) a
+                # contribution the base model expects at full strength, and the
+                # cheapest way to fix that is p -> 1 on every token regardless
+                # of input. That is a collapsed, input-blind router arrived at
+                # for a reason that has nothing to do with routing, and no
+                # share-or-enrichment number can distinguish it from any other
+                # collapse. This can: saturated confidence next to zero JS is
+                # the signature.
+                conf_sum[0] += float(top.values.sum())
+                conf_n[0] += int(top.values.numel())
         if callback:
             callback("eval.routing", "running", f"routed {s}")
 
@@ -704,7 +723,11 @@ def probe_router_discrimination(moe_dir: str,
             # An expert can clear the enrichment bar and still be outranked on
             # its own ground by a neighbour taking more of the traffic. That is
             # a different failure and a column-only read misses it.
-            "outranked": bool(rivals) and rivals[0][1] > own,
+            # A REAL MARGIN, NOT A STRICT >. On a collapsed router both
+            # experts printed OUTRANKED ON ITS OWN GROUND with own and rival
+            # identical to four decimals - a floating-point tie reported as a
+            # finding. 2% of the own-share is below anything worth acting on.
+            "outranked": bool(rivals) and rivals[0][1] > own * 1.02,
         }
 
     n = len(enrich)
@@ -744,6 +767,11 @@ def probe_router_discrimination(moe_dir: str,
         "p_value": (1 / (n ** n)) if n else None,
         "mean_js_bits": mean_js,
         "js_per_layer": per_layer,
+        # Mean softmax probability of the experts actually selected. Uniform
+        # is 1/E (or K/E summed over the top-K); 1.0 means the gate is fully
+        # saturated and the softmax has stopped being a distribution.
+        "mean_gate_confidence": (conf_sum[0] / conf_n[0]) if conf_n[0] else None,
+        "uniform_confidence": 1.0 / E if E else None,
     }
 
 
@@ -1287,10 +1315,45 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     output_root = Path(config.output_root)
     moe_dir = str(output_root / st.ARTIFACTS[st.ROUTER])
 
-    # Expert order is the recipe's order, which is STITCH order, which is the
-    # expert axis of the router's gate matrix. Never re-derive it by sorting.
+    # THE GATE AXIS BELONGS TO THE MODEL, NOT THE RECIPE.
+    #
+    # This used to read: "Expert order is the recipe's order, which is STITCH
+    # order, which is the expert axis of the router's gate matrix." Two of
+    # those three are the same thing and the first is not. The recipe's order
+    # is the stitch order only if THIS recipe produced THAT stitch, and a
+    # skeleton on disk survives a recipe edit.
+    #
+    # It broke exactly that way: expert list reordered, moe_trained deleted,
+    # moe_untrained left in place, so the router retrained on a skeleton whose
+    # gate axis was still the old order. eval labelled column 0 with the new
+    # recipe's first name. Every routing number printed under the wrong
+    # expert - collapse attributed to the wrong side, a dead expert named as
+    # the live one - and nothing anywhere said a word.
+    #
+    # The skeleton stamps `expert_names`. That IS the axis. Read it, believe
+    # it over the recipe, and say loudly when they disagree.
     expert_order = [n for n in (config.expert_names or list(code_paths))
                     if n in code_paths]
+    routing_refused = ""
+    try:
+        with open(Path(moe_dir) / "config.json", encoding="utf-8") as _fh:
+            moe_names = [n for n in (json.load(_fh).get("expert_names") or [])]
+    except (OSError, ValueError):
+        moe_names = []
+    if moe_names and moe_names != expert_order:
+        if sorted(moe_names) == sorted(expert_order):
+            report.caveats.append(
+                f"expert ORDER on disk {moe_names} differs from the recipe "
+                f"{expert_order}; the model's order is the gate axis and has "
+                f"been used. The skeleton predates this recipe - rebuild with "
+                f"--force, or delete moe_untrained, if that was not intended.")
+            expert_order = [n for n in moe_names if n in code_paths]
+        else:
+            routing_refused = (
+                f"the MoE was stitched from {moe_names} but the recipe names "
+                f"{expert_order}. These are different models; nothing can be "
+                f"attributed to an expert. Rebuild the stitch.")
+            report.caveats.append(f"REFUSED to label routing: {routing_refused}")
 
     global _SAMPLER
     t_start = time.time()
@@ -1304,7 +1367,10 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
         held_paths[expert_name] = held_path
     _trace("held-out splits written")
 
-    do_routing = mode in ("routing", "all")
+    if routing_refused:
+        report.routing = {"status": UNMEASURABLE, "reason": routing_refused,
+                          "experts": {}}
+    do_routing = mode in ("routing", "all") and not routing_refused
     do_quality = mode in ("quality", "all")
     do_experts = mode in ("experts", "all")
 
