@@ -472,3 +472,105 @@ def test_no_source_still_names_the_old_env_prefix():
             if old in line:
                 stale.append(f"{f.name}:{i}")
     assert not stale, f"source still using the retired prefix: {stale}"
+
+
+# ── router knobs must reach the trainer ───────────────────────────────────
+#
+# The gate's learning rate was hardcoded in build_config while the class three
+# doors down documented the opposite rule. The one experiment the first real
+# 0.5B run called for - same stitch, more router training - could not be
+# expressed in a recipe.
+
+class TestRouterKnobs:
+
+    def _data(self, **router):
+        data = {
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [
+                {"name": "a", "source": {"kind": "stack", "language": "Python"}},
+                {"name": "b", "source": {"kind": "stack", "language": "C#"}},
+            ],
+        }
+        if router:
+            data["router"] = router
+        return data
+
+    def _cfg(self, tmp_path, **router):
+        from ms_moe_maker.recipe import parse
+        rec, _ = parse(self._data(**router))
+        return config.build_config(rec, dryrun=True)
+
+    def test_defaults_are_unchanged_when_the_recipe_is_silent(self, tmp_path):
+        c = self._cfg(tmp_path)
+        assert c.lr_router == 1e-4
+        assert c.router_batch == 1
+        assert c.router_accum == 8
+        assert c.router_epochs == 1.0
+        assert c.router_aux_loss_coef == 0.001
+
+    def test_a_recipe_can_turn_every_router_knob(self, tmp_path):
+        c = self._cfg(tmp_path, lr=1e-3, batch=4, accum=2, epochs=3,
+                      aux_loss_coef=0.01)
+        assert c.lr_router == 1e-3
+        assert c.router_batch == 4
+        assert c.router_accum == 2
+        assert c.router_epochs == 3.0
+        assert c.router_aux_loss_coef == 0.01
+
+    def test_minus_one_still_means_you_decide(self, tmp_path):
+        c = self._cfg(tmp_path, lr=-1, batch=-1, epochs=-1)
+        assert c.lr_router == 1e-4
+        assert c.router_batch == 1
+        assert c.router_epochs == 1.0
+
+    def test_router_block_is_a_known_top_level_key(self):
+        """An unknown top-level key is warned and DROPPED. `eval` shipped in
+        the README for months while not being in _KNOWN_TOP, so a user who
+        wrote exactly what the docs said got their block silently ignored.
+        Adding a dataclass is only half of adding a knob."""
+        from ms_moe_maker.recipe import parse
+        rec, warns = parse(self._data(lr=1e-3))
+        assert not any("router" in w and "IGNORED" in w for w in warns), warns
+        assert rec.router.lr == 1e-3
+
+
+class TestTopOneRouterGradient:
+    """top-1 + norm_topk_prob=true divides a weight by itself. Gate gets no
+    gradient from the LM loss and can only drift toward uniform."""
+
+    def _rec(self, top_k, norm, n_experts=2):
+        from ms_moe_maker.recipe import parse
+        langs = ["Python", "C#", "Go", "Rust"][:n_experts]
+        rec, _ = parse({
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [{"name": f"e{i}",
+                         "source": {"kind": "stack", "language": l}}
+                        for i, l in enumerate(langs)],
+            "moe": {"experts_per_tok": top_k, "norm_topk_prob": norm},
+        })
+        return rec
+
+    def test_top1_with_normalisation_is_refused(self):
+        from ms_moe_maker.recipe import validate
+        errs, _ = validate(self._rec(1, True))
+        assert any("severs the router from the loss" in e for e in errs), errs
+
+    def test_top1_without_normalisation_is_fine(self):
+        from ms_moe_maker.recipe import validate
+        errs, _ = validate(self._rec(1, False))
+        assert not any("norm_topk_prob" in e for e in errs), errs
+
+    def test_top2_still_prefers_normalisation(self):
+        from ms_moe_maker.recipe import validate
+        errs, warns = validate(self._rec(2, False, n_experts=3))
+        assert not any("severs" in e for e in errs), errs
+        assert any("0.40x at init" in w for w in warns), warns
+
+    def test_the_degenerate_hint_names_both_fields(self):
+        """The hint that sends you to top-1 must also send you to
+        norm_topk_prob=false, or it walks you into the other trap."""
+        from ms_moe_maker.recipe import validate
+        _, warns = validate(self._rec(2, True, n_experts=2))
+        hint = [w for w in warns if "experts_per_tok=2" in w]
+        assert hint, warns
+        assert "norm_topk_prob=false" in hint[0], hint[0]

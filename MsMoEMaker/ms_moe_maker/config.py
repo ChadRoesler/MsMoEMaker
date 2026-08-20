@@ -192,6 +192,7 @@ class PipelineConfig:
     router_accum: int = 8
     lr_router: float = 1e-4
     router_aux_loss_coef: float = 0.001
+    router_epochs: float = 1.0
 
     # MoE
     experts_per_tok: int = 2
@@ -440,6 +441,21 @@ def build_config(recipe, force: bool = False,
     # wants a small REAL run can say so without pretending to be a dryrun.
     _corpus = getattr(recipe, "corpus", None)
 
+    def _knob(value, default):
+        """A recipe value, or the default when the recipe declined to choose.
+
+        The sentinel is `-1` (or anything below zero) rather than None because
+        these come out of a dataclass with typed defaults, so a recipe that
+        omits the block must be indistinguishable from one that never heard
+        of it.
+        """
+        try:
+            if value is None or value < 0:
+                return default
+            return type(default)(value)
+        except (TypeError, ValueError):
+            return default
+
     def _corpus_knob(attr: str, dry: int, prod: int) -> int:
         asked = getattr(_corpus, attr, -1) if _corpus is not None else -1
         if asked is not None and asked >= 0:
@@ -565,10 +581,14 @@ def build_config(recipe, force: bool = False,
         # Router
         router_mix_total=_corpus_knob("router_mix_total", 4_000, 12_000),
         agent_mix_fraction=0.15,
-        router_batch=1,
-        router_accum=8,
-        lr_router=1e-4,
-        router_aux_loss_coef=0.001,
+        # RECIPE FIRST, DEFAULT SECOND. `-1` means "you pick", which is how a
+        # recipe that says nothing about the router keeps the old behaviour
+        # exactly. See recipe.Router for why these stopped being hardcoded.
+        router_batch=_knob(recipe.router.batch, 1),
+        router_accum=_knob(recipe.router.accum, 8),
+        router_epochs=_knob(recipe.router.epochs, 1.0),
+        lr_router=_knob(recipe.router.lr, 1e-4),
+        router_aux_loss_coef=_knob(recipe.router.aux_loss_coef, 0.001),
         # MoE
         experts_per_tok=recipe.moe.experts_per_tok,
         norm_topk_prob=recipe.moe.norm_topk_prob,

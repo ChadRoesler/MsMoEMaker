@@ -152,6 +152,37 @@ class Corpus:
 
 
 @dataclass
+class Router:
+    """How the router gate is trained. THE KNOB THAT MATTERED WAS NOT THERE.
+
+    Same omission as Corpus above, and the docstring three classes up already
+    states the rule this broke: accept a minimum, fill sensible defaults, let
+    anyone who wants to twiddle knobs twiddle them. Every one of these was
+    hardcoded in config.build_config.
+
+    It surfaced on the first real 0.5B run. The stitch zeroes the gate by
+    construction, so the router starts at exactly uniform; the run then trained
+    it for one epoch over 800 rows at batch 1 x accum 8 - a hundred optimizer
+    steps - at 1e-4. It came out at 1.02x enrichment, which is a gate that has
+    barely left its initialisation. The single most useful experiment at that
+    point is "same stitch, more router training", and there was no way to ask
+    for it from a recipe.
+
+    `-1` means "use the default", so a recipe that does not mention this block
+    behaves exactly as before.
+
+    Note `corpus.router_mix_total` is the OTHER half of this - it sets how many
+    rows the mix has, and lives with the corpus knobs because that is what it
+    is. Steps = mix_total / (batch * accum) * epochs.
+    """
+    lr: float = -1.0             # learning rate for the gate
+    batch: int = -1              # per-device batch
+    accum: int = -1              # gradient accumulation
+    epochs: float = -1.0         # passes over the router mix
+    aux_loss_coef: float = -1.0  # load-balancing loss weight
+
+
+@dataclass
 class EvalSpec:
     """The `eval:` block. We provide the floor; this is the door out of it.
 
@@ -205,6 +236,7 @@ class Recipe:
     runtime: Runtime = field(default_factory=Runtime)
     roots: Roots = field(default_factory=Roots)
     corpus: Corpus = field(default_factory=Corpus)
+    router: Router = field(default_factory=Router)
     eval: EvalSpec = field(default_factory=EvalSpec)
     smoke: SmokeSpec = field(default_factory=SmokeSpec)
     template: str = ""  # optional: "code" | "dnd" | "math" | "culinary"
@@ -238,7 +270,8 @@ class Recipe:
 
 _KNOWN_TOP = {
     "name", "base", "experts", "schema_version", "size", "budget",
-    "moe", "gates", "runtime", "roots", "corpus", "eval", "smoke", "template",
+    "moe", "gates", "runtime", "roots", "corpus", "router", "eval", "smoke",
+    "template",
 }
 
 
@@ -318,6 +351,7 @@ def parse(data: Dict[str, Any]) -> Tuple[Recipe, List[str]]:
         runtime=_build(Runtime, data.get("runtime") or {}, "runtime", warnings),
         roots=_build(Roots, data.get("roots") or {}, "roots", warnings),
         corpus=_build(Corpus, data.get("corpus") or {}, "corpus", warnings),
+        router=_build(Router, data.get("router") or {}, "router", warnings),
         eval=_build(EvalSpec, data.get("eval") or {}, "eval", warnings),
         smoke=_build(SmokeSpec, data.get("smoke") or {}, "smoke", warnings),
         template=data.get("template", ""),
@@ -386,8 +420,9 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             f"moe.experts_per_tok={rec.moe.experts_per_tok} equals the expert "
             f"count ({len(rec.experts)}), so every expert is selected on every "
             f"token and the router cannot discriminate. `eval --mode routing` "
-            f"will report UNMEASURABLE. Use experts_per_tok=1 for a 2-expert "
-            f"MoE, or add a third expert and keep top-2.")
+            f"will report UNMEASURABLE. Use experts_per_tok=1 AND "
+            f"norm_topk_prob=false for a 2-expert MoE, or add a third expert "
+            f"and keep top-2.")
 
     # -- experts ------------------------------------------------------------
     if not rec.experts:
@@ -473,7 +508,44 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     if m.shared_expert_width == 0:
         errs.append("moe.shared_expert_width=0 produces a zero-element GGUF "
                     "tensor whose element count overflows llama.cpp's loader")
-    if not m.norm_topk_prob:
+    # TOP-1 WITH norm_topk_prob=TRUE SEVERS THE ROUTER FROM THE LOSS.
+    #
+    # This is not a tuning preference, it is arithmetic, and it cost a full
+    # diagnostic arc on the first real 0.5B build. Qwen2MoeSparseMoeBlock does
+    #
+    #     routing_weights, selected = topk(routing_weights, top_k, dim=-1)
+    #     if norm_topk_prob:
+    #         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+    #
+    # and at top_k=1 that sum IS routing_weights. It divides by itself. Every
+    # token's weight becomes the constant 1.0, d(w/w)/dw = 0, and the gate
+    # receives NO GRADIENT FROM THE LM LOSS AT ALL. The only signal left is the
+    # load-balancing aux loss, which pushes toward uniform - so training the
+    # router harder makes it MORE uniform, which is exactly what we measured:
+    # enrichment went 1.02x -> 1.00x after tripling the steps, on a model whose
+    # experts had a measured 0.49-nat cross-domain loss gap sitting unused.
+    #
+    # At top-1 the correct formulation is Switch Transformer's: scale the
+    # expert output by the gate probability p, which is what carries the
+    # gradient. That is norm_topk_prob=false.
+    #
+    # An ERROR, not a warning, because there is no configuration in which this
+    # combination does what the user wants. It does not produce a worse router;
+    # it produces a router that cannot train.
+    if m.experts_per_tok == 1 and m.norm_topk_prob:
+        errs.append(
+            "moe.experts_per_tok=1 with moe.norm_topk_prob=true severs the "
+            "router from the loss: normalising a single top-k weight divides "
+            "it by itself, so every routing weight is the constant 1.0 and the "
+            "gate gets zero gradient from the LM loss. The router can only "
+            "move toward uniform, driven by the aux loss. Set "
+            "moe.norm_topk_prob=false (this is Switch Transformer's top-1 "
+            "formulation), or use experts_per_tok>=2 with 3+ experts.")
+
+    # The scaling warning applies to top-k >= 2, where normalisation is a real
+    # choice. At top-1 it is the ONLY correct setting, so warning about it
+    # there pushed users straight into the error above.
+    if not m.norm_topk_prob and m.experts_per_tok >= 2:
         warns.append("moe.norm_topk_prob=false scales the stitched model to "
                      "~0.40x at init, so the router trains on the wrong problem")
 

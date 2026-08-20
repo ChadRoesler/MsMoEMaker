@@ -62,6 +62,22 @@ moe:
   # With three or more experts, top-2 is the usual shape.
   experts_per_tok: 1
 
+  # AND THIS ONE IS NOT OPTIONAL AT TOP-1. Qwen2MoeSparseMoeBlock normalises
+  # the top-k weights by their own sum; with k=1 that divides a number by
+  # itself, every routing weight becomes the constant 1.0, and the gate gets
+  # ZERO gradient from the LM loss. The router can then only be moved by the
+  # load-balancing aux loss, which pushes it toward uniform - so training it
+  # harder makes it worse.
+  #
+  # Measured on this exact recipe: enrichment 1.02x -> 1.00x after tripling
+  # the router steps, while a cross-domain probe showed a 0.49-nat loss gap
+  # the router could have exploited and never did.
+  #
+  # false is Switch Transformer's top-1 formulation: scale the expert output
+  # by the gate probability, which is what carries the gradient. `validate`
+  # now refuses the other combination outright.
+  norm_topk_prob: false
+
 runtime:
   hardware_tier: spark
   # Where llama.cpp lives. Blank means: look in ./llama.cpp, ../llama.cpp,

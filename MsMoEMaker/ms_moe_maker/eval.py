@@ -28,7 +28,9 @@ Unmeasurable is not pass. See evalrecord.py for the vocabulary.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
 import os
 import random
 import sys
@@ -75,31 +77,282 @@ class EvalReport:
     message: str = ""
     routing: Dict[str, Any] = field(default_factory=dict)
     """Router-discrimination result — the dead-expert measurement."""
+    undiscriminating: List[str] = field(default_factory=list)
+    """Experts the router uses but shows no domain preference for.
+
+    NOT the same failure as dead, and calling it dead was a false alarm on the
+    first real run: both 0.5B experts sat at ~0.50 selection share - used on
+    half of all tokens, exactly what uniform routing gives with top-1 of 2 -
+    and got reported as DEAD EXPERTS because their enrichment was 1.02x. An
+    expert that is never selected and an expert that is selected constantly
+    without specialising are different problems with different fixes, and the
+    stitch is only broken in the first case.
+    """
+    caveats: List[str] = field(default_factory=list)
+    """Measured, but with a limit the reader has to know about."""
     unmeasured: List[str] = field(default_factory=list)
     """Things we could not measure, and therefore did not score."""
+
+
+def _trace(tag: str) -> None:
+    """Print a memory line to stderr. ALWAYS ON, and that is deliberate.
+
+    Two OOMs on a 128 GB Spark could not be attributed to anything, because
+    nothing in this module ever said how much memory it was using. The kernel
+    said 119Gi/121Gi and the CUDA allocator said "free: 7906271232" and
+    neither number could be pinned to a line of our code. Silence is signal,
+    and the signal was that we were not looking.
+
+    Six short lines per run is a cheap price for never having to guess again.
+    """
+    _mark(tag)
+    m = _mem_mb()
+    if not m:
+        return
+    print("[mem] " + tag + ": "
+          + " ".join(f"{k}={v:,.0f}MiB" for k, v in m.items()),
+          file=sys.stderr, flush=True)
+
+
+def _mem_mb() -> Dict[str, float]:
+    """Host and device memory in MiB. Empty dict where it cannot be read.
+
+    proc_rss is RssAnon, NOT VmRSS: on unified memory VmRSS counts shared CUDA
+    pages and over-reports by tens of GB. host_avail is MemAvailable, which is
+    the number that actually predicts the OOM killer - and on a box where host
+    and device share one pool it is also, approximately, how much CUDA has
+    left. That is why the allocator reported 7.9 GB free of 130 GB total: not
+    a device that had filled up, a MACHINE that had.
+    """
+    out: Dict[str, float] = {}
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("RssAnon:"):
+                    out["proc_rss"] = int(line.split()[1]) / 1024.0
+                    break
+    except OSError:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    out["host_avail"] = int(line.split()[1]) / 1024.0
+                elif line.startswith("MemTotal:"):
+                    out["host_total"] = int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            out["cuda_alloc"] = torch.cuda.memory_allocated() / 2 ** 20
+            out["cuda_reserved"] = torch.cuda.memory_reserved() / 2 ** 20
+    except Exception:
+        pass
+    return out
+
+
+class _MemSampler:
+    """Peak-tracker on a background thread. BOUNDARY SAMPLING CANNOT SEE THIS.
+
+    The [mem] lines fire between phases, and every one of them looked healthy
+    while the run died: 114 GB available at "after MoE load", then an OOM
+    inside the very next call. Nothing was wrong with the boundaries. The cost
+    lives BETWEEN them - the allocator inflates during generation and the
+    tensors it holds are released before anything gets a chance to print.
+
+    So this samples on a timer, tracks the peak per named phase, and the phase
+    label is what turns "it OOMs" into "it OOMs in generate, at N GB, with
+    these settings" - a bug you can fix instead of a mood.
+
+    FOOTPRINT IS RESERVED + RssAnon, NOT ALLOCATED + RssAnon. On a discrete GPU
+    the reservation lives in VRAM and the host never feels it; on GB10 it comes
+    out of the same 121 GB the kernel is using, so `reserved` IS host pressure.
+    Printing one column and reasoning over the other is how two rounds of this
+    diagnosis went wrong.
+    """
+
+    def __init__(self, interval: float = 0.25):
+        self.interval = interval
+        self.phase = "startup"
+        self.peaks: Dict[str, Dict[str, float]] = {}
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> "_MemSampler":
+        self._t.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._t.join(timeout=2)
+
+    def mark(self, phase: str) -> None:
+        self.phase = phase
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            m = _mem_mb()
+            p = self.peaks.setdefault(self.phase, {
+                "cuda_alloc": 0.0, "cuda_reserved": 0.0,
+                "proc_rss": 0.0, "min_avail": float("inf")})
+            for k in ("cuda_alloc", "cuda_reserved", "proc_rss"):
+                if k in m and m[k] > p[k]:
+                    p[k] = m[k]
+            if "host_avail" in m:
+                p["min_avail"] = min(p["min_avail"], m["host_avail"])
+            self._stop.wait(self.interval)
+
+    def table(self) -> str:
+        rows = ["", "PEAKS BY PHASE (MiB)  [footprint = cuda_reserved + RssAnon:",
+                "                       on unified memory the allocator's",
+                "                       RESERVATION is host RAM]",
+                f"  {'phase':22} {'alloc':>10} {'reserved':>10} "
+                f"{'RssAnon':>10} {'footprint':>11} {'min avail':>11}"]
+        for phase, p in self.peaks.items():
+            foot = p["cuda_reserved"] + p["proc_rss"]
+            avail = p["min_avail"]
+            rows.append(
+                f"  {phase:22} {p['cuda_alloc']:10,.0f} "
+                f"{p['cuda_reserved']:10,.0f} {p['proc_rss']:10,.0f} "
+                f"{foot:11,.0f} "
+                + (f"{avail:11,.0f}" if avail != float("inf") else f"{'-':>11}"))
+        return "\n".join(rows)
+
+
+_SAMPLER: Optional["_MemSampler"] = None
+
+
+def _mark(phase: str) -> None:
+    if _SAMPLER is not None:
+        _SAMPLER.mark(phase)
+
+
+def _balloon() -> Tuple[float, float]:
+    """(reserved_MiB, allocated_MiB) — the two numbers that must be compared."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return (torch.cuda.memory_reserved() / 2 ** 20,
+                    torch.cuda.memory_allocated() / 2 ** 20)
+    except Exception:
+        pass
+    return (0.0, 0.0)
+
+
+def _deflate(ratio: float = 3.0, floor_mib: float = 4096.0) -> bool:
+    """Hand back reserved-but-unused device memory, if there is a lot of it.
+
+    Called between samples rather than after every one: empty_cache() is not
+    free, and a healthy allocator reusing its own blocks is exactly what you
+    want. This only fires when reservation has run away from live tensors,
+    which is the fragmentation signature, not normal operation.
+    """
+    reserved, alloc = _balloon()
+    if reserved < floor_mib or reserved < max(alloc, 1.0) * ratio:
+        return False
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        return False
+    _trace(f"deflated allocator: {reserved:,.0f}MiB reserved for "
+           f"{alloc:,.0f}MiB live -> {_balloon()[0]:,.0f}MiB")
+    return True
+
+
+def _is_oom(exc: BaseException) -> bool:
+    """Is this exception the machine running out of memory?
+
+    Matched by NAME and by message rather than by class, because
+    torch.cuda.OutOfMemoryError moved to torch.OutOfMemoryError, and importing
+    either to catch it would drag torch into a module that promises to run
+    without it.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    if type(exc).__name__ in ("OutOfMemoryError", "CudaOutOfMemoryError"):
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda error: out of memory" in text
+
+
+def _iter_jsonl(path: str):
+    """Stream a JSONL file, one non-empty line at a time.
+
+    NEVER read_text() A CORPUS. Every reader in this module used
+    Path(p).read_text().splitlines(), which materialises the file as one
+    string AND AGAIN as a list of strings before a single sample is drawn -
+    2-4x the file size resident, per call, per expert. On a box where host and
+    device memory are the same pool that is not a tidiness problem: it is CUDA
+    memory, spent on text, and it is why a 0.5B model that trains fine can OOM
+    during EVAL. The floor this project promises is a $250 Nano; eval must not
+    need more memory than the build that produced the model.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    yield line
+    except OSError:
+        return
+
+
+def _reservoir(path: str, n: int, seed: int = 42) -> List[str]:
+    """Uniform sample of n lines in ONE pass and O(n) memory.
+
+    Same distribution as random.sample over the whole file, without the whole
+    file. For n=20 this is twenty strings instead of a corpus.
+    """
+    rnd = random.Random(seed)
+    out: List[str] = []
+    for i, line in enumerate(_iter_jsonl(path)):
+        if i < n:
+            out.append(line)
+        else:
+            j = rnd.randint(0, i)
+            if j < n:
+                out[j] = line
+    return out
+
+
+def _digest(text: str) -> str:
+    """Content hash, for membership tests that must not retain the content."""
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
 
 
 def _load_or_split(data_path: str, held_out: float, seed: int = 42) -> Tuple[str, str]:
     """Split a JSONL dataset into train / held-out.
 
     Returns (train_path, held_out_path).
+
+    TWO STREAMING PASSES, NOT FOUR COPIES. This used to read the corpus, hold
+    a second shuffled copy of it, slice that into two more lists and join each
+    into another string before writing - peak somewhere north of 4x the file,
+    once per expert, at the very top of every eval run. Now it counts lines,
+    draws the held-out INDICES, and streams each line to whichever file it
+    belongs in. Resident cost is one line plus the index set.
+
+    Behaviour note: rows keep their original order within each output file
+    instead of coming out shuffled. Membership is still a uniform random draw
+    at the same seed, which is the property that matters; nothing downstream
+    reads these in order.
     """
-    lines = Path(data_path).read_text(encoding="utf-8").strip().splitlines()
-    if not lines:
-        return data_path, data_path + ".heldout"
-
-    random.seed(seed)
-    n_held = max(1, int(len(lines) * held_out))
-    shuffled = list(lines)
-    random.shuffle(shuffled)
-    held = shuffled[:n_held]
-    train = shuffled[n_held:]
-
     train_path = data_path + ".train"
     held_path = data_path + ".heldout"
 
-    Path(train_path).write_text("\n".join(train) + "\n", encoding="utf-8")
-    Path(held_path).write_text("\n".join(held) + "\n", encoding="utf-8")
+    total = sum(1 for _ in _iter_jsonl(data_path))
+    if not total:
+        return data_path, held_path
+
+    n_held = max(1, int(total * held_out))
+    held_idx = set(random.Random(seed).sample(range(total), n_held))
+
+    with open(train_path, "w", encoding="utf-8") as tf, \
+            open(held_path, "w", encoding="utf-8") as hf:
+        for i, line in enumerate(_iter_jsonl(data_path)):
+            (hf if i in held_idx else tf).write(line + "\n")
 
     return train_path, held_path
 
@@ -125,17 +378,37 @@ def _rouge1(generated: str, reference: str) -> float:
 
 
 def _bleu_simple(generated: str, reference: str) -> float:
-    """Very simple 1-gram BLEU. Not accurate but fast for local eval."""
+    """BLEU-1: clipped unigram precision WITH a brevity penalty.
+
+    THE BREVITY PENALTY IS NOT OPTIONAL AND ITS ABSENCE WAS VISIBLE IN THE
+    OUTPUT. Without it this returns matches/len(generated), which is pure
+    precision: emit three words that all appear in the reference and score
+    1.00. On the first real 0.5B run csharp reported BLEU 0.877 against
+    ROUGE-1 0.369 - the highest number on the board belonged to the metric
+    that rewards saying almost nothing, sitting next to a recall number
+    saying most of the reference never got written.
+
+    BP = exp(1 - r/c) for c < r, 1 otherwise, per Papineni et al. It is the
+    term that makes precision answerable for what it left out, and this
+    project has a standing rule against numbers that report more than they
+    know.
+    """
+    import math
+    from collections import Counter
+
     gen_tokens = _tokenize_simple(generated)
     ref_tokens = _tokenize_simple(reference)
     if not gen_tokens or not ref_tokens:
         return 0.0
-    # Count 1-gram matches
-    from collections import Counter
+
     gen_counts = Counter(gen_tokens)
     ref_counts = Counter(ref_tokens)
     matches = sum(min(gen_counts[t], ref_counts[t]) for t in gen_counts)
-    return matches / len(gen_tokens)
+    precision = matches / len(gen_tokens)
+
+    c, r = len(gen_tokens), len(ref_tokens)
+    brevity = 1.0 if c >= r else math.exp(1.0 - r / c)
+    return precision * brevity
 
 
 # ── the two questions ────────────────────────────────────────────────────────
@@ -250,21 +523,28 @@ def probe_router_discrimination(moe_dir: str,
     trained_on = trained_on or set()
 
     # Held out BY CONSTRUCTION: drop any row the router actually trained on.
+    #
+    # `trained_on` is a set of CONTENT HASHES, not of texts. Holding the
+    # training corpus in a Python set to answer "have I seen this string"
+    # keeps every byte of it alive for the duration of the probe, at roughly
+    # 1.5-3x the file size once str objects are counted - and that set was
+    # built from a read_text() of mixed_all.jsonl, so the corpus was resident
+    # twice before the model loaded. Forty hex characters answers the same
+    # question.
+    #
+    # The read is streamed and stops at 400 rows per source, which is what the
+    # loop always intended; it just used to slurp the file first and then
+    # break.
     sources: Dict[str, List[str]] = {}
     for name, path in held_paths.items():
         rows: List[str] = []
-        try:
-            lines = Path(path).read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            if not line.strip():
-                continue
+        for line in _iter_jsonl(path):
             try:
-                t = json.loads(line).get("text") or json.loads(line).get("content")
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if t and t not in trained_on:
+            t = obj.get("text") or obj.get("content")
+            if t and _digest(t) not in trained_on:
                 rows.append(t)
             if len(rows) >= 400:
                 break
@@ -404,6 +684,11 @@ def probe_router_discrimination(moe_dir: str,
         experts[en] = {
             "enrichment": r,
             "own_share": own,
+            # Selection share averaged over EVERY source - the number that
+            # answers "is this expert used at all", which is what dead means.
+            # own_share alone cannot answer it: an expert can be selected
+            # constantly and still show no preference for its own ground.
+            "marginal_share": sum(col.values()) / max(len(col), 1),
             "others_share": oavg,
             "own_is_column_max": top == en,
             "top_competitor": rivals[0][0] if rivals else "",
@@ -502,17 +787,35 @@ def _load_model(model_dir: str, dtype_name: str = "float16", device: str = ""):
         device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = AutoTokenizer.from_pretrained(model_dir)
     model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=dtype)
-    return model.to(device).eval(), tok, device
+    model = model.to(device).eval()
+
+    # use_cache=False IS A TRAINING SETTING AND IT SURVIVED THE STITCH.
+    #
+    # The router-trained config.json carries `"use_cache": false`, which is
+    # correct while training (the cache is dead weight when every position is
+    # computed anyway) and actively hostile at generation time: with no KV
+    # cache, generate() re-runs a FULL forward over the entire prefix for
+    # every single new token. 256 new tokens on a 1024-token prompt stops
+    # being 256 cheap steps and becomes 256 full-sequence forwards, each one
+    # re-materialising the attention scores for the whole thing.
+    #
+    # Overridden here rather than fixed in the config on purpose: the saved
+    # config is the artifact of a build we did not run, and eval should be
+    # able to score a model somebody else stitched.
+    model.config.use_cache = True
+    # AND THE GENERATION CONFIG, WHICH IS THE ONE generate() ACTUALLY READS.
+    # GenerationConfig.from_model_config() runs inside from_pretrained, so it
+    # has already copied use_cache=False by the time we get here; setting only
+    # model.config would have looked like a fix and changed nothing.
+    gc_ = getattr(model, "generation_config", None)
+    if gc_ is not None:
+        gc_.use_cache = True
+    return model, tok, device
 
 
 def _sample_texts(path: str, num_samples: int) -> List[str]:
     """Pull up to num_samples raw text bodies out of a JSONL held-out file."""
-    try:
-        lines = Path(path).read_text(encoding="utf-8").strip().splitlines()
-    except OSError:
-        return []
-    random.seed(42)
-    picked = random.sample(lines, min(num_samples, len(lines))) if lines else []
+    picked = _reservoir(path, num_samples)
     out: List[str] = []
     for line in picked:
         try:
@@ -576,6 +879,7 @@ def eval_generation(model_dir: str, test_data_path: str,
                     label: str, domain: str,
                     num_samples: int = 10,
                     max_new_tokens: int = 256,
+                    max_prompt_tokens: int = 1024,
                     callback=None,
                     loaded=None) -> EvalResult:
     """Generate real tokens from a real model and score them against references.
@@ -596,13 +900,12 @@ def eval_generation(model_dir: str, test_data_path: str,
         result.note = f"no model at {model_dir} - run build first"
         return result
 
-    try:
-        lines = Path(test_data_path).read_text(encoding="utf-8").strip().splitlines()
-    except OSError as exc:
+    if not Path(test_data_path).is_file():
         result.status = UNMEASURABLE
-        result.note = f"cannot read held-out data: {exc}"
+        result.note = f"cannot read held-out data: {test_data_path}"
         return result
-    if not lines:
+    samples = _reservoir(test_data_path, num_samples)
+    if not samples:
         result.status = "skipped"
         result.note = "no test data"
         return result
@@ -625,9 +928,8 @@ def eval_generation(model_dir: str, test_data_path: str,
             result.note = f"could not load {model_dir}: {exc}"
             return result
 
-    random.seed(42)
-    samples = random.sample(lines, min(num_samples, len(lines)))
-
+    seen_first = False
+    peak_mib = 0.0
     em: List[float] = []
     r1: List[float] = []
     bl: List[float] = []
@@ -646,20 +948,114 @@ def eval_generation(model_dir: str, test_data_path: str,
         if "prompt" not in item and "input" not in item:
             completion_mode = True
 
-        batch = tok(prompt, return_tensors="pt", truncation=True, max_length=1024)
+        batch = tok(prompt, return_tensors="pt", truncation=True,
+                    max_length=max_prompt_tokens)
+
+        # MEASURE THE SEQUENCE, DO NOT TRUST IT.
+        #
+        # truncation=True with max_length says this cannot exceed the cap. The
+        # memory says otherwise: an 18 GB allocation on this model is an eager
+        # attention matrix for roughly 25,000 tokens, which is 25x a cap that
+        # was supposedly enforced. One of those two is wrong and guessing which
+        # has already cost two runs, so the tensor now reports its own length
+        # and the cap is applied a second time where it cannot be argued with.
+        #
+        # If the trace below ever fires, tokenizer truncation was not doing
+        # what its arguments claim. If it never fires and we still OOM,
+        # sequence length is exonerated and the cause is elsewhere.
+        n_tok = int(batch["input_ids"].shape[-1])
+        if n_tok > max_prompt_tokens:
+            _trace(f"{label}/{domain}: TOKENIZER DID NOT TRUNCATE - got "
+                   f"{n_tok} tokens for max_length={max_prompt_tokens}; "
+                   f"slicing")
+            batch = {k: v[:, :max_prompt_tokens] for k, v in batch.items()}
+            n_tok = max_prompt_tokens
+        if scored == 0 and not seen_first:
+            seen_first = True
+            _trace(f"{label}/{domain}: first prompt {n_tok} tokens, "
+                   f"generating {max_new_tokens}")
+
         batch = {k: v.to(model.device) for k, v in batch.items()}
-        with torch.no_grad():
-            out_ids = model.generate(
-                **batch, max_new_tokens=max_new_tokens,
-                do_sample=False, pad_token_id=tok.eos_token_id)
+        # EVAL MUST NOT TAKE THE MACHINE DOWN.
+        #
+        # An OOM here used to propagate out of run_eval, out of the CLI, and
+        # on a unified-memory box frequently past the point where anything
+        # could still be printed - the last two runs ended with the process
+        # killed and an SSH session closing, which is the least informative
+        # possible failure. Whatever the cause, the CORRECT behaviour is the
+        # same and it is the one this project already has a vocabulary for:
+        # say what could not be measured, say why, hand the memory back, and
+        # keep going. Unmeasurable is not pass; it is also not a crash.
+        try:
+            with torch.no_grad():
+                out_ids = model.generate(
+                    **batch, max_new_tokens=max_new_tokens,
+                    do_sample=False, pad_token_id=tok.eos_token_id)
+        except Exception as exc:
+            if not _is_oom(exc):
+                raise
+            # ONE RETRY, AFTER HANDING THE RESERVATION BACK.
+            # An OOM whose cause is fragmentation is not an OOM the second
+            # time: the bytes were never in use, they were stranded in
+            # segments the allocator could not reuse. If it fails again the
+            # model genuinely does not fit and we say so.
+            reserved, live = _balloon()
+            retried = False
+            if reserved > max(live, 1.0) * 2:
+                try:
+                    import torch as _t
+                    _t.cuda.empty_cache()
+                    with torch.no_grad():
+                        out_ids = model.generate(
+                            **batch, max_new_tokens=max_new_tokens,
+                            do_sample=False, pad_token_id=tok.eos_token_id)
+                    retried = True
+                    _trace(f"{label}/{domain}: recovered after deflating "
+                           f"{reserved:,.0f}MiB reserved / {live:,.0f}MiB live")
+                except Exception:
+                    retried = False
+            if retried:
+                pass
+            else:
+                batch = None
+                if owns_model:
+                    model = None
+                release_memory()
+                mem = _mem_mb()
+                result.status = UNMEASURABLE
+                result.note = (
+                    f"out of memory after {scored} of {len(samples)} samples "
+                    f"on a {n_tok}-token prompt (+{max_new_tokens} new): "
+                    f"{exc}. Allocator held {reserved:,.0f}MiB reserved for "
+                    f"{live:,.0f}MiB of live tensors "
+                    f"({reserved / max(live, 1.0):.1f}x)"
+                    + ("; that ratio is fragmentation, not a model that needs "
+                       "the memory - try "
+                       "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+                       if reserved > max(live, 1.0) * 3 else "")
+                    + ". At the failure: "
+                    + ", ".join(f"{k}={v:,.0f}MiB" for k, v in mem.items())
+                    + ". Nothing is scored from a partial run.")
+                _trace(f"OOM in {label}/{domain} after {scored} samples, "
+                       f"prompt was {n_tok} tokens, "
+                       f"reserved/live = {reserved:,.0f}/{live:,.0f}MiB")
+                return result
         generated = tok.decode(
             out_ids[0][batch["input_ids"].shape[-1]:], skip_special_tokens=True)
+
+        try:
+            peak_mib = max(peak_mib,
+                           torch.cuda.max_memory_allocated() / 2 ** 20)
+        except Exception:
+            pass
 
         em.append(_exact_match(generated, reference))
         r1.append(_rouge1(generated, reference))
         bl.append(_bleu_simple(generated, reference))
         lengths.append(len(_tokenize_simple(generated)))
         scored += 1
+        if scored % 4 == 0:
+            _deflate()
         if callback and scored % 5 == 0:
             callback("eval.quality", "running", f"{label}: {scored}/{len(samples)}")
 
@@ -682,6 +1078,8 @@ def eval_generation(model_dir: str, test_data_path: str,
     result.bleu = sum(bl) / scored
     result.avg_length = sum(lengths) / scored
     result.status = "done"
+    if peak_mib:
+        _trace(f"{label}/{domain}: peak {peak_mib:,.0f}MiB over {scored} samples")
     result.note = (f"{scored} samples generated"
                    + (" (completion: second half of each held-out doc; "
                       "read ROUGE/BLEU, exact-match is near zero by nature)"
@@ -689,7 +1087,8 @@ def eval_generation(model_dir: str, test_data_path: str,
     return result
 
 
-def detect_dead_experts(report: EvalReport, threshold: float = 1.2) -> List[str]:
+def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
+                        dead_share_frac: float = 0.2) -> List[str]:
     """Flag experts the router does not prefer on their own ground.
 
     THE DEFINITION CHANGED, and the old one is why this function could not work.
@@ -722,22 +1121,66 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2) -> List[str]
         report.dead_experts = []
         return []
 
+    # TWO FAILURES, TWO WORDS. This used to call both of them dead.
+    #
+    # DEAD is a usage fact: the router does not route to it. That is the
+    # failure Ms.MoE uniquely claims to prevent, it means the stitch produced
+    # a passenger, and it is measured against what uniform routing would give
+    # (top_k / num_experts), not against a fixed number - "below 20% of
+    # uniform" means the same thing whether there are 2 experts or 12.
+    #
+    # UNDISCRIMINATING is a specialisation fact: it gets plenty of traffic and
+    # shows no preference for its own domain. Worth knowing, worth fixing in
+    # router training, and NOT a broken stitch.
+    E = int(routing.get("n_experts") or len(experts) or 1)
+    K = int(routing.get("top_k") or 1)
+    uniform = K / max(E, 1)
+    floor = uniform * dead_share_frac
+
     dead: List[str] = []
+    weak: List[str] = []
     for name, info in experts.items():
         enrichment = info.get("enrichment", 0.0)
-        if enrichment < threshold or info.get("outranked"):
+        share = info.get("marginal_share")
+        if share is None:
+            share = info.get("own_share", uniform)
+
+        if share < floor:
             dead.append(name)
-            result = report.stages.get(name)
-            if result is not None:
-                why = f"enrichment {enrichment:.2f}x < {threshold}x"
-                if info.get("outranked"):
-                    why += (f"; outranked on its own domain by "
-                            f"{info.get('top_competitor')} "
-                            f"({info.get('top_competitor_share', 0):.3f} vs "
-                            f"{info.get('own_share', 0):.3f})")
-                result.note = f"dead: {why}"
+            why = (f"dead: selected on {share:.3f} of tokens against "
+                   f"{uniform:.3f} for uniform routing - the router does not "
+                   f"route to it")
+        elif enrichment < threshold or info.get("outranked"):
+            weak.append(name)
+            why = (f"not specialised: enrichment {enrichment:.2f}x < "
+                   f"{threshold}x, but selected on {share:.3f} of tokens "
+                   f"({uniform:.3f} is uniform) - used, just not preferentially")
+            if info.get("outranked"):
+                why += (f"; outranked on its own domain by "
+                        f"{info.get('top_competitor')} "
+                        f"({info.get('top_competitor_share', 0):.3f} vs "
+                        f"{info.get('own_share', 0):.3f})")
+        else:
+            continue
+        result = report.stages.get(name)
+        if result is not None:
+            result.note = why
+
+    # THE TEST HAS A POWER FLOOR AND IT IS A FUNCTION OF E ALONE.
+    # "own-expert is the column maximum for n/n" has probability 1/E^E by
+    # chance. At E=2 that is 0.25 - the headline can never be significant, no
+    # matter how clean the table looks. Say it next to the result rather than
+    # leaving the reader to notice p=0.25 on their own.
+    p_floor = 1.0 / (E ** E) if E else 1.0
+    if p_floor > 0.05:
+        report.caveats.append(
+            f"own-column test cannot reach significance with {E} experts: "
+            f"all-{E}-of-{E} happens by chance with p={p_floor:.3f}. The "
+            f"enrichment numbers are real; the 'n/n won their column' "
+            f"headline is not evidence at this width.")
 
     report.dead_experts = dead
+    report.undiscriminating = weak
     return dead
 
 
@@ -796,11 +1239,17 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     expert_order = [n for n in (config.expert_names or list(code_paths))
                     if n in code_paths]
 
+    global _SAMPLER
     t_start = time.time()
+    if os.environ.get("MSMOE_MEM_SAMPLE", "1") != "0":
+        _SAMPLER = _MemSampler(
+            float(os.environ.get("MSMOE_MEM_INTERVAL", "0.25"))).start()
+    _trace("eval start")
     held_paths: Dict[str, str] = {}
     for expert_name in expert_order:
         _, held_path = _load_or_split(code_paths[expert_name], held_out)
         held_paths[expert_name] = held_path
+    _trace("held-out splits written")
 
     do_routing = mode in ("routing", "all")
     do_quality = mode in ("quality", "all")
@@ -815,12 +1264,12 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
         if not mixed.exists():
             mixed = Path(config.data_root) / "mixed_all.jsonl"
         if mixed.exists():
-            for line in mixed.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    try:
-                        trained_on.add(json.loads(line)["text"])
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+            for line in _iter_jsonl(str(mixed)):
+                try:
+                    trained_on.add(_digest(json.loads(line)["text"]))
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+        _trace(f"trained-on set built ({len(trained_on)} rows)")
 
         report.routing = probe_router_discrimination(
             moe_dir=moe_dir,
@@ -852,6 +1301,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
         for expert_name in expert_order:
             expert_dir = str(output_root /
                              st.FINETUNE_ARTIFACT.format(expert=expert_name))
+            _trace(f"before {expert_name}")
             res = eval_generation(
                 model_dir=expert_dir, test_data_path=held_paths[expert_name],
                 label=expert_name, domain=expert_name,
@@ -860,10 +1310,13 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             if res.status == UNMEASURABLE:
                 report.unmeasured.append(f"quality/{expert_name}: {res.note}")
             release_memory()
+            _trace(f"after {expert_name}")
 
         moe_model = moe_tok = None
+        _trace("before MoE load")
         try:
             moe_model, moe_tok, moe_device = _load_model(moe_dir)
+            _trace("after MoE load")
         except Exception as exc:
             for expert_name in expert_order:
                 report.stages[f"moe/{expert_name}"] = EvalResult(
@@ -886,6 +1339,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                         f"quality/moe/{expert_name}: {moe_res.note}")
             moe_model = moe_tok = None
             release_memory()
+            _trace("after MoE released")
 
     # ── verdict ────────────────────────────────────────────────────────────
     if do_routing:
@@ -894,10 +1348,16 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
         report.unmeasured.append(
             f"dead-expert check: needs --mode routing or all (ran {mode})")
 
+    if _SAMPLER is not None:
+        _SAMPLER.stop()
+        print(_SAMPLER.table(), file=sys.stderr, flush=True)
+        _SAMPLER = None
+
     elapsed = time.time() - t_start
     report.message = (f"Eval complete in {elapsed:.0f}s. "
                       f"mode={mode}. "
-                      f"{len(report.dead_experts)} dead expert(s). "
+                      f"{len(report.dead_experts)} dead expert(s), "
+                      f"{len(report.undiscriminating)} undiscriminating. "
                       f"{len(report.unmeasured)} thing(s) unmeasurable.")
     # ok means "we ran and did not error", NOT "everything passed" and NOT
     # "everything was measurable". The caller decides the exit code from
@@ -953,6 +1413,8 @@ def eval_from_manifest(run_dir: Path) -> EvalReport:
     report.ok = data.get("ok", False)
     report.message = data.get("message", "")
     report.dead_experts = data.get("dead_experts", [])
+    report.undiscriminating = data.get("undiscriminating", [])
+    report.caveats = data.get("caveats", [])
 
     for name, info in data.get("stages", {}).items():
         r = EvalResult(
@@ -976,6 +1438,8 @@ def save_eval_report(report: EvalReport, path: Path) -> None:
         "ok": report.ok,
         "message": report.message,
         "dead_experts": report.dead_experts,
+        "undiscriminating": report.undiscriminating,
+        "caveats": report.caveats,
         "stages": {
             name: {
                 "expert_name": r.expert_name,

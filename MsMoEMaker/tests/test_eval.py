@@ -136,8 +136,19 @@ class TestEvalReport:
 # used, except now it builds the shape run_eval actually produces.
 
 
-def _routing(status=PASS, **experts):
-    return {"status": status, "reason": "", "experts": dict(experts)}
+def _routing(status=PASS, n_experts=None, top_k=1, **experts):
+    """Build a routing dict.
+
+    n_experts and top_k are NOT decoration: "dead" is measured against what
+    uniform routing would give (top_k / n_experts), so a fixture that omits
+    them is a fixture testing a different threshold than production uses. Two
+    tests in this class used to pass because a single-expert fixture made
+    uniform=1.0 and dragged the floor up to meet the value under test.
+    """
+    return {"status": status, "reason": "",
+            "n_experts": n_experts if n_experts is not None else len(experts),
+            "top_k": top_k,
+            "experts": dict(experts)}
 
 
 class TestDeadExpertDetection:
@@ -145,18 +156,65 @@ class TestDeadExpertDetection:
     def test_healthy_expert_not_dead(self):
         report = EvalReport(ok=True)
         report.routing = _routing(
+            n_experts=5, top_k=2,
             python={"enrichment": 2.1, "own_share": 0.31,
+                    "marginal_share": 0.30,
                     "top_competitor": "csharp", "top_competitor_share": 0.19,
                     "outranked": False})
         assert detect_dead_experts(report, threshold=1.2) == []
 
-    def test_low_enrichment_is_dead(self):
+    def test_low_enrichment_is_not_specialised_not_dead(self):
+        """THE FALSE ALARM FROM THE FIRST REAL RUN.
+
+        Both 0.5B experts sat at ~0.50 selection share with top-1 of 2 - which
+        IS uniform, i.e. used on half of every source's tokens - and enrichment
+        1.02x. The report said DEAD EXPERTS: python, csharp, which reads as a
+        broken stitch and is not what happened. The stitch was fine; the router
+        had not learned to prefer anything.
+        """
         report = EvalReport(ok=True)
         report.routing = _routing(
-            powershell={"enrichment": 1.11, "own_share": 0.192,
-                        "top_competitor": "csharp",
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.02, "own_share": 0.508,
+                    "marginal_share": 0.503, "top_competitor": "csharp",
+                    "top_competitor_share": 0.498, "outranked": False},
+            csharp={"enrichment": 1.02, "own_share": 0.502,
+                    "marginal_share": 0.497, "top_competitor": "python",
+                    "top_competitor_share": 0.492, "outranked": False})
+        assert detect_dead_experts(report, threshold=1.2) == []
+        assert sorted(report.undiscriminating) == ["csharp", "python"]
+
+    def test_an_expert_the_router_never_picks_is_dead(self):
+        """The real thing. 0.02 share against 0.40 for uniform: a passenger."""
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=5, top_k=2,
+            powershell={"enrichment": 1.11, "own_share": 0.02,
+                        "marginal_share": 0.019, "top_competitor": "csharp",
                         "top_competitor_share": 0.278, "outranked": True})
         assert detect_dead_experts(report, threshold=1.2) == ["powershell"]
+        assert report.undiscriminating == []
+
+    def test_two_experts_carries_a_power_caveat(self):
+        """p=0.25 by construction. The headline cannot be evidence at E=2."""
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 3.0, "own_share": 0.75,
+                    "marginal_share": 0.5, "outranked": False},
+            csharp={"enrichment": 3.0, "own_share": 0.75,
+                    "marginal_share": 0.5, "outranked": False})
+        detect_dead_experts(report)
+        assert any("cannot reach significance" in c for c in report.caveats)
+
+    def test_a_wide_moe_carries_no_power_caveat(self):
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=5, top_k=2,
+            python={"enrichment": 3.0, "own_share": 0.6,
+                    "marginal_share": 0.4, "outranked": False})
+        detect_dead_experts(report)
+        assert not report.caveats
 
     def test_outranked_on_own_domain_is_dead_even_if_enriched(self):
         """The 0.5B rung's actual weak spot: an expert can clear the enrichment
@@ -164,10 +222,14 @@ class TestDeadExpertDetection:
         neighbour. Column-only reads miss this."""
         report = EvalReport(ok=True)
         report.routing = _routing(
+            n_experts=5, top_k=2,
             powershell={"enrichment": 1.9, "own_share": 0.192,
-                        "top_competitor": "csharp",
+                        "marginal_share": 0.19, "top_competitor": "csharp",
                         "top_competitor_share": 0.278, "outranked": True})
-        assert detect_dead_experts(report, threshold=1.2) == ["powershell"]
+        assert detect_dead_experts(report, threshold=1.2) == []
+        assert report.undiscriminating == ["powershell"], (
+            "outranked on its own ground is a specialisation failure, and it "
+            "must still be reported - just not as a dead expert")
 
     def test_unmeasurable_routing_is_not_a_clean_bill(self):
         """The regression that matters. The old detector defaulted its MoE

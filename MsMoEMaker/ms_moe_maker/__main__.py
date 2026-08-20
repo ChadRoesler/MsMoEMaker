@@ -30,6 +30,25 @@ from typing import Any, Dict, Optional
 from . import _describe as _d
 from .events import Events
 
+# ── allocator policy, set BEFORE anything can initialise CUDA ─────────────
+#
+# On unified memory the caching allocator's RESERVATION is host RAM. Torch's
+# default segment policy strands blocks it cannot reuse, and a MoE decode loop
+# - many small gathers of varying token counts, per expert, per layer, per
+# step - fragments it badly. Measured on a GB10: 106.6 GB reserved to hold
+# 6.4 GB of live tensors, a 16x balloon, 100 GB of it doing nothing. On a
+# discrete GPU that is invisible; here it is subtracted from the OS, and the
+# OOM killer starts reaping 640 kB daemons because they are the only thing it
+# can see.
+#
+# expandable_segments lets a segment grow instead of stranding blocks. It has
+# to be in the environment before the first CUDA allocation, which is why it
+# lives at import time in the entry point rather than in eval.py.
+#
+# An existing value always wins: this is a default, not a mandate.
+if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF"):
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 def _version() -> str:
     """The installed version, not a literal. This used to be a hardcoded "1.0"
@@ -491,6 +510,14 @@ def _cmd_eval(args):
     # share a code with "it passed" - conflating those is exactly what the old
     # proxy scorer did, and why it read as good news for a check that could not
     # fire.
+    if report.caveats:
+        print("\n[~] READ WITH THIS IN MIND:")
+        for c in report.caveats:
+            print(f"      - {c}")
+    if report.undiscriminating:
+        print(f"\n[~] NOT SPECIALISED: {', '.join(report.undiscriminating)}")
+        print("      Used, but showing no preference for their own domain.")
+        print("      The stitch is fine; this is a router-training result.")
     if report.dead_experts:
         print(f"\n[!] DEAD EXPERTS: {', '.join(report.dead_experts)}")
         return 2

@@ -247,7 +247,7 @@ def train_router(config, final_dir: str, safe_names: List[str],
             per_device_train_batch_size=config.router_batch,
             gradient_accumulation_steps=config.router_accum,
             gradient_checkpointing=True,
-            num_train_epochs=1,
+            num_train_epochs=config.router_epochs,
             learning_rate=config.lr_router,
             warmup_steps=max(10, round(0.05 * config.router_mix_total
                                        / (config.router_batch * config.router_accum))),
