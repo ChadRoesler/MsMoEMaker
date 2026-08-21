@@ -141,8 +141,31 @@ jobs:
           # Pinned EXACTLY, not as a subset: adding a verb is a release
           # decision, same as bumping the manifest schema. If this fails
           # because a verb was added on purpose, update the set on purpose.
+          #
+          # `corpus` was added on purpose: it reports corpus health and, with
+          # --prune, PROPOSES a cleaner copy. It exists because a C# corpus
+          # once reached its token quota from a single repository - 78% of
+          # files importing one proprietary namespace - and trained an expert
+          # in one company's house style that every other check in the package
+          # reported as healthy.
           assert set(d["commands"]) == {
-              "init", "build", "smoke", "eval", "validate", "describe"}, d
+              "init", "build", "corpus", "smoke", "eval", "validate",
+              "describe"}, d
+          # EVAL MODES ARE ALSO A CONTRACT, and were not being checked at all.
+          # A consumer asking for --mode routing has to keep getting routing,
+          # so removing or renaming one is breaking exactly like a verb.
+          # ADDING one is not: stagehand's existing --mode values keep meaning
+          # what they meant, which is why `experts` could land without a
+          # release decision. Pinned as a SUBSET for that reason - the check
+          # that matters is that nothing vanished.
+          assert {"routing", "quality", "all"} <= set(d["eval_modes"]), d
+          # DESCRIBE PUBLISHES THIS LIST TWICE, under `eval_modes` and `modes`.
+          # Two names for one fact is two things to forget to update, and a
+          # consumer keying off the stale one would silently ask for a mode
+          # that no longer exists. Assert they agree until one of them goes.
+          assert list(d["modes"]) == list(d["eval_modes"]), (
+              f"modes and eval_modes disagree: {d['modes']} vs "
+              f"{d['eval_modes']}")
           # The run manifest schema is a PUBLISHED contract - seren-theatre
           # reads it with an independent implementation and refuses a version
           # it does not understand. Bumping it is a release decision, so it
