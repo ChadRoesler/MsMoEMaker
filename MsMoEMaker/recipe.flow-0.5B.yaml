@@ -56,7 +56,7 @@ experts:
 # Without these you get the production defaults: 100,000 samples per expert and
 # a 2,000-sample floor, which is a real build you will not finish this evening.
 corpus:
-  min_samples: 9000
+  min_samples: 300
   max_samples: 12000        # was 3000 — the doc cap, and the real ceiling
   router_mix_total: 4000
   max_shards: 80
