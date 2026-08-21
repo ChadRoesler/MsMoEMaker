@@ -145,6 +145,27 @@ def train_router(config, final_dir: str, safe_names: List[str],
     pools: Dict[str, List[str]] = {}
     for name in safe_names:
         path = expert_corpus_paths.get(name)
+        # PREFER THE TRAIN SPLIT, SO HELD-OUT STAYS HELD OUT.
+        #
+        # The mix used to be drawn from the WHOLE corpus, held-out rows
+        # included. eval's routing probe then excludes any held-out row it
+        # finds in the mix - held out by construction, which is the right
+        # instinct - so a big enough mix eats a source's entire held-out set
+        # and that expert silently vanishes from the routing table.
+        #
+        # It happened: router_mix_total 1200 -> 4000 consumed every usable
+        # python held-out row, the probe reported "column maximum for 2/2"
+        # over three experts, and p quietly regressed from 0.037 to 0.250
+        # because the test had narrowed without saying so.
+        #
+        # `.train` is written by _load_or_split at the same seed every time,
+        # so when it exists it is exactly the complement of what eval will
+        # hold out. Falling back to the full corpus keeps this working for
+        # anyone who trains a router without ever running the gate or eval.
+        if path:
+            train_split = path + ".train"
+            if os.path.exists(train_split) and os.path.getsize(train_split) > 0:
+                path = train_split
         if not path or not os.path.exists(path):
             print(f"   WARNING: no data for expert {name!r} at {path}")
             continue

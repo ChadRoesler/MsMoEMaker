@@ -563,10 +563,27 @@ def probe_router_discrimination(moe_dir: str,
         if rows:
             sources[name] = rows
 
+    # AN EXPERT THAT LOST ITS HELD-OUT SET IS NOT AN EXPERT THAT PASSED.
+    #
+    # Rows are excluded when they appear in the router's training mix - held
+    # out by construction, which is correct - but a large enough mix can
+    # consume a source ENTIRELY. When that happened the probe carried on with
+    # whatever was left: three experts, two rows in the table, "column maximum
+    # for 2/2", and p silently regressed from 0.037 to 0.250 because the test
+    # had narrowed. The missing expert was then reported as neither dead nor
+    # undiscriminating, i.e. it passed a check that never ran.
+    #
+    # Narrowing the test is allowed. Narrowing it QUIETLY is not.
+    excluded = [n for n in expert_order if n not in sources]
     if len(sources) < 2:
         return {"status": UNMEASURABLE,
                 "reason": (f"need >=2 sources with held-out rows, found "
-                           f"{sorted(sources)}"),
+                           f"{sorted(sources)}"
+                           + (f"; {excluded} had every held-out row consumed "
+                              f"by the router mix - lower "
+                              f"corpus.router_mix_total or rebuild so the "
+                              f"mix draws from the .train split"
+                              if excluded else "")),
                 "experts": {}}
 
     try:
@@ -788,6 +805,16 @@ def probe_router_discrimination(moe_dir: str,
         "p_value": (1 / (n ** n)) if n else None,
         "mean_js_bits": mean_js,
         "js_per_layer": per_layer,
+        # Experts the probe could not score at all. Reported separately from
+        # `experts` so a reader cannot mistake a shorter table for a cleaner
+        # one, and so the p-value can be read against the width it was
+        # actually computed at.
+        "excluded": excluded,
+        "excluded_reason": (
+            "every held-out row was consumed by the router's training mix "
+            "(held out by construction). Lower corpus.router_mix_total, or "
+            "rebuild on a version whose router mix draws from the .train "
+            "split." if excluded else ""),
         # Mean softmax probability of the experts actually selected. Uniform
         # is 1/E (or K/E summed over the top-K); 1.0 means the gate is fully
         # saturated and the softmax has stopped being a distribution.
@@ -1162,6 +1189,20 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
     """
     routing = report.routing or {}
     experts = routing.get("experts") or {}
+
+    # SAY WHO WAS NOT ON THE TABLE, BEFORE ANYTHING IS CONCLUDED FROM IT.
+    for name in routing.get("excluded") or []:
+        report.unmeasured.append(
+            f"routing/{name}: not scored - "
+            f"{routing.get('excluded_reason', 'no held-out rows')}")
+    if routing.get("excluded"):
+        report.caveats.append(
+            f"the routing table covers "
+            f"{len(routing.get('experts') or {})} of "
+            f"{len(routing.get('excluded') or []) + len(routing.get('experts') or {})} "
+            f"experts: {routing['excluded']} had no held-out rows left. The "
+            f"p-value below is for the NARROWER test, and every summary on "
+            f"this table is an average over the experts that survived.")
 
     if routing.get("status") == UNMEASURABLE or not experts:
         reason = routing.get("reason") or "routing was not measured"

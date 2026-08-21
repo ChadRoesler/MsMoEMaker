@@ -572,10 +572,19 @@ def _print_eval_report(report):
             print(f"  {name:16} {e['own_share']:>7.3f} {e.get('others_share', 0):>8.3f} "
                   f"{enrich} {str(e.get('top_competitor','')):>14} "
                   f"{e.get('top_competitor_share', 0):>7.3f}{flag}")
+        excluded = routing.get("excluded") or []
+        if excluded:
+            print(f"    {'':16} {'':>7} {'':>8} {'':>9} {'':>14} {'':>7}")
+            for name in excluded:
+                print(f"  {name:16} {'NOT SCORED':>7} - no held-out rows "
+                      f"left after the router mix")
         n = routing.get("named_experts") or 0
         if n:
+            width = "" if not excluded else (
+                f" (of {n + len(excluded)} experts; {', '.join(excluded)} "
+                f"not scored)")
             print(f"\n    own-expert is the column maximum for "
-                  f"{routing.get('own_is_max_count', 0)}/{n}")
+                  f"{routing.get('own_is_max_count', 0)}/{n}{width}")
             print(f"    mean enrichment {routing.get('mean_enrichment', 0):.2f}x"
                   f"   p={routing.get('p_value', 0):.5f} for {n}/{n} by chance")
         js = routing.get("mean_js_bits")

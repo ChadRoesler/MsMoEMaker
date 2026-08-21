@@ -763,3 +763,84 @@ class TestStarvedEnrichment:
         out = capsys.readouterr().out
         assert "2.10x" in out
         assert "STARVED" not in out
+
+
+class TestAnExpertThatLostItsHeldOutSet:
+    """Narrowing the test is allowed. Narrowing it quietly is not.
+
+    THE REAL RUN. router_mix_total went 1200 -> 4000 and consumed every usable
+    python held-out row. The probe carried on with what was left:
+
+        csharp     0.377  1.21x  <- own is top
+        markdown   0.375  1.15x  <- own is top
+          own-expert is the column maximum for 2/2
+          p = 0.25000
+        [ok] No dead experts. Every check measured.
+
+    Three experts, two rows, and a p-value that had silently regressed from
+    0.037 to 0.250 because the width of the test changed. Python was reported
+    as neither dead nor undiscriminating - it passed a check that never ran,
+    under a line claiming every check measured.
+    """
+
+    def _narrowed(self):
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=3, top_k=2,
+            csharp={"enrichment": 1.21, "own_share": 0.377,
+                    "marginal_share": 0.330, "enrichment_reliable": True,
+                    "own_is_column_max": True},
+            markdown={"enrichment": 1.15, "own_share": 0.375,
+                      "marginal_share": 0.335, "enrichment_reliable": True,
+                      "own_is_column_max": True})
+        report.routing.update({
+            "mean_js_bits": 0.008, "moe_layers": 24, "named_experts": 2,
+            "own_is_max_count": 2, "mean_enrichment": 1.18, "p_value": 0.25,
+            "excluded": ["python"],
+            "excluded_reason": "every held-out row was consumed by the "
+                               "router's training mix"})
+        return report
+
+    def test_the_missing_expert_is_recorded_as_unmeasured(self):
+        report = self._narrowed()
+        detect_dead_experts(report)
+        assert any("routing/python" in u for u in report.unmeasured), (
+            "an expert with no held-out rows must be reported as unmeasured, "
+            "not omitted")
+
+    def test_the_narrowed_width_is_stated_next_to_the_p_value(self):
+        report = self._narrowed()
+        detect_dead_experts(report)
+        assert any("2 of 3" in c and "p-value" in c for c in report.caveats), \
+            report.caveats
+
+    def test_the_missing_expert_is_not_called_dead_or_undiscriminating(self):
+        """It was not measured. Neither verdict is available."""
+        report = self._narrowed()
+        dead = detect_dead_experts(report)
+        assert "python" not in dead
+        assert "python" not in report.undiscriminating
+
+    def test_a_complete_table_carries_no_width_caveat(self):
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            a={"enrichment": 1.4, "own_share": 0.6, "marginal_share": 0.5,
+               "enrichment_reliable": True},
+            b={"enrichment": 1.4, "own_share": 0.6, "marginal_share": 0.5,
+               "enrichment_reliable": True})
+        report.routing.update({"mean_js_bits": 0.4, "excluded": []})
+        detect_dead_experts(report)
+        assert not any("not scored" in c for c in report.caveats)
+
+
+def test_the_router_mix_prefers_the_train_split():
+    """The mix drew from the WHOLE corpus, held-out rows included, so a large
+    enough mix ate the very rows the routing probe needs. `.train` is written
+    at a fixed seed and is exactly the complement of what eval holds out."""
+    import inspect
+    from ms_moe_maker import router
+    src = inspect.getsource(router.train_router)
+    assert 'path + ".train"' in src, (
+        "the router mix must prefer the .train split so held-out stays held "
+        "out")
