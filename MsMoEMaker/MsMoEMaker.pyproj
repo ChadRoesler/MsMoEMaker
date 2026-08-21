@@ -74,6 +74,8 @@
     <Content Include="pyproject.toml" />
     <Content Include="README.md" />
     <Content Include="recipe.example.yaml" />
+    <Content Include="recipe.flow-0.5B.yaml" />
+    <Content Include="recipe.rung-0.5B.yaml" />
   </ItemGroup>
   <ItemGroup>
     <InterpreterReference Include="Global|PythonCore|3.11" />
