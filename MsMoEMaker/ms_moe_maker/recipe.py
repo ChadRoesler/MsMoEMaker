@@ -194,6 +194,11 @@ class Corpus:
     # house-style expert that passed every downstream check. Lower is more
     # diverse and needs more shards.
     per_repo_cap: int = -1
+    # How many shards the scan may pull before giving up. Each is ~0.57 GB.
+    # This was hardcoded at 80, so a recipe setting it was accepted by the
+    # parser and silently ignored - which is worse than rejecting it, because
+    # the run then fails for a reason the setting was meant to prevent.
+    max_shards: int = -1
 
 
 @dataclass
@@ -613,6 +618,17 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
                  ("main_evals", rec.gates.main_evals)):
         if v not in ("auto", "manual", "skip"):
             errs.append(f"gates.{g} must be auto | manual | skip, got {v!r}")
+    # AN IMPOSSIBLE FLOOR, CAUGHT BEFORE THE SCAN RATHER THAN AFTER IT.
+    # min_samples is a floor and max_samples is a ceiling; a floor above the
+    # ceiling can never be satisfied, and the scan would walk shards until the
+    # cap discovering that.
+    if (rec.corpus.min_samples > 0 and rec.corpus.max_samples > 0
+            and rec.corpus.min_samples > rec.corpus.max_samples):
+        errs.append(
+            f"corpus.min_samples ({rec.corpus.min_samples}) is above "
+            f"corpus.max_samples ({rec.corpus.max_samples}) - the floor is "
+            f"higher than the ceiling, so no scan can satisfy it")
+
     if rec.gates.experts not in ("auto", "cheap", "skip"):
         errs.append(f"gates.experts must be auto | cheap | skip, got "
                     f"{rec.gates.experts!r}")

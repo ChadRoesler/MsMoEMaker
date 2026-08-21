@@ -756,14 +756,46 @@ def _collect_from_shards(languages: List[str], config,
                 taken_here[lang] += 1
                 repos_for[lang][rlabel] += 1
 
+                # TWO UNITS, AND BOTH HAVE TO BE SATISFIED BEFORE WE STOP.
+                #
+                # The scan retires a language on TOKENS - that is the unit the
+                # training schedule is actually denominated in. min_samples is
+                # a floor on DOCUMENTS, and it used to be checked only AFTER
+                # the loop had already broken out on "All languages
+                # satisfied". So a run with min_samples above the doc count
+                # the token target happens to need would stop hunting the
+                # moment tokens were met, then fail a check it had stopped
+                # trying to satisfy - and raising max_shards did nothing,
+                # because the loop never reached another shard.
+                #
+                # Measured: `[Python] FULL at ~7.4M est. tokens (6778 docs)`
+                # immediately followed by `buckets below min 9000`. The scan
+                # was not stuck; it had declared success by one measure and
+                # been failed by another.
+                #
+                # A floor that cannot steer the loop is not a floor, it is a
+                # late assertion. Both now gate `done`.
                 est_tok = chars[lang] / config.chars_per_token_est
-                if est_tok >= config.collect_token_target:
+                have_tokens = est_tok >= config.collect_token_target
+                have_docs = len(buckets[lang]) >= config.min_samples_per_expert
+                if have_tokens and have_docs:
                     done.add(lang)
                     print(f"    [{lang}] FULL at ~{est_tok/1e6:.1f}M est. tokens "
                           f"({len(buckets[lang])} docs, shard {shard_no})")
                 elif len(buckets[lang]) >= config.num_code_samples:
+                    # The ceiling wins over both - it exists so a pathological
+                    # language cannot eat the disk, and stopping is the point.
                     done.add(lang)
-                    print(f"    [{lang}] hit the {config.num_code_samples}-doc CEILING")
+                    print(f"    [{lang}] hit the {config.num_code_samples}-doc "
+                          f"CEILING with ~{est_tok/1e6:.1f}M est. tokens"
+                          + ("" if have_docs else
+                             f" - still under the {config.min_samples_per_expert}-doc "
+                             f"floor, which the ceiling cannot be raised past"))
+                elif have_tokens and not have_docs and shard_no == 1:
+                    # Say it the FIRST time it happens, not after 80 shards.
+                    print(f"    [{lang}] token target met at "
+                          f"{len(buckets[lang])} docs; still hunting for the "
+                          f"{config.min_samples_per_expert}-doc floor")
 
         del ds
         import gc
@@ -805,9 +837,35 @@ def _collect_from_shards(languages: List[str], config,
     # Minimum viable bucket check
     starved = {l: len(buckets[l]) for l in languages if len(buckets[l]) < config.min_samples_per_expert}
     if starved:
+        # SAY WHICH LIMIT ACTUALLY STOPPED IT. "Raise max_shards" was the only
+        # advice offered and it was the wrong advice in the common case: the
+        # scan usually stops because it ran out of SHARDS, but it can also
+        # stop because the corpus genuinely does not hold that much of this
+        # language. Those need opposite responses and the message could not
+        # tell them apart.
+        ran_out_of_shards = shards_used >= cap
+        detail = []
+        for l, n in starved.items():
+            tok = chars[l] / config.chars_per_token_est
+            detail.append(f"{l}: {n} docs (~{tok/1e6:.1f}M est. tokens)")
         raise RuntimeError(
-            f"buckets below min {config.min_samples_per_expert}: {starved}. "
-            f"Raise max_shards or source those languages elsewhere.")
+            f"corpus.min_samples is {config.min_samples_per_expert} docs and "
+            f"these did not reach it after {shards_used} shard(s) — "
+            + "; ".join(detail) + ". "
+            + (f"The {cap}-shard cap (corpus.max_shards) is what stopped the "
+               f"scan: raise it and the scan will keep hunting. "
+               if ran_out_of_shards else
+               f"The scan stopped before the {cap}-shard cap, so more shards "
+               f"were available and something else retired these languages — "
+               f"check the doc CEILING (corpus.max_samples="
+               f"{config.num_code_samples}). ")
+            + f"Note min_samples is a DOC floor while the training budget is "
+              f"in TOKENS: at target_steps this run needs "
+              f"~{config.collect_token_target/1e6:.1f}M tokens per expert, "
+              f"which these languages reach at fewer documents than "
+              f"{config.min_samples_per_expert}. If the token budget is what "
+              f"you care about, lower min_samples; it is a floor against "
+              f"training on scraps, not a way to ask for more data.")
 
     # Write JSONL
     paths = {}

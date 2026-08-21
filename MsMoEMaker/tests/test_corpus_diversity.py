@@ -177,3 +177,67 @@ def test_the_stack_collector_stamps_provenance():
         "per-repo rule cannot run on the finished corpus and dominance cannot "
         "be diagnosed after the fact")
     assert '"path": f.get("file_path")' in src
+
+
+class TestTwoUnitsForEnough:
+    """The scan retires on TOKENS; min_samples is a floor on DOCUMENTS.
+
+    THE FAILURE, from a real run:
+
+        [Python]   FULL at ~7.4M est. tokens (6778 docs, shard 1)
+        [Markdown] FULL at ~7.4M est. tokens (7397 docs, shard 1)
+        All languages satisfied — stopping early.
+        BUILD FAILED: buckets below min 9000: {'Python': 6778, ...}
+
+    The loop declared success by one measure and was failed by another, and
+    the advice it printed ("raise max_shards") could not work because the
+    break happened before another shard was ever considered. A floor that
+    cannot steer the loop is not a floor, it is a late assertion.
+    """
+
+    def test_the_done_gate_requires_both_units(self):
+        import inspect
+        src = inspect.getsource(d._collect_from_shards)
+        assert "have_tokens and have_docs" in src, (
+            "a language may only be retired when it has enough tokens AND "
+            "enough documents - retiring on tokens alone is what made "
+            "min_samples unsatisfiable")
+        assert "min_samples_per_expert" in src
+
+    def test_the_failure_explains_which_limit_stopped_the_scan(self):
+        """'Raise max_shards' was the only advice offered and it was wrong in
+        the case that actually happened."""
+        import inspect
+        src = inspect.getsource(d._collect_from_shards)
+        assert "ran_out_of_shards" in src
+        assert "DOC floor while the training budget is" in src
+
+
+def test_max_shards_is_a_recipe_knob():
+    """It was hardcoded at 80, so a recipe setting it parsed fine and did
+    nothing - and the run then failed for the reason the setting existed to
+    prevent."""
+    from ms_moe_maker.recipe import parse
+    from ms_moe_maker import config as cfg_mod
+    base = {
+        "schema_version": 1, "name": "t", "size": "0.5B",
+        "experts": [{"name": "a",
+                     "source": {"kind": "stack", "language": "Python"}}],
+    }
+    rec, _ = parse(base)
+    assert cfg_mod.build_config(rec, dryrun=True).max_shards == 80
+    rec, _ = parse({**base, "corpus": {"max_shards": 240}})
+    assert cfg_mod.build_config(rec, dryrun=True).max_shards == 240
+
+
+def test_a_floor_above_the_ceiling_is_refused_at_validate():
+    from ms_moe_maker.recipe import parse, validate
+    rec, _ = parse({
+        "schema_version": 1, "name": "t", "size": "0.5B",
+        "experts": [{"name": "a",
+                     "source": {"kind": "stack", "language": "Python"}}],
+        "corpus": {"min_samples": 12000, "max_samples": 9000},
+    })
+    errs, _ = validate(rec)
+    assert any("floor is\nhigher" in e or "higher than the ceiling" in e
+               for e in errs), errs

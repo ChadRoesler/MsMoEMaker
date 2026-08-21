@@ -553,7 +553,7 @@ def build_config(recipe, force: bool = False,
         collect_token_target=collect_token_target,
         chars_per_token_est=3.2,
         min_samples_per_expert=_corpus_knob("min_samples", 500, 2_000),
-        max_shards=80,
+        max_shards=_corpus_knob("max_shards", 80, 80),
         shard_cache="shard_cache",
         # Agent data
         num_agent_samples=num_agent_samples,

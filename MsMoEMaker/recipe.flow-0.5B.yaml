@@ -56,11 +56,10 @@ experts:
 # Without these you get the production defaults: 100,000 samples per expert and
 # a 2,000-sample floor, which is a real build you will not finish this evening.
 corpus:
-  min_samples: 300
+  min_samples: 9000
   max_samples: 12000        # was 3000 — the doc cap, and the real ceiling
-  router_mix_total: 1200
-  per_repo_cap: 20
-
+  router_mix_total: 4000
+  max_shards: 80
 
 
   # ONE REPO MUST NOT BE THE CORPUS. Measured: a C# bucket filled its entire
@@ -118,8 +117,9 @@ router:
   # directly anti-specialisation. Mixed batches are what make the coefficient
   # mean the right thing, so these two move together.
   batch: 8
-  accum: 1                  # same effective batch, same step count
-  aux_loss_coef: 0.02       # Mixtral's value; 0.001 did not hold off collapse
+  accum: 1
+  aux_loss_coef: 0.005       # was 0.02; collapse is prevented structurally now
+  lr: 3e-4                   # was 1e-4 — 43k params on a short schedule
 
 runtime:
   hardware_tier: spark
