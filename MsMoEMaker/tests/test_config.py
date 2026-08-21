@@ -574,3 +574,52 @@ class TestTopOneRouterGradient:
         hint = [w for w in warns if "experts_per_tok=2" in w]
         assert hint, warns
         assert "norm_topk_prob=false" in hint[0], hint[0]
+
+
+class TestLoraKnobs:
+    """Rank was reachable only from an env var, and the line that looked like
+    it read the recipe assigned `target_steps` to `lora_r` before the tier
+    overwrote it. Dead in both paths, and misleading to read: raising
+    target_steps looks like it should raise the rank, and never did."""
+
+    def _rec(self, **budget):
+        from ms_moe_maker.recipe import parse
+        data = {
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [{"name": "a",
+                         "source": {"kind": "stack", "language": "Python"}}],
+            "runtime": {"hardware_tier": "spark"},
+        }
+        if budget:
+            data["budget"] = budget
+        rec, _ = parse(data)
+        return rec
+
+    def test_the_tier_default_still_applies_when_the_recipe_is_silent(self):
+        assert config.build_config(self._rec(), dryrun=True).lora_r == 128
+
+    def test_a_recipe_can_set_the_rank(self):
+        c = config.build_config(self._rec(lora_r=192), dryrun=True)
+        assert c.lora_r == 192
+
+    def test_target_steps_does_not_move_the_rank(self):
+        """The exact confusion the old line created."""
+        c = config.build_config(self._rec(target_steps=600), dryrun=True)
+        assert c.lora_r == 128, (
+            "target_steps is a schedule length, not an adapter rank")
+        assert c.target_steps == 600
+
+    def test_alpha_and_dropout_are_reachable(self):
+        c = config.build_config(self._rec(lora_alpha=64, lora_dropout=0.05),
+                                dryrun=True)
+        assert c.lora_alpha == 64
+        assert c.lora_dropout == 0.05
+
+    def test_alpha_defaults_are_unchanged(self):
+        c = config.build_config(self._rec(), dryrun=True)
+        assert c.lora_alpha == 32
+        assert c.lora_dropout == 0.0
+
+    def test_the_rank_is_still_capped(self):
+        assert config.build_config(self._rec(lora_r=9999),
+                                   dryrun=True).lora_r == 256

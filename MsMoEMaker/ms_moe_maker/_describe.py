@@ -25,7 +25,8 @@ DESCRIPTION = ("Build a mixture of experts from deliberately chosen "
 # contract it expects. THIS IS THE CANONICAL LIST - __main__ derives its
 # DESCRIBE from it rather than keeping a second copy, which is how `smoke` and
 # `eval` came to exist in the CLI while this tuple still said three.
-COMMANDS = ("init", "build", "smoke", "eval", "validate", "describe")
+COMMANDS = ("init", "build", "corpus", "smoke", "eval", "validate",
+            "describe")
 
 # What `eval` can be asked. Three different questions, deliberately separable:
 #   routing - does each expert own its own ground? (the dead-expert claim)

@@ -258,7 +258,7 @@ def _collect_hf(repo: str, text_field: str, split: str,
         if h in seen:
             continue
         seen.add(h)
-        kept.append({"text": content})
+        kept.append({"text": content, "repo": repo})
         kept_chars += len(content)
         if kept_chars / config.chars_per_token_est >= config.collect_token_target:
             stop_reason = "token target met"
@@ -427,7 +427,12 @@ def _corpus_from_tarball(tar_bytes: bytes, glob_pattern: str,
             if h in seen:
                 continue
             seen.add(h)
-            kept.append({"text": content})
+            # The tarball's top-level directory is the repo. `repo` itself
+            # is not in scope here on purpose - this function takes bytes so
+            # it can be tested without a network.
+            kept.append({"text": content,
+                         "repo": member.name.split("/", 1)[0],
+                         "path": member.name, "lang": "gh"})
             kept_chars += len(content)
             if (config.collect_token_target
                     and kept_chars / config.chars_per_token_est
@@ -499,7 +504,8 @@ def _collect_local(path: str, glob_pattern: str, out_path: str,
         if h in seen:
             continue
         seen.add(h)
-        kept.append({"text": content})
+        kept.append({"text": content, "repo": path,
+                     "path": str(filepath), "lang": "local"})
         kept_chars += len(content)
         if kept_chars / config.chars_per_token_est >= config.collect_token_target:
             break
@@ -521,24 +527,62 @@ def _collect_local(path: str, glob_pattern: str, out_path: str,
     return out_path
 
 
-def _repo_label(repo: Dict[str, Any]) -> str:
+def _repo_label(repo: Dict[str, Any], fallback: str = "") -> str:
     """A name for the repo this shard row represents.
 
-    The row IS the repo, so identity never depends on finding a name field -
-    that is only for the report. file_path's first two components are the
-    owner/name of a github-derived corpus and a readable fallback otherwise.
+    The row IS the repo, so IDENTITY never depends on finding a name - the
+    per-repo cap counts within a row and is correct regardless. This is only
+    the LABEL, and a label that invents a repo name is worse than one that
+    admits it does not have one.
+
+    The first version took the first two components of files[0].file_path,
+    which is owner/name in a github-shaped corpus and nonsense here: a
+    markdown file at repo root has no directory at all, so every project's
+    README collapsed into a single fake repo called "README.md" and the
+    report announced that 26% of the corpus came from it. The stack schema is
+    (content, content_id, file_path, language) - there IS no repo name in it.
+
+    So: a real name field if one exists; else the longest common directory
+    prefix across this repo's files, which is a genuine signature of a repo
+    laid out in subdirectories; else the synthetic row id, which is honest
+    about being an id rather than a name.
     """
-    for key in ("repo_name", "repo", "repository", "name", "id"):
+    # repo_path FIRST, because the corpus actually has it and two versions of
+    # this function guessed instead. The row-keys line printed by the schema
+    # check exists for exactly this: the shard rows carry
+    #   ['commit_id', 'files', 'github_metadata', 'num_files', 'repo_id',
+    #    'repo_path']
+    # and every key this used to look for was absent, so it fell through to a
+    # path heuristic and reported the result as a repo name. Guessing at a
+    # field is a bug; guessing when the real field is one print statement away
+    # is an avoidable one.
+    for key in ("repo_path", "repo_name", "repository", "repo", "repo_id",
+                "name", "id", "max_stars_repo_name"):
         v = repo.get(key)
         if isinstance(v, str) and v:
             return v
+
     files = repo.get("files") or []
-    if files:
-        path = (files[0].get("file_path") or "").strip("/")
-        parts = [p for p in path.split("/") if p]
+    dirs = []
+    for f in files[:64]:
+        path = (f.get("file_path") or "").strip("/")
+        parts = [p for p in path.split("/") if p][:-1]      # drop the filename
         if parts:
-            return "/".join(parts[:2])
-    return "<unnamed>"
+            dirs.append(parts)
+    if dirs:
+        common = dirs[0]
+        for parts in dirs[1:]:
+            keep = 0
+            for a, b in zip(common, parts):
+                if a != b:
+                    break
+                keep += 1
+            common = common[:keep]
+            if not common:
+                break
+        if common:
+            return "/".join(common[:2])
+    return fallback or "<row>"
 
 
 def _diversity(counter, total: int) -> Tuple[int, str, float]:
@@ -654,6 +698,11 @@ def _collect_from_shards(languages: List[str], config,
                 raise RuntimeError(f"schema drift: files[] missing {sorted(missing)}; "
                                    f"actual fields {sorted(fkeys)}")
             print(f"    [schema] files[] OK: {sorted(required)}")
+            # ROW-LEVEL KEYS, PRINTED. The repo label was guessed from
+            # file_path for want of knowing what else was on the row, and the
+            # guess was wrong in a way that printed as a finding. One line of
+            # output ends that permanently.
+            print(f"    [schema] row keys: {sorted(probe.keys())}")
 
             # Language census
             census = Counter()
@@ -668,7 +717,7 @@ def _collect_from_shards(languages: List[str], config,
 
         for repo in ds:
             repos_scanned += 1
-            rlabel = _repo_label(repo)
+            rlabel = _repo_label(repo, fallback=f"shard{shard_no}#{repos_scanned}")
             taken_here = {lang: 0 for lang in languages}
             for f in repo.get("files", []):
                 lang = f.get("language")
@@ -689,7 +738,20 @@ def _collect_from_shards(languages: List[str], config,
                 if nlines < 3 or nlines > 10000:
                     continue
                 seen[lang].add(cid)
-                buckets[lang].append({"text": content})
+                # PROVENANCE IS PART OF THE CORPUS, NOT A DEBUG AID.
+                #
+                # These rows used to be {"text": ...} and nothing else, so a
+                # finished corpus could not answer the one question that
+                # mattered about it: how much of this came from one project?
+                # The collector knew - it was iterating repos - and threw the
+                # answer away at write time. That is why the single-repo C#
+                # corpus could only be diagnosed by inference from line reuse,
+                # and why it could not be repaired after the fact at all.
+                #
+                # Purely additive: everything downstream reads `text`.
+                buckets[lang].append({"text": content, "repo": rlabel,
+                                      "path": f.get("file_path") or "",
+                                      "lang": lang})
                 chars[lang] += len(content)
                 taken_here[lang] += 1
                 repos_for[lang][rlabel] += 1
@@ -723,7 +785,7 @@ def _collect_from_shards(languages: List[str], config,
                         "line_reuse": reuse, "capped": capped_hits[lang]}
         print(f"   {lang}: {n} docs, ~{est/1e6:.1f}M est. tokens, "
               f"{nrepos} repos "
-              f"(largest {top_share:.0%}), line reuse {reuse:.0%}"
+              f"(largest {top_share:.1%}), line reuse {reuse:.0%}"
               + (f", {capped_hits[lang]} files skipped by the "
                  f"{per_repo_cap}/repo cap" if capped_hits[lang] else ""))
 
@@ -756,6 +818,15 @@ def _collect_from_shards(languages: List[str], config,
             for s_ in buckets[lang][:config.num_code_samples]:
                 fh.write(json.dumps(s_, ensure_ascii=False) + "\n")
         print(f"Saved {safe} → {out_path} ({len(buckets[lang][:config.num_code_samples])} samples)")
+        # Measure the file we just wrote, not the buckets we just held. Same
+        # module `validate` and `ms-moe-maker corpus` use, so a reader never
+        # has to wonder whether the build's numbers and the checker's numbers
+        # came from the same arithmetic.
+        try:
+            from . import corpushealth as _ch
+            print(_ch.format_health(_ch.inspect(out_path)))
+        except Exception as exc:            # advisory: never fail the stage
+            print(f"   [warn] corpus health check skipped: {exc}")
         if callback:
             callback(st.DATA_CORPUS, "running", f"{lang}: {len(buckets[lang])} docs")
         paths[safe] = out_path

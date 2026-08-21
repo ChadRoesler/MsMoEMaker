@@ -80,6 +80,26 @@ class Budget:
     collect_headroom: float = 1.5
     doc_ceiling: int = 2000
 
+    # THE ADAPTER'S SHAPE, which was reachable only from an env var.
+    #
+    # -1 means "use the hardware tier's default" (nano 32, xavier 64, spark
+    # 128), which is what every run so far has silently been getting. The
+    # config code that looked like it derived rank from the recipe read
+    #     lora_r = ... if env else recipe.budget.target_steps
+    # - assigning a STEP COUNT to a LoRA rank, then overwriting it with the
+    # tier value two lines later. Harmless in effect and actively misleading
+    # to read: setting target_steps looks like it should move the rank, and it
+    # never did.
+    #
+    # Measured context for anyone turning these: at 0.5B the rank was already
+    # 128 against the Lab's 64 while each expert saw 1.23M tokens - one
+    # SIXTEENTH of the proven rung's 19.7M. A large adapter over a small
+    # corpus is what a 0.05-nat expert looks like, so reach for target_steps
+    # and max_samples before reaching for rank.
+    lora_r: int = -1
+    lora_alpha: int = -1
+    lora_dropout: float = -1.0
+
 
 @dataclass
 class MoE:
@@ -205,6 +225,13 @@ class Router:
     accum: int = -1              # gradient accumulation
     epochs: float = -1.0         # passes over the router mix
     aux_loss_coef: float = -1.0  # load-balancing loss weight
+    # Share of the router's mix drawn from GENERATED (synth) experts. The
+    # remaining experts split what is left, evenly. Hardcoded at 0.15 since
+    # the days when the only synth expert was one person's MCP traces - which
+    # means a 3-expert build with one synth expert showed it to the router 15%
+    # of the time while the other two took 42.5% each, and nobody could change
+    # that from a recipe.
+    agent_mix_fraction: float = -1.0
 
 
 @dataclass

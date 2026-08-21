@@ -11,15 +11,32 @@
 # and then, separately:
 #   ms-moe-maker eval  recipe.flow-0.5B.yaml --mode routing
 #
-# WHY THESE SOURCES. `stack` with Python and C# is the path your 0.5B rung
-# already proved, and both are dense in the corpus (~18,000 files/shard for
-# Python), so collection is minutes rather than a 45 GB scan. PowerShell is
-# deliberately NOT here: it is the sparse one (~141 files/shard) and it would
-# dominate the wall clock of a run whose whole point is to show you the shape.
+# WHY THESE SOURCES. Python and C# are dense in the corpus and cheap to
+# collect. Markdown is the third on purpose, and it is the one carrying the
+# experiment.
 #
-# Two experts is the minimum that is genuinely a MoE. Add a third when you want
-# a stronger routing signal - the enrichment numbers get more interesting the
-# more domains the router has to tell apart.
+# MEASURED: with a diverse corpus, a Python specialist and a C# specialist are
+# only 0.05 nats apart on each other's held-out text. That is a real gap and
+# it is a very small one - two LoRAs off the same 0.5B base, both looking at
+# curly-brace-adjacent code, do not end up far apart. A third code language
+# would have been a third near-identical expert, and the router would have had
+# nothing more to learn than it did with two.
+#
+# Markdown is prose. It is in the same shard scan (~226 files per 200 repos,
+# no new machinery), and the code/prose gap should be an order of magnitude
+# wider than the Python/C# one.
+#
+# This also makes the result readable EITHER WAY. If markdown enriches
+# strongly while python and csharp stay flat, that is not a failure - it is a
+# measurement of the resolution limit of this method at 0.5B, which is the
+# more useful thing to be able to state.
+#
+# And it exercises the claim the whole tool rests on: everything between the
+# corpus and the GGUF is domain-blind. Nothing in here knows that markdown is
+# not a programming language.
+#
+# PowerShell is deliberately NOT here: it is the sparse one (~141 files/shard)
+# and it would dominate the wall clock of a run whose point is to show shape.
 
 schema_version: 1
 name: flow-0.5B
@@ -32,51 +49,77 @@ experts:
     source: { kind: stack, language: Python }
   - name: csharp
     source: { kind: stack, language: C# }
+  - name: markdown
+    source: { kind: stack, language: Markdown }
 
 # ── the knobs that make it a SMALL real run, not a fake one ─────────────────
 # Without these you get the production defaults: 100,000 samples per expert and
 # a 2,000-sample floor, which is a real build you will not finish this evening.
 corpus:
-  min_samples: 300          # fail the stage below this, rather than train on scraps
-  max_samples: 3000         # cap per expert
-  router_mix_total: 800     # rows in the router's stratified mix
+  min_samples: 300
+  max_samples: 12000        # was 3000 — the doc cap, and the real ceiling
+  router_mix_total: 1200
+  per_repo_cap: 20
+
+
+
+  # ONE REPO MUST NOT BE THE CORPUS. Measured: a C# bucket filled its entire
+  # token quota from 658 files in the first shard, 515 of which imported the
+  # same proprietary namespace - one enterprise application presented as the
+  # language. It trained, it diverged at 263x chance, it won its own domain by
+  # 0.43 nats, and every check in the package called it healthy. With the cap
+  # on, the same language came from 243 repos and the honest gap was 0.058.
+  #
+  # 20 files per repo per language. Lower is more diverse and needs more
+  # shards to fill the quota.
+  per_repo_cap: 20
 
 budget:
-  target_steps: 150         # the rung the proven 0.5B run used
-  max_seq_length: 1024      # half the default; halves the step cost
+  target_steps: 600         # was 150 — 4.9M tokens/expert, 4x
+  max_seq_length: 1024
   per_device_batch: 4
   grad_accum: 2
-  collect_headroom: 1.5     # gather 1.5x the tokens the steps will consume
+  collect_headroom: 1.5
 
 moe:
-  # ONE, NOT TWO, AND THIS MATTERS. top-k must be BELOW the expert count or
-  # the router is a no-op: top-2 of 2 experts selects both on every token, so
-  # the shares come out 0.5/0.5 and the JS divergence 0.000 by arithmetic -
-  # numbers identical to a router that ignores its input entirely, and
-  # impossible to tell apart from one.
+  # TOP-2 OF THREE, AND BOTH HALVES OF THAT MATTER.
   #
-  # The first real run of this recipe had experts_per_tok: 2 and eval duly
-  # reported INPUT-BLIND for a router that had never been asked to choose.
-  # `validate` warns about this now.
+  # top-k must be BELOW the expert count or the router is a no-op: top-2 of 2
+  # selects both on every token, so shares come out 0.5/0.5 and JS is 0.000 by
+  # arithmetic - identical to a router that ignores its input, and impossible
+  # to tell apart from one. Two runs of this recipe hit that.
   #
-  # With three or more experts, top-2 is the usual shape.
-  experts_per_tok: 1
+  # And top-1 is a trap in both of its configurations:
+  #   norm_topk_prob: true  -> normalising ONE weight divides it by itself,
+  #     every routing weight is the constant 1.0, and the gate gets ZERO
+  #     gradient from the LM loss.
+  #   norm_topk_prob: false -> the weight multiplies the frozen expert's
+  #     output, so it is a free scalar gain the gate can chase instead of
+  #     routing.
+  # Measured across three router trainings at top-1: all three collapsed onto
+  # one expert, the winner differed each time, JS stayed at 0.0001 every time.
+  #
+  # top-2 with normalisation is the only shape where both are right - two
+  # weights summing to 1 (no free gain) that still VARY with the input (the
+  # gradient survives). It is what Mixtral and Qwen actually ship.
+  experts_per_tok: 2
+  norm_topk_prob: true
 
-  # AND THIS ONE IS NOT OPTIONAL AT TOP-1. Qwen2MoeSparseMoeBlock normalises
-  # the top-k weights by their own sum; with k=1 that divides a number by
-  # itself, every routing weight becomes the constant 1.0, and the gate gets
-  # ZERO gradient from the LM loss. The router can then only be moved by the
-  # load-balancing aux loss, which pushes it toward uniform - so training it
-  # harder makes it worse.
-  #
-  # Measured on this exact recipe: enrichment 1.02x -> 1.00x after tripling
-  # the router steps, while a cross-domain probe showed a 0.49-nat loss gap
-  # the router could have exploited and never did.
-  #
-  # false is Switch Transformer's top-1 formulation: scale the expert output
-  # by the gate probability, which is what carries the gradient. `validate`
-  # now refuses the other combination outright.
-  norm_topk_prob: false
+  # Zeros make the untrained MoE reproduce one expert exactly and let
+  # verify_stitch assert bit-equality - which is why it is still the default.
+  # It is also a perfectly symmetric starting point, and three router
+  # trainings from one all collapsed. Switch and Mixtral seed small noise.
+  router_init: random
+
+router:
+  # The aux loss is computed INSIDE each forward pass, over that batch's
+  # tokens. At batch=1 every forward sees one document from one domain, so
+  # "balance the experts" means "split this one file across all three" -
+  # directly anti-specialisation. Mixed batches are what make the coefficient
+  # mean the right thing, so these two move together.
+  batch: 8
+  accum: 1                  # same effective batch, same step count
+  aux_loss_coef: 0.02       # Mixtral's value; 0.001 did not hold off collapse
 
 runtime:
   hardware_tier: spark
@@ -93,7 +136,7 @@ gates:
   main_evals: auto
 
 eval:
-  mode: all                 # routing + quality
+  mode: all                 # experts + routing + quality
   num_samples: 16
   dead_threshold: 1.2       # minimum router enrichment before an expert is dead
 

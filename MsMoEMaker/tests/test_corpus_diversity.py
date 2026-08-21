@@ -28,13 +28,46 @@ class TestRepoLabel:
     def test_a_named_repo_uses_its_name(self):
         assert d._repo_label({"repo_name": "acme/widget"}) == "acme/widget"
 
-    def test_falls_back_to_the_owner_and_project_in_the_path(self):
-        repo = {"files": [{"file_path": "zynas/bizsystem/src/Foo.cs"}]}
+    def test_repo_path_is_preferred_because_the_corpus_actually_has_it(self):
+        """The stack rows carry repo_path and repo_id. Two versions of this
+        function looked for repo_name/repo/repository - none of which exist -
+        and fell through to a path heuristic whose output was then reported as
+        a repo name."""
+        row = {"repo_path": "torvalds/linux", "repo_id": 1234,
+               "files": [{"file_path": "kernel/sched/core.c"}]}
+        assert d._repo_label(row) == "torvalds/linux"
+
+    def test_repo_id_beats_a_path_guess(self):
+        row = {"repo_id": "gh-99", "files": [{"file_path": "a/b/c.py"}]}
+        assert d._repo_label(row) == "gh-99"
+
+    def test_uses_the_common_directory_prefix_when_there_is_no_name(self):
+        repo = {"files": [{"file_path": "zynas/bizsystem/src/Foo.cs"},
+                          {"file_path": "zynas/bizsystem/src/Bar.cs"},
+                          {"file_path": "zynas/bizsystem/test/Baz.cs"}]}
         assert d._repo_label(repo) == "zynas/bizsystem"
 
+    def test_root_level_files_do_not_invent_a_repo_called_readme(self):
+        """THE BUG. A markdown file at repo root has no directory, so taking
+        the first path components made every project's README one fake repo -
+        and the report announced that 26% of the corpus came from it. An
+        honest row id beats a confident wrong name."""
+        repo = {"files": [{"file_path": "README.md"}]}
+        label = d._repo_label(repo, fallback="shard1#42")
+        assert label == "shard1#42"
+        assert "README" not in label
+
+    def test_one_file_deep_in_a_tree_still_yields_its_directory(self):
+        repo = {"files": [{"file_path": "acme/widget/src/main.py"}]}
+        assert d._repo_label(repo) == "acme/widget"
+
+    def test_unrelated_paths_share_no_prefix_and_fall_back(self):
+        repo = {"files": [{"file_path": "a/one.py"}, {"file_path": "b/two.py"}]}
+        assert d._repo_label(repo, fallback="shard2#7") == "shard2#7"
+
     def test_never_raises_on_a_shapeless_row(self):
-        assert d._repo_label({}) == "<unnamed>"
-        assert d._repo_label({"files": [{}]}) == "<unnamed>"
+        assert d._repo_label({}) == "<row>"
+        assert d._repo_label({"files": [{}]}, fallback="x") == "x"
 
 
 class TestDiversity:
@@ -121,3 +154,26 @@ def test_per_repo_cap_is_a_recipe_knob():
 
     rec, _ = parse({**base, "corpus": {"per_repo_cap": 5}})
     assert cfg_mod.build_config(rec, dryrun=True).per_repo_cap == 5
+
+
+
+def test_the_stack_collector_stamps_provenance():
+    """THE EDIT THAT WENT MISSING, pinned so it cannot go missing again.
+
+    Provenance was written for the hf, gh and local collectors and NOT for
+    `stack` - the one every real build uses - because the script that applied
+    it aborted on a later guard before writing the file. Nothing failed;
+    corpora just kept coming out as {"text": ...} while the report claimed
+    repo diversity it had measured in memory and thrown away.
+
+    Reading the source is the only way to assert this without a HuggingFace
+    round trip, and an assertion that needs the network is an assertion that
+    does not run.
+    """
+    import inspect
+    src = inspect.getsource(d._collect_from_shards)
+    assert '"repo": rlabel' in src, (
+        "the stack collector must stamp `repo` on every row - without it the "
+        "per-repo rule cannot run on the finished corpus and dominance cannot "
+        "be diagnosed after the fact")
+    assert '"path": f.get("file_path")' in src

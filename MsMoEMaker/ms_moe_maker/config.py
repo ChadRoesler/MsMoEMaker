@@ -472,19 +472,25 @@ def build_config(recipe, force: bool = False,
     # Hardware-appropriate defaults
     tier_spec = _TIER_HINTS.get(tier_name, _TIER_HINTS["spark"])
 
-    # LoRA params — scale by tier
+    # LoRA params — recipe first, then env, then the hardware tier.
+    #
+    # THE OLD LINE ASSIGNED A STEP COUNT TO A RANK:
+    #     lora_r = int(lora_r_env) if lora_r_env else recipe.budget.target_steps
+    # then overwrote it from the tier whenever the env var was unset, so it
+    # was dead in both paths and read as though target_steps drove the rank.
+    # A knob that appears to do something and does not is worse than a missing
+    # one - the missing one at least makes you ask.
+    _TIER_RANK = {"nano": 32, "xavier": 64, "spark": 128}
     lora_r_env = os.environ.get("MSMOE_LORA_R", "").strip()
-    lora_r = int(lora_r_env) if lora_r_env else recipe.budget.target_steps
-    lora_r = min(lora_r, 256)  # cap
-    if not os.environ.get("MSMOE_LORA_R", ""):
-        if tier_name == "nano":
-            lora_r = 32
-        elif tier_name == "xavier":
-            lora_r = 64
-        elif tier_name == "spark":
-            lora_r = 128
-        else:
-            lora_r = 64  # fallback to middle
+    if recipe.budget.lora_r and recipe.budget.lora_r > 0:
+        lora_r = int(recipe.budget.lora_r)
+    elif lora_r_env:
+        lora_r = int(lora_r_env)
+    else:
+        lora_r = _TIER_RANK.get(tier_name, 64)
+    lora_r = max(1, min(lora_r, 256))
+    lora_alpha = _knob(recipe.budget.lora_alpha, 32)
+    lora_dropout = _knob(recipe.budget.lora_dropout, 0.0)
 
     # Quantization hint from tier
     quant = tier_spec.get("quant", "Q4_K_M")
@@ -566,8 +572,8 @@ def build_config(recipe, force: bool = False,
         # LoRA
         max_seq_length=b.max_seq_length,
         lora_r=lora_r,
-        lora_alpha=32,
-        lora_dropout=0.0,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
         load_in_4bit=load_4bit,
         optim=optim,
         gradient_checkpointing=grad_ckpt,
@@ -586,7 +592,7 @@ def build_config(recipe, force: bool = False,
         # Router
         per_repo_cap=per_repo_cap,
         router_mix_total=_corpus_knob("router_mix_total", 4_000, 12_000),
-        agent_mix_fraction=0.15,
+        agent_mix_fraction=_knob(recipe.router.agent_mix_fraction, 0.15),
         # RECIPE FIRST, DEFAULT SECOND. `-1` means "you pick", which is how a
         # recipe that says nothing about the router keeps the old behaviour
         # exactly. See recipe.Router for why these stopped being hardcoded.

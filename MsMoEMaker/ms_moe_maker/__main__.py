@@ -617,6 +617,68 @@ def _print_eval_report(report):
     print(f"\n  {report.message}")
 
 
+def _cmd_corpus(args):
+    """Inspect the corpora on disk. With --prune, PROPOSE a cleaner one.
+
+    PROPOSE, NEVER COMMIT. Without --prune this only measures. With --prune it
+    writes a NEW file next to the original and leaves the original untouched,
+    because a machine deciding unattended that some of your data should not
+    exist is the same shape as a consolidator writing to long-term without a
+    human - and this project built a gate to stop exactly that. You read the
+    proposal, you point the recipe at the pruned file if you agree, and if you
+    disagree nothing has happened.
+
+    Note what prune CANNOT fix: repo dominance on a corpus collected before
+    provenance stamping. Those rows are `{"text": ...}` with no `repo` field,
+    so the rule that matters most cannot run and says so rather than pruning
+    on the two weaker signals and reporting success.
+    """
+    from . import corpus as corpus_mod
+    from . import corpushealth as ch
+
+    rec, errs, _ = _load_recipe(args.recipe)
+    if rec is None:
+        for e in (errs or [f"could not parse {args.recipe}"]):
+            print(f"  ✗ {e}")
+        return 1
+
+    paths = _corpus_paths(rec)
+    if not any(paths.values()):
+        print("No corpora on disk for this recipe. Run `build` first.")
+        return 3
+
+    findings = 0
+    for e in rec.experts:
+        path = paths.get(e.name) or ""
+        if not path:
+            print(f"\n  {e.name}: not collected yet")
+            continue
+        kind = corpus_mod.get(getattr(e.source, "kind", "")) if e.source else None
+        generated = bool(getattr(kind, "generated", False))
+        h = ch.inspect(path, generated=generated)
+        print()
+        print(ch.format_health(h))
+        findings += len(h.findings)
+
+        cap = int(getattr(args, "per_repo_cap", 0) or 20)
+        if args.prune:
+            out_path = path.replace(".jsonl", ".pruned.jsonl")
+            pr = ch.write_pruned(path, out_path, per_repo_cap=cap)
+            print(f"      wrote {out_path}: kept {pr.keep:,}, dropped {pr.drop:,}")
+        else:
+            pr = ch.propose_prune(path, per_repo_cap=cap)
+            print(f"      --prune would keep {pr.keep:,} and drop {pr.drop:,}")
+        for reason, n in pr.reasons.most_common():
+            print(f"        {n:>7,}  {reason}")
+        for u in pr.unmeasured:
+            print(f"        [?] {u}")
+        if not args.prune and pr.drop:
+            print(f"      (nothing written - re-run with --prune to produce "
+                  f"{path.replace('.jsonl', '.pruned.jsonl')})")
+
+    return 0 if not findings else 0
+
+
 def _cmd_validate(args):
     """Validate recipe structure only — no pipeline, no GPU, no network.
 
@@ -673,11 +735,67 @@ def _cmd_validate(args):
         for r in refusals:
             say(f"    ✗ {r}")
 
+    # CORPUS HEALTH, FOR WHATEVER IS ALREADY ON DISK.
+    #
+    # It belongs here because it is pure stdlib and honours the laptop promise
+    # - no torch, no GPU, no network - and because after a build `validate`
+    # becomes a re-check you can run in a second. Before a build there is
+    # nothing to read, and it says that rather than printing nothing, since a
+    # check that vanishes reads like a check that passed.
+    findings = _validate_corpora(rec, say, events)
+
     # `errs` is always empty here - _load_recipe returns rec=None whenever it
     # is not - so printing "0 errors" was theatre. Say what is true.
-    say(f"\n  Valid. {len(warns)} warning(s).")
-    events.done(ok=True, warnings=len(warns), refusals=len(refusals))
+    say(f"\n  Valid. {len(warns)} warning(s), "
+        f"{findings} corpus finding(s).")
+    events.done(ok=True, warnings=len(warns), refusals=len(refusals),
+                corpus_findings=findings)
     return 0
+
+
+def _corpus_paths(rec) -> Dict[str, str]:
+    """Where this recipe's corpora would live, without building anything."""
+    from . import config as cfg_module
+    roots = cfg_module.resolve_run_roots(rec)
+    data_root = roots["data"]
+    out: Dict[str, str] = {}
+    for e in rec.experts:
+        safe = cfg_module.safe_name(e.name)
+        for cand in (f"{data_root}/{safe}_code.jsonl", f"{data_root}/{safe}.jsonl"):
+            if os.path.isfile(cand):
+                out[e.name] = cand
+                break
+        else:
+            out[e.name] = ""
+    return out
+
+
+def _validate_corpora(rec, say, events) -> int:
+    """Report on every corpus that exists. Never builds one."""
+    from . import corpus as corpus_mod
+    from . import corpushealth as ch
+
+    paths = _corpus_paths(rec)
+    if not any(paths.values()):
+        say("\n  Corpora: none on disk yet - run `build` first, then "
+            "`validate` re-checks them.")
+        return 0
+
+    say("\n  CORPUS HEALTH")
+    total = 0
+    for e in rec.experts:
+        path = paths.get(e.name) or ""
+        if not path:
+            say(f"  {e.name}: not collected yet")
+            continue
+        kind = corpus_mod.get(getattr(e.source, "kind", "")) if e.source else None
+        generated = bool(getattr(kind, "generated", False))
+        h = ch.inspect(path, generated=generated)
+        say(ch.format_health(h))
+        for f in h.findings:
+            events.warning(f"corpus/{e.name}: {f}")
+        total += len(h.findings)
+    return total
 
 
 # The dispatch table, at module scope so it is one definition rather than a
@@ -687,6 +805,7 @@ def _cmd_validate(args):
 COMMAND_HANDLERS = {
     "init": _cmd_init,
     "build": _cmd_build,
+    "corpus": _cmd_corpus,
     "smoke": _cmd_smoke,
     "eval": _cmd_eval,
     "validate": _cmd_validate,
@@ -765,6 +884,11 @@ def main(argv=None):
     # (routing, the dead-expert claim), and does the thing answer well
     # (quality, which needs an answer key only the corpus author has).
     # Default is empty so the recipe's eval.mode wins unless overridden here.
+    ap.add_argument("--prune", action="store_true",
+                    help="corpus: WRITE a pruned copy next to the original "
+                         "(never in place). Without it, only propose.")
+    ap.add_argument("--per-repo-cap", dest="per_repo_cap", type=int, default=0,
+                    help="corpus: max docs per repo when pruning (default 20)")
     ap.add_argument("--mode", dest="eval_mode",
                     choices=list(_d.EVAL_MODES), default="",
                     help="eval mode (default: the recipe's eval.mode, or all)")
