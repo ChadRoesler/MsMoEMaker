@@ -74,7 +74,7 @@ corpus:
   per_repo_cap: 20
 
 budget:
-  target_steps: 600         # was 150 — 4.9M tokens/expert, 4x
+  target_steps: 150         # was 150 — 4.9M tokens/expert, 4x
   max_seq_length: 1024
   per_device_batch: 4
   grad_accum: 2
