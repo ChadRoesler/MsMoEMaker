@@ -1,0 +1,151 @@
+# ── Ms.MoE — 0.5B RUNG: the real measurement ─────────────────────────────────
+#
+# recipe.flow-0.5B.yaml is the SHAKEDOWN: every stage, twenty minutes, does it
+# run. This is the RUNG: the same shape, trained long enough that the numbers
+# it produces are evidence rather than a smoke test.
+#
+# MEASURED DIFFERENCE between the two, same three experts, same everything
+# except target_steps and max_samples:
+#
+#                          flow (150 steps)   rung (600 steps)
+#   tokens/expert                  1.23M            4.92M
+#   movement, csharp               0.628%           1.177%
+#   movement, markdown             0.665%           1.541%
+#   cos(csharp, markdown)          0.2447           0.1065   <- MORE independent
+#   cross-loss gap, markdown       0.0613           0.0804
+#   router enrichment              1.08x            1.06x    <- unchanged
+#   router JS divergence           0.0051           0.0043   <- unchanged
+#
+# Read that table before turning any knob in here. Four times the training
+# made the specialists measurably better AND more independent, and moved
+# routing not at all - which is what located the bottleneck in the ROUTER
+# rather than in the experts. The router got 150 optimiser steps in both runs
+# while everything around it quadrupled.
+#
+# Cost on a DGX Spark at 2.56 s/step: ~26 min per expert, ~77 min of finetune,
+# plus a shard walk. Budget two to two and a half hours.
+
+schema_version: 1
+name: rung-0.5B
+
+size: 0.5B
+base: 'huihui-ai/Qwen2.5-0.5B-Instruct-abliterated-v3'            # blank -> the 0.5B tier default (a Qwen2.5-Coder 0.5B)
+
+experts:
+  - name: python
+    source: { kind: stack, language: Python }
+  - name: csharp
+    source: { kind: stack, language: C# }
+  - name: markdown
+    source: { kind: stack, language: Markdown }
+
+# ── the knobs that make it a SMALL real run, not a fake one ─────────────────
+# Without these you get the production defaults: 100,000 samples per expert and
+# a 2,000-sample floor, which is a real build you will not finish this evening.
+corpus:
+  min_samples: 300          # fail the stage below this, rather than train on scraps
+  max_samples: 12000        # the rung needs ~8k docs/expert at ~900 tok/doc
+  router_mix_total: 4000    # ~1300 rows/expert -> 500 router steps
+
+  # THE SCAN NEEDS MORE SHARDS AT THIS BUDGET. One shard filled every language
+  # at the flow budget; at 7.4M tokens/expert C# already needed two. This was
+  # hardcoded at 80 and a recipe setting it was silently ignored.
+  max_shards: 80
+
+  # ONE REPO MUST NOT BE THE CORPUS. Measured: a C# bucket filled its entire
+  # token quota from 658 files in the first shard, 515 of which imported the
+  # same proprietary namespace - one enterprise application presented as the
+  # language. It trained, it diverged at 263x chance, it won its own domain by
+  # 0.43 nats, and every check in the package called it healthy. With the cap
+  # on, the same language came from 243 repos and the honest gap was 0.058.
+  #
+  # 20 files per repo per language. Lower is more diverse and needs more
+  # shards to fill the quota.
+  per_repo_cap: 20
+
+budget:
+  target_steps: 600         # 4.92M tokens/expert - 4x the shakedown
+
+  # min_samples IS A FLOOR, NOT A REQUEST. It guards against training on
+  # scraps; it does not ask for more data. The scan retires a language on
+  # TOKENS, so setting this above the doc count the token target happens to
+  # need just makes the scan walk further to collect documents the trainer
+  # then truncates away. Measured: `token budget python: 4.92M of 4.92M`.
+  # Leave it low and move target_steps when you want more training.
+  max_seq_length: 1024      # half the default; halves the step cost
+  per_device_batch: 4
+  grad_accum: 2
+  collect_headroom: 1.5     # gather 1.5x the tokens the steps will consume
+
+moe:
+  # TOP-2 OF THREE, AND BOTH HALVES OF THAT MATTER.
+  #
+  # top-k must be BELOW the expert count or the router is a no-op: top-2 of 2
+  # selects both on every token, so shares come out 0.5/0.5 and JS is 0.000 by
+  # arithmetic - identical to a router that ignores its input, and impossible
+  # to tell apart from one. Two runs of this recipe hit that.
+  #
+  # And top-1 is a trap in both of its configurations:
+  #   norm_topk_prob: true  -> normalising ONE weight divides it by itself,
+  #     every routing weight is the constant 1.0, and the gate gets ZERO
+  #     gradient from the LM loss.
+  #   norm_topk_prob: false -> the weight multiplies the frozen expert's
+  #     output, so it is a free scalar gain the gate can chase instead of
+  #     routing.
+  # Measured across three router trainings at top-1: all three collapsed onto
+  # one expert, the winner differed each time, JS stayed at 0.0001 every time.
+  #
+  # top-2 with normalisation is the only shape where both are right - two
+  # weights summing to 1 (no free gain) that still VARY with the input (the
+  # gradient survives). It is what Mixtral and Qwen actually ship.
+  experts_per_tok: 2
+  norm_topk_prob: true
+
+  # Zeros make the untrained MoE reproduce one expert exactly and let
+  # verify_stitch assert bit-equality - which is why it is still the default.
+  # It is also a perfectly symmetric starting point, and three router
+  # trainings from one all collapsed. Switch and Mixtral seed small noise.
+  router_init: random
+
+router:
+  # The aux loss is computed INSIDE each forward pass, over that batch's
+  # tokens. At batch=1 every forward sees one document from one domain, so
+  # "balance the experts" means "split this one file across all three" -
+  # directly anti-specialisation. Mixed batches are what make the coefficient
+  # mean the right thing, so these two move together.
+  batch: 8
+  accum: 1                  # same effective batch, same step count
+  aux_loss_coef: 0.02       # Mixtral's value; 0.001 did not hold off collapse
+
+runtime:
+  hardware_tier: spark
+  # Where llama.cpp lives. Blank means: look in ./llama.cpp, ../llama.cpp,
+  # ~/llama.cpp and /opt/llama.cpp, then give up with a warning. Absence is
+  # never fatal - no converter means no GGUF, and the HF checkpoint is still a
+  # real result.
+  # llama_cpp: /mnt/nvme/llama.cpp
+
+gates:
+  # 'manual' cannot be honoured by the in-package builder and will be REFUSED
+  # out loud - the build runs end to end with no boundary a gate could pause
+  # at. Left on 'auto' so the run does not start with a refusal.
+  main_evals: auto
+
+eval:
+  mode: all                 # experts + routing + quality
+  num_samples: 16
+  dead_threshold: 1.2       # minimum router enrichment before an expert is dead
+
+# ── other source kinds, for when you want them ──────────────────────────────
+# I could not reach github.com or huggingface.co from where this was written,
+# so every remote id below is a SHAPE, not a verified repo. Check them before
+# use rather than trusting me for them.
+#
+#   - name: llama_docs
+#     source: { kind: gh, repo: OWNER/REPO, glob: "docs/**/*.md" }
+#
+#   - name: my_notes
+#     source: { kind: local, path: /mnt/nvme/corpora/notes, glob: "**/*.md" }
+#
+#   - name: lore
+#     source: { kind: hf, repo: OWNER/DATASET, text_field: text }

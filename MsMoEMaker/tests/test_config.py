@@ -423,21 +423,74 @@ class TestCorpusKnobs:
         implicit = config.build_config(self._rec(), dryrun=True)
         assert explicit.min_samples_per_expert == implicit.min_samples_per_expert
 
-    def test_the_shipped_flow_recipe_validates(self):
-        """The 0.5B end-to-end recipe has to be runnable as written."""
+    # Measured on a DGX Spark: 2.56 s/optimiser step at 0.5B, seq 1024,
+    # batch 4 x accum 2. Hardware-specific, and used ONLY to express the
+    # shipped recipes' own promises about themselves in the unit those
+    # promises are made in - minutes - rather than in a magic sample count.
+    SECONDS_PER_STEP = 2.56
+    FLOW_BUDGET_MIN = 45
+    RUNG_BUDGET_MIN = 180
+
+    def _shipped(self, name):
         import pathlib
+        import pytest
         from ms_moe_maker.recipe import load, validate
-        p = (pathlib.Path(config.__file__).parent.parent
-             / "recipe.flow-0.5B.yaml")
+        p = (pathlib.Path(config.__file__).parent.parent / name)
         if not p.is_file():
-            import pytest
-            pytest.skip("flow recipe not present in this checkout")
+            pytest.skip(f"{name} not present in this checkout")
         rec, _ = load(str(p))
         errs, _ = validate(rec)
         assert errs == [], errs
         c = config.build_config(rec, dryrun=False)
+        minutes = (c.target_steps * len(c.expert_names)
+                   * self.SECONDS_PER_STEP / 60)
+        return c, minutes
+
+    def test_the_shipped_flow_recipe_validates_and_stays_a_shakedown(self):
+        """THE PROMISE, ASSERTED IN THE UNIT IT IS MADE IN.
+
+        This used to be `assert c.num_code_samples == 3000`, which is a magic
+        number standing in for an intention. It caught the shipped recipe
+        drifting into a two-hour run - correctly - and it would equally have
+        snapped on any legitimate tuning, because equality on one knob cannot
+        tell "someone made this bigger by accident" from "someone changed a
+        different thing".
+
+        The recipe's own header says 'small enough to watch it finish'. That
+        is a claim about MINUTES, so assert minutes.
+        """
+        c, minutes = self._shipped("recipe.flow-0.5B.yaml")
         assert c.size == "0.5B"
-        assert c.num_code_samples == 3000, "the flow recipe must stay small"
+        assert minutes < self.FLOW_BUDGET_MIN, (
+            f"the flow recipe is a shakedown: {c.target_steps} steps x "
+            f"{len(c.expert_names)} experts is ~{minutes:.0f} min of finetune, "
+            f"over the {self.FLOW_BUDGET_MIN} min this file promises. Long "
+            f"runs belong in recipe.rung-0.5B.yaml.")
+
+    def test_the_shipped_rung_recipe_validates(self):
+        """The rung is allowed to be slow - it is the measurement, not the
+        smoke test - but it still has to be runnable as written, and it still
+        has a ceiling so nobody ships a week-long example by accident."""
+        c, minutes = self._shipped("recipe.rung-0.5B.yaml")
+        assert c.size == "0.5B"
+        assert len(c.expert_names) >= 3, (
+            "the rung exists to make the routing claim provable, and 3 "
+            "experts is the minimum width where p can clear 0.05")
+        assert c.experts_per_tok == 2 and c.norm_topk_prob
+        assert minutes < self.RUNG_BUDGET_MIN, f"~{minutes:.0f} min"
+
+    def test_the_two_shipped_recipes_differ_only_in_budget(self):
+        """If they drift apart on ARCHITECTURE, a result at one stops being
+        evidence about the other - which is the entire premise of a ladder."""
+        flow, _ = self._shipped("recipe.flow-0.5B.yaml")
+        rung, _ = self._shipped("recipe.rung-0.5B.yaml")
+        for field in ("experts_per_tok", "norm_topk_prob", "router_init",
+                      "expert_names", "base", "max_seq_length",
+                      "per_device_batch", "grad_accum"):
+            assert getattr(flow, field) == getattr(rung, field), (
+                f"{field} differs between the shakedown and the rung: "
+                f"{getattr(flow, field)!r} vs {getattr(rung, field)!r}")
+        assert rung.target_steps > flow.target_steps
 
 
 
