@@ -26,6 +26,8 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="ms_moe_maker\corpushealth.py" />
+    <Compile Include="ms_moe_maker\experts.py" />
     <Compile Include="ms_moe_maker\__init__.py" />
     <Compile Include="ms_moe_maker\__main__.py" />
     <Compile Include="ms_moe_maker\_describe.py" />
@@ -73,6 +75,7 @@
   <ItemGroup>
     <Content Include="pyproject.toml" />
     <Content Include="README.md" />
+    <Content Include="reasoning.yaml" />
     <Content Include="recipe.example.yaml" />
     <Content Include="recipe.flow-0.5B.yaml" />
     <Content Include="recipe.rung-0.5B.yaml" />
