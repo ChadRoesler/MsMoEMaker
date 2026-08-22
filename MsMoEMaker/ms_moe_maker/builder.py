@@ -65,9 +65,7 @@ class StageCallback:
 
 
 def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
-                 callback: Optional[StageCallback] = None,
-                 python_interpreter: Optional[str] = None,
-                 llama_cpp_dir: Optional[str] = None) -> BuildResult:
+                 callback: Optional[StageCallback] = None) -> BuildResult:
     """Execute the full Ms.MoE pipeline.
 
     Args:
@@ -75,8 +73,6 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         force: Redo stages whose artifacts exist.
         dryrun: Run on the smallest rung for structural testing.
         callback: StageCallback for progress reporting.
-        python_interpreter: Path to the Python interpreter for the trainer.
-        llama_cpp_dir: Path to the llama.cpp directory (overrides config).
 
     Returns:
         BuildResult with outcomes.
@@ -94,14 +90,10 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     t_start = time.time()
 
     # ── Resolve config ────────────────────────────────────────────────────
-    # Build config from recipe + env overrides
-    # dryrun goes IN, it is not patched on afterwards. Setting config.dryrun
-    # after the fact left every budget already resolved at production size.
+    # Build config from recipe + env overrides. llama.cpp is resolved here too
+    # (recipe → env → search); there is no post-hoc override, because
+    # PipelineConfig is frozen and an assignment to it raised FrozenInstanceError.
     config = cfg_module.build_config(recipe, force=force, dryrun=dryrun)
-
-    # Override llama.cpp dir if provided
-    if llama_cpp_dir:
-        config.llama_cpp_dir = llama_cpp_dir
 
     # Create output directories
     os.makedirs(config.data_root, exist_ok=True)
@@ -208,20 +200,35 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     )
 
     agent_path = None
-    if has_synth or "agentcore" in expert_names:
-        cb.stage(stages.DATA_SYNTH, "running", "generating MCP agent traces")
+    reasoning_paths: Dict[str, str] = {}
+    if has_synth or config.tools_expert_name in expert_names or config.reasoning_experts:
+        cb.stage(stages.DATA_SYNTH, "running", "generating synthetic corpora")
         print(f"\n{'=' * 60}")
-        print(f"Stage 2: Generating agent traces")
+        print(f"Stage 2: Generating synthetic corpora")
         print(f"{'=' * 60}")
 
-        agent_path = data_mod.generate_agent_traces(config, callback=cb.stage)
-        if agent_path:
-            cb.stage(stages.DATA_SYNTH, "done", f"agent traces → {agent_path}")
+        if has_synth or config.tools_expert_name in expert_names:
+            tools_name = config.tools_expert_name or "agentcore"
+            agent_path = data_mod.generate_agent_traces(
+                config, callback=cb.stage,
+                expert_name=tools_name,
+                teacher_model=cfg_module.teacher_for(recipe, config, tools_name))
+
+        for rname in config.reasoning_experts:
+            rpath = data_mod.generate_reasoning_traces(
+                config, rname, callback=cb.stage,
+                teacher_model=cfg_module.teacher_for(recipe, config, rname))
+            if rpath:
+                reasoning_paths[rname] = rpath
+
+        produced = ([agent_path] if agent_path else []) + list(reasoning_paths.values())
+        if produced:
+            cb.stage(stages.DATA_SYNTH, "done",
+                     f"synthetic corpora → {', '.join(produced)}")
             result.stages_completed.append(stages.DATA_SYNTH)
-            result.artifacts[stages.DATA_SYNTH] = agent_path
+            result.artifacts[stages.DATA_SYNTH] = ", ".join(produced)
         else:
-            # Agent traces skipped (already present)
-            cb.stage(stages.DATA_SYNTH, mf.SKIPPED, "agent traces already present")
+            cb.stage(stages.DATA_SYNTH, mf.SKIPPED, "synthetic corpora already present")
             result.stages_completed.append(stages.DATA_SYNTH)
 
     # ── Stage 3: Fine-tune specialists ────────────────────────────────────
@@ -242,8 +249,10 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
 
         # Find data path for this expert
         data_path = code_paths.get(safe_name)
-        if safe_name == "agentcore" and agent_path:
+        if safe_name == config.tools_expert_name and agent_path:
             data_path = agent_path
+        if safe_name in reasoning_paths:
+            data_path = reasoning_paths[safe_name]
         if not data_path:
             # Check if expert has a custom data source
             for e in recipe.experts:
@@ -328,7 +337,8 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
                     for cand in (data_root / f"{name}.jsonl",
                                  data_root / f"{name}_code.jsonl"):
                         if cand.is_file():
-                            _, hp = eval_mod._load_or_split(str(cand), 0.1)
+                            _, hp = eval_mod._load_or_split(
+                                str(cand), config.eval_held_out_fraction)
                             held[name] = hp
                             break
 

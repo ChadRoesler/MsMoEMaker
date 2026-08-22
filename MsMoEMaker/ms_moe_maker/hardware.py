@@ -1,51 +1,44 @@
-"""Hardware tier definitions — auto-select model size, LoRA params, quant format.
+"""Hardware tier definitions — the ONE place tier defaults live.
 
-Tiers are ordered from lowest to highest hardware capability.  When a recipe
-omits size / budget / quant, the builder picks from the tier that matches the
-target device.  The user can still override any value.
+Tiers are ordered from lowest to highest capability. When a recipe omits
+`size`, the builder picks the tier's `default_size`; the tier also supplies the
+default LoRA rank and GGUF quant. Nothing else is per-tier: `max_seq_length`,
+`target_steps`, `per_device_batch`, `grad_accum` and `lora_alpha` come from the
+recipe's `budget:` block with flat defaults, and keeping second copies of those
+here is how this table and config.py drifted apart — xavier defaulted to 9B
+here and 7B in config, and 9B is not even a model size the base resolver knows.
 
-  nano   — Jetson Orin Nano / similar 8 GB class devices.
-           Lowest common denominator.  Q4 GGUF, single-expert builds, 0.5 B.
+  nano   — Jetson Orin Nano class, ~3 GB.  Q4 quant, 0.5B–3B.
+  xavier — ~9 GB class, the middle and the default when a recipe omits the
+           tier.  Q5 quant, up to 7B.
+  spark  — NVIDIA DGX Spark class, ~36 GB.  Q8 quant, up to 32B.
 
-  spark  — NVIDIA DGX Spark / 128 GB unified VRAM.
-           Mid-tier.  LoRA r=64, up to 3 B experts, Q8 quant.
-
-  dgx    — Multi-GPU DGX / A100/H100 class.
-           Full-bore.  LoRA r=128+, up to 7 B, multi-GPU, FP8 capable.
+config.py imports these definitions. The `_TIER_HINTS` / `_TIER_RANK` tables it
+used to keep were the second copy, and they drifted.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 
 @dataclass(frozen=True)
 class TierSpec:
-    """One hardware tier's capabilities and auto-defaults."""
+    """One hardware tier's capabilities and the defaults it owns."""
     max_vram_gb: int
     """Maximum VRAM this tier is designed for."""
     recommended_sizes: List[str]
-    """Recommended model sizes, ordered from smallest to largest."""
+    """Model sizes this tier is a good home for, smallest to largest."""
     default_size: str
-    """Size chosen when recipe omits 'size'."""
+    """Size chosen when the recipe omits 'size'."""
     default_lora_r: int
     """Default LoRA rank for fine-tuning."""
-    default_lora_alpha: int
-    """Default LoRA alpha."""
     default_quant: str
     """Default GGUF quantisation format."""
-    default_max_seq: int
-    """Default sequence length."""
-    default_target_steps: int
-    """Default training steps per expert."""
-    default_per_device_batch: int
-    """Default per-device batch size."""
-    default_grad_accum: int
-    """Default gradient accumulation."""
     supports_mgpu: bool
     """Can distribute training across GPUs?"""
     supports_8bit: bool
-    """Can use 8-bit optimiser (AdamW 8-bit)?"""
+    """Can use an 8-bit optimiser (AdamW 8-bit)?"""
     supports_fp8: bool
     """Can use FP8 quantisation?"""
 
@@ -58,42 +51,27 @@ TIERS: Dict[str, TierSpec] = {
         recommended_sizes=["0.5B", "1.5B", "3B"],
         default_size="3B",
         default_lora_r=32,
-        default_lora_alpha=16,
         default_quant="Q4_K_M",
-        default_max_seq=2048,
-        default_target_steps=500,
-        default_per_device_batch=1,
-        default_grad_accum=4,
         supports_mgpu=False,
         supports_8bit=True,
         supports_fp8=False,
     ),
     "xavier": TierSpec(
         max_vram_gb=9,
-        recommended_sizes=["0.5B", "1.5B", "3B", "9B"],
-        default_size="9B",
+        recommended_sizes=["0.5B", "1.5B", "3B", "7B"],
+        default_size="7B",
         default_lora_r=64,
-        default_lora_alpha=32,
         default_quant="Q5_K_M",
-        default_max_seq=4096,
-        default_target_steps=800,
-        default_per_device_batch=2,
-        default_grad_accum=4,
         supports_mgpu=False,
         supports_8bit=True,
         supports_fp8=False,
     ),
     "spark": TierSpec(
         max_vram_gb=36,
-        recommended_sizes=["0.5B", "1.5B", "3B", "9B", "36B"],
-        default_size="36B",
+        recommended_sizes=["0.5B", "1.5B", "3B", "7B", "14B", "32B"],
+        default_size="32B",
         default_lora_r=128,
-        default_lora_alpha=64,
         default_quant="Q8_0",
-        default_max_seq=4096,
-        default_target_steps=1200,
-        default_per_device_batch=4,
-        default_grad_accum=2,
         supports_mgpu=False,
         supports_8bit=True,
         supports_fp8=True,
@@ -119,7 +97,7 @@ def resolve_tier(recipe_tier: Optional[str] = None,
         else:
             return "spark"
 
-    # Default to middle tier
+    # Default to the middle tier
     return "xavier"
 
 
@@ -132,8 +110,8 @@ def get_tier(tier_name: str) -> TierSpec:
 
 
 def tier_for_size(size: str) -> str:
-    """Find the tier that best supports a given model size."""
+    """Find the smallest tier that is a good home for a model size."""
     for name, spec in TIERS.items():
         if size in spec.recommended_sizes:
             return name
-    return "spark"  # fallback: largest tier: dgx supports everything
+    return "spark"  # fallback: the largest tier supports everything

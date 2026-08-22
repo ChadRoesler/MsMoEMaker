@@ -60,7 +60,7 @@ DESCRIBE = {
     "manifest_schema_version": 1,
     "recipe_schema_version": 1,
     # Requires nothing, of anyone. The heavy deps (torch, transformers,
-    # datasets) belong to the PIPELINE it forks, not to this CLI - which is
+    # datasets) belong to the `[train]` extra, not to this base CLI - which is
     # what lets `ms-moe-maker validate` run on a laptop with no GPU and no CUDA.
     "requires": [],
 }

@@ -4,8 +4,8 @@ The specialists are frozen.  Only the `*.mlp.gate.weight` parameters (the
 TopKRouter gates) are trainable — roughly 1.2 M params at 0.5B.
 
 Uses a stratified data mix: each expert's corpus contributes a proportional
-quota.  Agentcore gets AGENT_MIX_FRACTION of the total; code experts split
-the rest equally.
+quota.  The tools expert gets AGENT_MIX_FRACTION of the total; the other
+experts split the rest equally.
 """
 from __future__ import annotations
 
@@ -160,12 +160,18 @@ def train_router(config, final_dir: str, safe_names: List[str],
         #
         # `.train` is written by _load_or_split at the same seed every time,
         # so when it exists it is exactly the complement of what eval will
-        # hold out. Falling back to the full corpus keeps this working for
-        # anyone who trains a router without ever running the gate or eval.
+        # hold out. If it does NOT exist - gates.experts: cheap|skip never
+        # wrote one, or a caller trains a router without ever running the gate
+        # or eval - split it here rather than falling back to the full corpus:
+        # falling back silently reintroduces held-out rows into the mix, which
+        # is the contamination this preference exists to stop.
         if path:
             train_split = path + ".train"
             if os.path.exists(train_split) and os.path.getsize(train_split) > 0:
                 path = train_split
+            else:
+                from .eval import _load_or_split
+                path, _ = _load_or_split(path, config.eval_held_out_fraction)
         if not path or not os.path.exists(path):
             print(f"   WARNING: no data for expert {name!r} at {path}")
             continue
@@ -177,10 +183,11 @@ def train_router(config, final_dir: str, safe_names: List[str],
 
     # Compute quotas
     quotas: Dict[str, int] = {}
-    if "agentcore" in pools:
-        quotas["agentcore"] = int(config.router_mix_total * config.agent_mix_fraction)
+    tools = config.tools_expert_name
+    if tools and tools in pools:
+        quotas[tools] = int(config.router_mix_total * config.agent_mix_fraction)
 
-    code_names = [n for n in pools if n != "agentcore"]
+    code_names = [n for n in pools if n != tools]
     rest = config.router_mix_total - sum(quotas.values())
     for i, n in enumerate(code_names):
         quotas[n] = rest // len(code_names) + (1 if i < rest % len(code_names) else 0)
@@ -190,7 +197,7 @@ def train_router(config, final_dir: str, safe_names: List[str],
     short = config.router_mix_total - sum(take.values())
     while short > 0:
         headroom = {n: len(pools[n]) - take[n] for n in pools
-                    if n != "agentcore" and len(pools[n]) > take[n]}
+                    if n != tools and len(pools[n]) > take[n]}
         if not headroom:
             break
         per = max(1, short // len(headroom))
@@ -226,7 +233,8 @@ def train_router(config, final_dir: str, safe_names: List[str],
 
     # Format
     def format_fn(ex):
-        if ex["src"] == "agentcore":
+        if (ex["src"] == config.tools_expert_name
+                or ex["src"] in config.reasoning_experts):
             return ex["text"]
         lang = ex["src"]
         from .config import DISPLAY_LANG

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from . import _describe as _d
+from . import hardware
 from .events import Events
 
 # ── allocator policy, set BEFORE anything can initialise CUDA ─────────────
@@ -125,7 +126,7 @@ DESCRIBE = {
     "kinds": _corpus_kinds(),
     "gates": ["auto", "manual", "skip"],
     "templates": ["code", "dnd", "math", "culinary"],
-    "tiers": ["nano", "xavier", "spark"],
+    "tiers": list(hardware.TIERS),
     "modes": list(_d.EVAL_MODES),
 }
 
@@ -247,11 +248,13 @@ def _cmd_init(args):
         "# size: auto            # auto | 0.5B | 1.5B | 3B | 7B | 14B | 32B",
         "# base: ''              # blank means a supported default for the size",
         "",
+        "# tools_expert: true    # add a default MCP/tool-calling expert (kind: synth)",
+        "",
         "# runtime:",
         "#   hardware_tier: xavier   # nano | xavier | spark",
         "",
         "# eval:                 # we provide the floor; replace it if you like",
-        "#   mode: all           # routing | quality | all",
+        "#   mode: all           # routing | quality | experts | all",
         "#   dead_threshold: 1.2 # minimum router enrichment before 'dead'",
         "",
         f"# Source kinds available here: {', '.join(_corpus_kinds())}",
@@ -275,11 +278,6 @@ def _cmd_init(args):
         # nothing is written without being asked.
         sys.stdout.write(text)
     return 0
-
-
-def _corpus_kinds():
-    from . import corpus
-    return corpus.names()
 
 
 def _cmd_build(args):
@@ -330,6 +328,11 @@ def _cmd_build(args):
     say(f"  corpus   {config.min_samples_per_expert:,}-{config.num_code_samples:,}"
         f" samples/expert, {config.collect_token_target/1e6:.1f}M tokens target,"
         f" router mix {config.router_mix_total:,}")
+    if config.floor_raised:
+        say(f"  floor    corpus floor raised to "
+            f"{config.min_samples_per_expert:,} docs/expert so the "
+            f"{config.router_mix_total:,}-row router mix can be filled from "
+            f"the .train split")
     say(f"  data     {config.data_root}")
     say(f"  output   {config.output_root}"
         + ("   [dryrun rung]" if config.dryrun else ""))
@@ -518,6 +521,10 @@ def _cmd_eval(args):
         print(f"\n[~] NOT SPECIALISED: {', '.join(report.undiscriminating)}")
         print("      Used, but showing no preference for their own domain.")
         print("      The stitch is fine; this is a router-training result.")
+        print("      Fix: more router steps — raise router.epochs (free) or")
+        print("      router_mix_total. Measured: corpus quality, domain contrast")
+        print("      and expert strength do not move enrichment; the router's own")
+        print("      step count does.")
     if report.dead_experts:
         print(f"\n[!] DEAD EXPERTS: {', '.join(report.dead_experts)}")
         return 2
@@ -622,6 +629,17 @@ def _print_eval_report(report):
             if moe is not None:
                 print(f"  {'  L moe here':18} {moe.exact_match:>7.3f} "
                       f"{moe.rouge1:>7.3f} {moe.bleu:>7.3f}  {moe.status}")
+
+        # SCORED ON THE ANSWER, NOT THE THINKING. When the base is a reasoning
+        # model, say separately how often it actually emitted a think block —
+        # "reasons but wrong" and "never reasons" are different failures.
+        reasoned_rows = {n: r for n, r in sorted(quality.items())
+                         if r.reasoned >= 0}
+        if reasoned_rows:
+            print("\n  Reasoning (fraction of outputs that emitted a think block)")
+            for name, r in reasoned_rows.items():
+                flag = "" if r.reasoned > 0.5 else "   <-- does not reliably reason"
+                print(f"    {name:16} {r.reasoned:>6.2f}{flag}")
 
     print(f"\n  {report.message}")
 

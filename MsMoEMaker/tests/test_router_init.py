@@ -12,9 +12,10 @@ three collapsed onto a single expert, the winner differed between runs
 while the experts genuinely differed at 263x the chance floor and correct
 routing was worth 0.43 nats.
 
-Switch and Mixtral seed their routers with small noise for this reason. Zero
-stays the DEFAULT because verifiability is worth keeping by default; random is
-the option you take once you are training rather than verifying.
+Switch and Mixtral seed their routers with small noise for this reason. Random
+is now the DEFAULT because a Ms.MoE built with the defaults has to route, and
+zero-init collapses. `zero` remains for verify_stitch's bit-equality check:
+it is the "is the skeleton well-formed" answer, not a training starting point.
 """
 import pytest
 
@@ -36,8 +37,8 @@ def _rec(**moe):
     return rec
 
 
-def test_zero_is_the_default():
-    assert _rec().moe.router_init == "zero"
+def test_random_is_the_default():
+    assert _rec().moe.router_init == "random"
 
 
 def test_random_is_accepted():
@@ -67,7 +68,7 @@ def test_the_knob_reaches_the_pipeline_config():
                              dryrun=True)
     assert c.router_init == "random"
     assert c.router_init_std == 0.05
-    assert cfg_mod.build_config(_rec(), dryrun=True).router_init == "zero"
+    assert cfg_mod.build_config(_rec(), dryrun=True).router_init == "random"
 
 
 class TestVerifyKnowsWhatWasAskedFor:

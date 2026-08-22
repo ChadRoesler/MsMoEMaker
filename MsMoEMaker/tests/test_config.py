@@ -165,7 +165,7 @@ class TestPipelineConfigDefaults:
 
     def test_default_router_mix_total(self):
         pc = config.PipelineConfig(name="test", size="0.5B", base="test", base_safe="test")
-        assert pc.router_mix_total == 12_000
+        assert pc.router_mix_total == 16_000
 
     def test_default_agents_mix_fraction(self):
         pc = config.PipelineConfig(name="test", size="0.5B", base="test", base_safe="test")
@@ -221,7 +221,7 @@ class TestBuildConfig:
             size="100TB",  # invalid — should auto-fill from tier default
         )
         pc = config.build_config(recipe)
-        # Auto-filled from tier (spark → 3B)
+        # Auto-filled from the tier default (xavier → 7B)
         assert pc.size in MODEL_SIZES, f"size {pc.size} not in MODEL_SIZES"
 
     def test_valid_0_5b_resolves_base(self):
@@ -389,20 +389,115 @@ class TestCorpusKnobs:
         return rec
 
     def test_defaults_are_unchanged_when_unspecified(self, monkeypatch):
-        """A recipe that says nothing must behave exactly as before."""
-        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
-        c = config.build_config(self._rec(), dryrun=False)
-        assert c.min_samples_per_expert == 2_000
-        assert c.num_code_samples == 100_000
-        assert c.router_mix_total == 12_000
+        """A recipe that says nothing gets the defaults - or the mix's need.
 
-    def test_the_recipe_wins(self, monkeypatch):
+        `min_samples` used to be a plain default. It is now the LARGER of the
+        default and what `router_mix_total` will ask for, because those two
+        numbers describe the same fact and used to disagree in silence. The
+        default mix of 12,000 rows over two experts needs more than the old
+        2,000-doc floor, so the derived number wins here - and the assertion
+        below says so in terms of the derivation, not as a fresh magic number.
+        """
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec = self._rec()
+        c = config.build_config(rec, dryrun=False)
+        assert c.num_code_samples == 100_000
+        assert c.router_mix_total == 16_000
+        assert c.min_samples_per_expert == max(
+            2_000, config.router_doc_need(rec, 16_000, 0.15))
+
+    def test_the_recipe_wins_when_it_asks_for_more(self, monkeypatch):
+        """An explicit floor above the derived one is never lowered."""
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         c = config.build_config(self._rec(
-            {"min_samples": 300, "max_samples": 3000,
+            {"min_samples": 3_000, "max_samples": 12_000,
              "router_mix_total": 800}), dryrun=False)
         assert (c.min_samples_per_expert, c.num_code_samples,
-                c.router_mix_total) == (300, 3000, 800)
+                c.router_mix_total) == (3_000, 12_000, 800)
+
+    def test_the_floor_rises_to_what_the_mix_will_ask_for(self, monkeypatch):
+        """THE BUG THIS EXISTS TO PIN.
+
+        A recipe could set a floor of 300 docs and a mix of 4,000 rows, pass
+        the corpus stage green, train every specialist, and only then have the
+        router come up SHORT of quota on every expert - which reads as a gate
+        that would not learn. The floor now knows what the mix needs.
+        """
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec = self._rec({"min_samples": 300, "max_samples": 12_000,
+                         "router_mix_total": 4_000})
+        need = config.router_doc_need(rec, 4_000, 0.15)
+        assert need > 300, "fixture no longer exercises the raise"
+        c = config.build_config(rec, dryrun=False)
+        assert c.min_samples_per_expert == need
+
+    def test_the_derived_floor_mirrors_the_router_quota(self):
+        """router_doc_need duplicates router.train_router's arithmetic on
+        purpose - that module imports torch and this one must stay laptop-safe.
+        The duplication is the risk, so pin the shape: an even split of the
+        mix, grossed up for the held-out fraction and a small margin."""
+        rec = self._rec()  # two experts, no agentcore
+        need = config.router_doc_need(rec, 4_000, 0.15)
+        per_expert = 4_000 / 2
+        expected = per_expert / config.TRAIN_SPLIT_SHARE * config.ROUTER_DOC_MARGIN
+        assert need == int(-(-expected // 1))
+
+    def test_a_generated_expert_takes_its_slice_off_the_top(self):
+        """agentcore is SYNTHESISED, not collected, so it does not raise the
+        collection floor - but the slice it takes does shrink what the
+        collected experts have to cover."""
+        from ms_moe_maker.recipe import parse
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [
+                    {"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                    {"name": "b", "source": {"kind": "hf", "repo": "o/e"}},
+                    {"name": "agentcore", "source": {"kind": "synth"}}]}
+        rec, _ = parse(body)
+        with_agent = config.router_doc_need(rec, 4_000, 0.25)
+        without = config.router_doc_need(self._rec(), 4_000, 0.25)
+        # 3,000 rows over two collected experts, not 4,000 over three.
+        assert with_agent < without
+
+    def test_no_experts_means_no_opinion(self):
+        from ms_moe_maker.recipe import Recipe
+        assert config.router_doc_need(Recipe(), 4_000, 0.15) == 0
+        assert config.router_doc_need(self._rec(), 0, 0.15) == 0
+
+    def test_build_config_never_prints(self, monkeypatch, capsys):
+        """The raised floor is DATA, not a print. build_config runs under
+        --json too, where stdout belongs to the event stream and a stray
+        print corrupts the format a consumer is parsing. It used to print
+        '[cfg] corpus floor raised ...' unconditionally."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        config.build_config(self._rec(), dryrun=False)
+        assert capsys.readouterr().out == ""
+
+    def test_floor_raised_is_recorded_not_printed(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        raised = config.build_config(self._rec(), dryrun=False)
+        assert raised.floor_raised is True
+        assert raised.min_samples_per_expert == config.router_doc_need(
+            self._rec(), 16_000, 0.15)
+
+        # An explicit floor above the derived one is never raised.
+        calm = config.build_config(
+            self._rec({"min_samples": 3_000, "max_samples": 12_000,
+                       "router_mix_total": 800}), dryrun=False)
+        assert calm.floor_raised is False
+
+    def test_held_out_fraction_is_resolved_once(self, monkeypatch):
+        """router_doc_need and the router's .train split must agree, or the
+        raised floor is a lie. Both now derive from held_out_fraction()."""
+        from ms_moe_maker.recipe import parse
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec, _ = parse({
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                        {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}],
+            "eval": {"held_out_fraction": 0.2}})
+        c = config.build_config(rec, dryrun=False)
+        assert c.eval_held_out_fraction == 0.2
+        assert config.held_out_fraction(rec) == 0.2
 
     def test_a_small_real_run_is_not_a_dryrun(self, monkeypatch):
         """The distinction that matters: small volume, production directory."""
@@ -412,15 +507,21 @@ class TestCorpusKnobs:
         assert "dryrun" not in c.output_root
 
     def test_the_recipe_still_wins_under_dryrun(self, monkeypatch):
+        """A dryrun floor is still the recipe's - as long as the mix is small
+        enough that the derived floor does not overtake it."""
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
-        c = config.build_config(self._rec({"min_samples": 42}), dryrun=True)
+        c = config.build_config(
+            self._rec({"min_samples": 42, "router_mix_total": 60}),
+            dryrun=True)
         assert c.min_samples_per_expert == 42
 
     def test_minus_one_means_you_decide(self, monkeypatch):
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         explicit = config.build_config(
-            self._rec({"min_samples": -1}), dryrun=True)
-        implicit = config.build_config(self._rec(), dryrun=True)
+            self._rec({"min_samples": -1, "router_mix_total": 60}),
+            dryrun=True)
+        implicit = config.build_config(
+            self._rec({"router_mix_total": 60}), dryrun=True)
         assert explicit.min_samples_per_expert == implicit.min_samples_per_expert
 
     # Measured on a DGX Spark: 2.56 s/optimiser step at 0.5B, seq 1024,
@@ -556,10 +657,10 @@ class TestRouterKnobs:
     def test_defaults_are_unchanged_when_the_recipe_is_silent(self, tmp_path):
         c = self._cfg(tmp_path)
         assert c.lr_router == 1e-4
-        assert c.router_batch == 1
-        assert c.router_accum == 8
+        assert c.router_batch == 8
+        assert c.router_accum == 1
         assert c.router_epochs == 1.0
-        assert c.router_aux_loss_coef == 0.001
+        assert c.router_aux_loss_coef == 0.02
 
     def test_a_recipe_can_turn_every_router_knob(self, tmp_path):
         c = self._cfg(tmp_path, lr=1e-3, batch=4, accum=2, epochs=3,
@@ -573,7 +674,7 @@ class TestRouterKnobs:
     def test_minus_one_still_means_you_decide(self, tmp_path):
         c = self._cfg(tmp_path, lr=-1, batch=-1, epochs=-1)
         assert c.lr_router == 1e-4
-        assert c.router_batch == 1
+        assert c.router_batch == 8
         assert c.router_epochs == 1.0
 
     def test_router_block_is_a_known_top_level_key(self):
@@ -676,3 +777,120 @@ class TestLoraKnobs:
     def test_the_rank_is_still_capped(self):
         assert config.build_config(self._rec(lora_r=9999),
                                    dryrun=True).lora_r == 256
+
+
+class TestToolsExpert:
+    """`tools_expert` is the on-ramp for the MCP/tool-calling specialist.
+
+    `tools_expert: true` injects a default tools expert; a mapping customises
+    it. Downstream identifies the tools expert by NAME (config.tools_expert_name)
+    rather than by the literal 'agentcore', which is how a differently-named
+    tools expert used to silently become a code expert in the router.
+    """
+
+    def _rec(self, tools_expert=False):
+        from ms_moe_maker.recipe import parse
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                            {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]}
+        if tools_expert is not False:
+            body["tools_expert"] = tools_expert
+        return parse(body)
+
+    def test_true_injects_a_default_tools_expert(self):
+        rec, _ = self._rec(tools_expert=True)
+        assert [e.name for e in rec.experts] == ["a", "b", "agentcore"]
+        assert rec.tools_expert_name == "agentcore"
+        tools = rec.experts[-1]
+        assert tools.source.kind == "synth"
+        assert tools.source.teacher  # a default teacher was filled in
+
+    def test_mapping_customises_the_tools_expert(self):
+        rec, _ = self._rec(tools_expert={"name": "mcp", "teacher": "X/Y-Instruct"})
+        assert [e.name for e in rec.experts] == ["a", "b", "mcp"]
+        assert rec.tools_expert_name == "mcp"
+        assert rec.experts[-1].source.teacher == "X/Y-Instruct"
+
+    def test_an_existing_expert_of_that_name_is_not_duplicated(self):
+        rec, warns = self._rec(tools_expert=True)
+        assert [e.name for e in rec.experts] == ["a", "b", "agentcore"]
+        assert rec.tools_expert_name == "agentcore"
+
+    def test_legacy_agentcore_name_still_means_tools_expert(self):
+        from ms_moe_maker.recipe import parse
+        rec, _ = parse({
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                        {"name": "b", "source": {"kind": "hf", "repo": "o/e"}},
+                        {"name": "agentcore", "source": {"kind": "synth"}}]})
+        assert rec.tools_expert_name == "agentcore"
+
+    def test_build_config_carries_the_tools_expert_name(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec, _ = self._rec(tools_expert=True)
+        c = config.build_config(rec, dryrun=False)
+        assert c.tools_expert_name == "agentcore"
+        assert "agentcore" in c.expert_names
+
+
+class TestBaseKind:
+    """base_kind resolves to config.reasoning, so downstream can alter prompt /
+    eval handling based on whether the base emits a thinking trace."""
+
+    def _rec(self, base="", base_kind="auto"):
+        from ms_moe_maker.recipe import parse
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                            {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]}
+        if base:
+            body["base"] = base
+        if base_kind != "auto":
+            body["base_kind"] = base_kind
+        return parse(body)
+
+    def _cfg(self, rec, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        return config.build_config(rec, dryrun=False)
+
+    def test_explicit_reasoning(self, monkeypatch):
+        rec, _ = self._rec(base_kind="reasoning")
+        assert self._cfg(rec, monkeypatch).reasoning is True
+
+    def test_explicit_nonreasoning(self, monkeypatch):
+        rec, _ = self._rec(base_kind="nonreasoning")
+        assert self._cfg(rec, monkeypatch).reasoning is False
+
+    def test_auto_sniffs_a_reasoning_id(self, monkeypatch):
+        rec, _ = self._rec(base="Qwen/QwQ-32B-Preview")
+        assert self._cfg(rec, monkeypatch).reasoning is True
+
+    def test_auto_defaults_to_nonreasoning(self, monkeypatch):
+        rec, _ = self._rec(base="Qwen/Qwen2.5-Coder-7B")
+        assert self._cfg(rec, monkeypatch).reasoning is False
+
+
+class TestTeacherFor:
+    """source.teacher was declared, validated, and then never read. teacher_for
+    threads it: source.teacher > the reasoning default > the generic synth
+    teacher."""
+
+    def _cfg(self, monkeypatch, **expert_source):
+        from ms_moe_maker.recipe import parse
+        rec, _ = parse({
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [{"name": "a", "source": expert_source}]})
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        return rec, config.build_config(rec, dryrun=False)
+
+    def test_source_teacher_wins(self, monkeypatch):
+        rec, c = self._cfg(monkeypatch, kind="synth", teacher="org/model")
+        assert config.teacher_for(rec, c, "a") == "org/model"
+
+    def test_reasoning_defaults_to_the_reasoning_teacher(self, monkeypatch):
+        rec, c = self._cfg(monkeypatch, kind="stack", language="Python",
+                           reasoning=True)
+        assert config.teacher_for(rec, c, "a") == c.reasoning_teacher
+
+    def test_falls_back_to_the_generic_synth_teacher(self, monkeypatch):
+        rec, c = self._cfg(monkeypatch, kind="synth", teacher=None)
+        assert config.teacher_for(rec, c, "a") == c.teacher_model

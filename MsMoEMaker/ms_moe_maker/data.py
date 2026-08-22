@@ -2,7 +2,7 @@
 
 Two jobs:
   1. Collect per-language code corpora from HuggingFace shards (adaptive loading).
-  2. Generate / collect agentcore MCP traces via teacher-model rejection sampling.
+  2. Generate tools (MCP) traces via teacher-model rejection sampling.
 
 Each function writes a JSONL file and returns its path.  All functions are
 idempotent: they skip if the target already exists (unless force=True).
@@ -80,6 +80,11 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
     for expert_name, src in sources.items():
         safe = safe_map.get(expert_name, cfg.safe_name(expert_name))
         out_path = f"{config.data_root}/{safe}_code.jsonl"
+
+        # reasoning: true GENERATES reasoning traces instead of scraping. Skip
+        # here — generate_reasoning_traces handles it in the synth stage.
+        if getattr(src, 'reasoning', False):
+            continue
 
         # Skip if already present (unless forced)
         if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -897,8 +902,10 @@ def _collect_from_shards(languages: List[str], config,
 # MCP Agent trace generation
 # ---------------------------------------------------------------------------
 
-def generate_agent_traces(config, callback=None) -> Optional[str]:
-    """Generate MCP agent traces for the agentcore expert.
+def generate_agent_traces(config, callback=None,
+                          expert_name: str = "agentcore",
+                          teacher_model: Optional[str] = None) -> Optional[str]:
+    """Generate MCP agent traces for the tools expert.
 
     Uses rejection sampling: a teacher model generates tool calls, which are
     validated against a freshly-generated tool surface.  Server-agnostic by
@@ -908,7 +915,7 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
     """
     import sys
 
-    out_path = f"{config.data_root}/agentcore_code.jsonl"
+    out_path = f"{config.data_root}/{expert_name}_code.jsonl"
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         print(f"[skip] agent dataset already present at {out_path}")
         return out_path
@@ -927,7 +934,7 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
         print(f"WARNING: cannot check chat_template: {exc}")
         # Continue anyway — the template check happens later.
 
-    mcp_path = f"{config.data_root}/agentcore_mcp_code.jsonl"
+    mcp_path = f"{config.data_root}/{expert_name}_mcp_code.jsonl"
     print(f"\nGenerating MCP agent traces "
           f"{'via vLLM' if config.use_vllm else 'via transformers+bitsandbytes'}")
 
@@ -941,7 +948,7 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
             os.replace(partial_path, out_path)
             print(f"   resumed a complete .partial ({kept}) → {out_path}")
             if callback:
-                callback(st.DATA_SYNTH, "running", f"agentcore: {kept} traces")
+                callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} traces")
             return out_path
         print(f"   resuming from {partial_path} with {kept} traces already banked")
 
@@ -958,9 +965,9 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
 
     # Build teacher
     if config.use_vllm:
-        teacher = _VLLMTeacher(config)
+        teacher = _VLLMTeacher(config, model=teacher_model)
     else:
-        teacher = _HFTeacher(config)
+        teacher = _HFTeacher(config, model=teacher_model)
 
     tokenizer = teacher.tokenizer
     attempted, rejects = 0, 0
@@ -1022,8 +1029,126 @@ def generate_agent_traces(config, callback=None) -> Optional[str]:
     acc_rate = 100.0 * (kept - t_kept0) / max(attempted, 1)
     print(f"   accept rate {acc_rate:.1f}%  top rejections: {rejects}")
     if callback:
-        callback(st.DATA_SYNTH, "running", f"agentcore: {kept} traces")
+        callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} traces")
     return out_path
+
+
+_REASONING_TEMPLATES = (
+    "Explain the idiomatic way to handle a {domain} task.",
+    "A junior asks how to approach a {domain} problem. Reason it out.",
+    "Compare two {domain} approaches and pick one.",
+    "Something is broken in a {domain} context. Think it through, then fix it.",
+)
+
+
+def generate_reasoning_traces(config, expert_name, callback=None,
+                              teacher_model: Optional[str] = None) -> Optional[str]:
+    """Generate reasoning traces for one specialist — the R1-distill recipe.
+
+    A reasoning teacher writes `<think>…</think>` then an answer, on the
+    expert's domain, so a non-reasoning base is fine-tuned into reasoning on
+    that ONE domain. Rejection sampling keeps only traces whose think block and
+    answer are BOTH non-empty.
+
+    Returns the JSONL path, or None if generation was skipped.
+    """
+    from .config import DISPLAY_LANG, REASONING_STYLES
+
+    style = REASONING_STYLES.get(config.reasoning_type or "xml") or REASONING_STYLES["xml"]
+    n = config.num_agent_samples
+    out_path = f"{config.data_root}/{expert_name}_reasoning.jsonl"
+    if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        print(f"[skip] reasoning traces already present at {out_path}")
+        return out_path
+
+    display = DISPLAY_LANG.get(expert_name, expert_name.replace("_", " ").title())
+    system = (
+        f"You are a {display} specialist. Reason step by step inside "
+        f"{style.open} … {style.close}, then give the final answer."
+    )
+
+    if config.use_vllm:
+        teacher = _VLLMTeacher(config, model=teacher_model,
+                               max_new_tokens=config.reasoning_teacher_max_new)
+    else:
+        teacher = _HFTeacher(config, model=teacher_model,
+                             max_new_tokens=config.reasoning_teacher_max_new)
+
+    partial = out_path + ".partial"
+    kept = 0
+    if os.path.exists(partial):
+        with open(partial) as fh:
+            kept = sum(1 for line in fh if line.strip())
+        if kept >= n:
+            os.replace(partial, out_path)
+            if callback:
+                callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} reasoning traces")
+            return out_path
+
+    attempted, rejects = 0, 0
+    sink = open(partial, "a", buffering=1)
+    try:
+        while kept < n:
+            batch_n = min(teacher.batch_size, (n - kept) * 2)
+            batch = [_reasoning_msgs(system, display, i) for i in range(batch_n)]
+            prompts = [teacher.tokenizer.apply_chat_template(
+                m, tokenize=False, add_generation_prompt=True) for m in batch]
+            for msgs, text in zip(batch, teacher.complete(prompts)):
+                attempted += 1
+                think, answer = _split_reasoning(text, style)
+                if not think or not answer:
+                    rejects += 1
+                    continue
+                # store the WHOLE turn (system + user + reasoning answer),
+                # rendered — finetune/router pass it through as-is, like the
+                # tools expert's traces.
+                conv = msgs + [{"role": "assistant", "content": text}]
+                text_out = (teacher.tokenizer.apply_chat_template(
+                    conv, tokenize=False) + teacher.tokenizer.eos_token)
+                sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
+                kept += 1
+                if kept >= n:
+                    break
+            acc = 100.0 * kept / max(attempted, 1)
+            print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
+                  f"rejects {rejects})")
+            # Tripwire: a teacher that never produces a valid think/answer pair
+            if attempted > 200 and (kept / max(attempted, 1)) < 0.05:
+                raise RuntimeError(
+                    f"accept rate {(kept / max(attempted, 1)) * 100:.1f}% after "
+                    f"{attempted} attempts — the teacher is not producing a "
+                    f"valid {style.open}…{style.close} split.")
+    finally:
+        sink.close()
+        teacher.close()
+
+    os.replace(partial, out_path)
+    print(f"Generated {kept} VALIDATED reasoning traces → {out_path}")
+    if callback:
+        callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} reasoning traces")
+    return out_path
+
+
+def _reasoning_msgs(system: str, display: str, i: int):
+    task = _REASONING_TEMPLATES[i % len(_REASONING_TEMPLATES)].format(domain=display)
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": task},
+    ]
+
+
+def _split_reasoning(text: str, style) -> tuple:
+    """Return (think, answer); both must be non-empty for a trace to pass."""
+    open_i = text.find(style.open)
+    if open_i == -1:
+        return "", ""
+    after_open = text[open_i + len(style.open):]
+    close_i = after_open.find(style.close)
+    if close_i == -1:
+        return "", ""
+    think = after_open[:close_i].strip()
+    answer = after_open[close_i + len(style.close):].strip()
+    return think, answer
 
 
 def _load_tool_surface() -> Optional[List[Dict[str, Any]]]:
@@ -1281,7 +1406,9 @@ class _HFTeacher:
     """transformers + bitsandbytes nf4 teacher."""
     batch_size: int
 
-    def __init__(self, config):
+    def __init__(self, config, model=None, max_new_tokens=None):
+        self.model_id = model or config.teacher_model
+        self.max_new_tokens = max_new_tokens or config.teacher_max_new
         self.batch_size = config.teacher_batch
         try:
             from transformers import BitsAndBytesConfig
@@ -1299,7 +1426,7 @@ class _HFTeacher:
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
         self.model = AutoModelForCausalLM.from_pretrained(
-            config.teacher_model,
+            self.model_id,
             quantization_config=quant_config,
             device_map={"": 0},
             max_memory={0: config.teacher_max_memory},
@@ -1307,7 +1434,7 @@ class _HFTeacher:
             trust_remote_code=True,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(
-            config.teacher_model, cache_dir=config.hf_home)
+            self.model_id, cache_dir=config.hf_home)
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -1318,7 +1445,7 @@ class _HFTeacher:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=224,
+                max_new_tokens=self.max_new_tokens,
                 temperature=0.7,
                 do_sample=True,
                 pad_token_id=self.tokenizer.pad_token_id,
@@ -1336,7 +1463,7 @@ class _VLLMTeacher:
     """vLLM teacher — continuous batching + paged KV."""
     batch_size: int
 
-    def __init__(self, config):
+    def __init__(self, config, model=None, max_new_tokens=None):
         from vllm import LLM, SamplingParams
         # AutoTokenizer was imported in _HFTeacher.__init__ and used here,
         # where nothing binds it - a NameError waiting for the first recipe
@@ -1344,11 +1471,12 @@ class _VLLMTeacher:
         # module level (that would put torch behind `ms-moe-maker validate`),
         # so it is imported here, in the function that uses it.
         from transformers import AutoTokenizer
+        self.model_id = model or config.teacher_model
         self._SamplingParams = SamplingParams
         self.tokenizer = AutoTokenizer.from_pretrained(
-            config.teacher_model, cache_dir=config.hf_home)
+            self.model_id, cache_dir=config.hf_home)
         self.llm = LLM(
-            model=config.teacher_model,
+            model=self.model_id,
             dtype="bfloat16",
             gpu_memory_utilization=config.vllm_gpu_util,
             max_model_len=config.vllm_max_len,
@@ -1358,7 +1486,7 @@ class _VLLMTeacher:
         )
         if config.vllm_quantization:
             self.llm = LLM(
-                model=config.teacher_model,
+                model=self.model_id,
                 dtype="bfloat16",
                 gpu_memory_utilization=config.vllm_gpu_util,
                 max_model_len=config.vllm_max_len,
@@ -1370,7 +1498,7 @@ class _VLLMTeacher:
         self.params = SamplingParams(
             temperature=0.7, top_p=0.8, top_k=20,
             repetition_penalty=1.05,
-            max_tokens=224,
+            max_tokens=(max_new_tokens or config.teacher_max_new),
         )
         self.batch_size = config.vllm_batch
 

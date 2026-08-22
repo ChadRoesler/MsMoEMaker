@@ -60,6 +60,11 @@ class EvalResult:
     """BLEU score."""
     avg_length: float = 0.0
     """Average output token length."""
+    # Fraction of outputs that emitted a NON-EMPTY reasoning block. -1 = not
+    # applicable (the model under eval is not a reasoning model); 0..1 when the
+    # eval split the trace from the answer. Reasons-but-wrong and
+    # doesn't-reason-at-all are different outcomes and must not collapse.
+    reasoned: float = -1.0
     status: str = "pending"
     """pending | done | failed | skipped."""
     note: str = ""
@@ -959,13 +964,37 @@ def _prompt_and_reference(item: Dict[str, Any],
     return "".join(lines[:cut]), "".join(lines[cut:])
 
 
+def _split_reasoning_answer(text: str, style) -> Tuple[str, bool]:
+    """Split a reasoning model's output into (answer, reasoned).
+
+    `style` is a config.ReasoningStyle or None. None → the whole text is the
+    answer and `reasoned` is False (nothing to strip). When the text has no
+    clean think/answer split, the whole text is scored as the answer and
+    `reasoned` is False — a reasoning model that did not reason is a FINDING,
+    not a crash.
+    """
+    if style is None:
+        return text, False
+    open_i = text.find(style.open)
+    if open_i == -1:
+        return text, False
+    after = text[open_i + len(style.open):]
+    close_i = after.find(style.close)
+    if close_i == -1:
+        return text, False
+    think = after[:close_i].strip()
+    answer = after[close_i + len(style.close):].strip()
+    return (answer or text), bool(think)
+
+
 def eval_generation(model_dir: str, test_data_path: str,
                     label: str, domain: str,
                     num_samples: int = 10,
                     max_new_tokens: int = 256,
                     max_prompt_tokens: int = 1024,
                     callback=None,
-                    loaded=None) -> EvalResult:
+                    loaded=None,
+                    reasoning_style=None) -> EvalResult:
     """Generate real tokens from a real model and score them against references.
 
     Replaces the prompt/reference overlap proxy. Every number here comes from
@@ -1018,6 +1047,7 @@ def eval_generation(model_dir: str, test_data_path: str,
     r1: List[float] = []
     bl: List[float] = []
     lengths: List[int] = []
+    reasoned_count: List[int] = []
     scored = 0
     completion_mode = False
 
@@ -1133,10 +1163,16 @@ def eval_generation(model_dir: str, test_data_path: str,
         except Exception:
             pass
 
-        em.append(_exact_match(generated, reference))
-        r1.append(_rouge1(generated, reference))
-        bl.append(_bleu_simple(generated, reference))
-        lengths.append(len(_tokenize_simple(generated)))
+        # SCORE THE ANSWER, NOT THE THINKING. A reasoning model's trace is not
+        # the deliverable; the answer after the close tag is. Track separately
+        # whether it reasoned at all, so "reasons but wrong" and "never reasons"
+        # stay distinct.
+        answer, reasoned = _split_reasoning_answer(generated, reasoning_style)
+        em.append(_exact_match(answer, reference))
+        r1.append(_rouge1(answer, reference))
+        bl.append(_bleu_simple(answer, reference))
+        lengths.append(len(_tokenize_simple(answer)))
+        reasoned_count.append(1 if reasoned else 0)
         scored += 1
         if scored % 4 == 0:
             _deflate()
@@ -1161,6 +1197,8 @@ def eval_generation(model_dir: str, test_data_path: str,
     result.rouge1 = sum(r1) / scored
     result.bleu = sum(bl) / scored
     result.avg_length = sum(lengths) / scored
+    if reasoning_style is not None:
+        result.reasoned = sum(reasoned_count) / scored
     result.status = "done"
     if peak_mib:
         _trace(f"{label}/{domain}: peak {peak_mib:,.0f}MiB over {scored} samples")
@@ -1487,6 +1525,11 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
 
     # ── quality: real generation against held-out references ───────────────
     if do_quality:
+        from .config import REASONING_STYLES
+        # Non-reasoning base → None (score the whole output). Reasoning base →
+        # the style whose delimiters split trace from answer.
+        reasoning_style = REASONING_STYLES.get(config.reasoning_type)
+
         # ONE MODEL IN MEMORY AT A TIME, AND THE MoE LOADED ONCE.
         #
         # This loop used to call eval_generation(moe_dir, ...) INSIDE the
@@ -1507,7 +1550,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             res = eval_generation(
                 model_dir=expert_dir, test_data_path=held_paths[expert_name],
                 label=expert_name, domain=expert_name,
-                num_samples=num_samples)
+                num_samples=num_samples, reasoning_style=reasoning_style)
             report.stages[expert_name] = res
             if res.status == UNMEASURABLE:
                 report.unmeasured.append(f"quality/{expert_name}: {res.note}")
@@ -1534,7 +1577,8 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                     model_dir=moe_dir, test_data_path=held_paths[expert_name],
                     label="moe", domain=expert_name,
                     num_samples=num_samples,
-                    loaded=(moe_model, moe_tok, moe_device))
+                    loaded=(moe_model, moe_tok, moe_device),
+                    reasoning_style=reasoning_style)
                 report.stages[f"moe/{expert_name}"] = moe_res
                 if moe_res.status == UNMEASURABLE:
                     report.unmeasured.append(

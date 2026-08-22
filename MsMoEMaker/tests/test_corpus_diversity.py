@@ -241,3 +241,39 @@ def test_a_floor_above_the_ceiling_is_refused_at_validate():
     errs, _ = validate(rec)
     assert any("floor is\nhigher" in e or "higher than the ceiling" in e
                for e in errs), errs
+
+
+def test_a_mix_the_ceiling_cannot_fill_is_refused_at_validate():
+    """THE SECOND HALF OF THE SAME BUG.
+
+    corpus.max_samples caps collection; corpus.router_mix_total is what the
+    router asks for out of the .train split of that collection, hours later.
+    A cap below the mix's need passes the corpus stage, trains every
+    specialist, and then starves the gate - reported as a router that would
+    not learn. Two seconds on a laptop beats four hours on the Spark.
+    """
+    from ms_moe_maker.recipe import parse, validate
+    rec, _ = parse({
+        "schema_version": 1, "name": "t", "size": "0.5B",
+        "experts": [{"name": "a",
+                     "source": {"kind": "stack", "language": "Python"}}],
+        "corpus": {"min_samples": 100, "max_samples": 500,
+                   "router_mix_total": 4000},
+    })
+    errs, _ = validate(rec)
+    assert any("router mix" in e for e in errs), errs
+    # and it names the cheaper alternative rather than only the expensive one
+    assert any("router.epochs" in e for e in errs), errs
+
+
+def test_a_ceiling_that_can_feed_the_mix_is_not_refused():
+    from ms_moe_maker.recipe import parse, validate
+    rec, _ = parse({
+        "schema_version": 1, "name": "t", "size": "0.5B",
+        "experts": [{"name": "a",
+                     "source": {"kind": "stack", "language": "Python"}}],
+        "corpus": {"min_samples": 100, "max_samples": 12000,
+                   "router_mix_total": 4000},
+    })
+    errs, _ = validate(rec)
+    assert not any("router mix" in e for e in errs), errs

@@ -23,6 +23,14 @@ from . import corpus
 
 SCHEMA_VERSION = 1
 
+# The tools (MCP) expert. `tools_expert: true` injects one with these defaults;
+# a mapping overrides them. The NAME is the one handle downstream uses to ask
+# "is this the tools expert" rather than the literal "agentcore" — which is how
+# a differently-named tools expert used to silently become a code expert in the
+# router's formatting and quota logic.
+DEFAULT_TOOLS_EXPERT_NAME = "agentcore"
+DEFAULT_TOOLS_EXPERT_TEACHER = "Qwen/Qwen2.5-7B-Instruct"
+
 
 @dataclass
 class Source:
@@ -52,6 +60,10 @@ class Source:
     teacher: Optional[str] = None
     generator: Optional[str] = None
     examples: int = 15_000
+    # Force reasoning into this expert: generate reasoning traces
+    # (<think>…answer) with a reasoning teacher instead of scraping a corpus.
+    # The R1-distill recipe, applied to ONE specialist. Works on any base.
+    reasoning: bool = False
     # kind=gh
     ref: Optional[str] = None       # branch or tag; default branch if unset
     subdir: Optional[str] = None    # narrow to one directory in the repo
@@ -106,13 +118,12 @@ class MoE:
     """MoE routing architecture."""
     experts_per_tok: int = 2
     norm_topk_prob: bool = True
-    # zero | random. Zero makes the untrained MoE reproduce one expert exactly
-    # and lets verify_stitch assert bit-equality; it is also a perfectly
-    # symmetric starting point that a top-k router can only leave via the
-    # load-balancing loss. Three router trainings on one zero-init skeleton all
-    # collapsed onto a single expert, with a different winner each time.
-    # `random` seeds small noise, as Switch and Mixtral do.
-    router_init: str = "zero"
+    # zero | random. `random` is the default: it seeds small noise, as Switch
+    # and Mixtral do, because a perfectly symmetric zero-init gate collapses
+    # onto a single expert (three trainings on one zero-init skeleton did, with
+    # a different winner each time). `zero` still exists for verify_stitch's
+    # bit-equality check - "is the skeleton well-formed" - not for training.
+    router_init: str = "random"
     router_init_std: float = 0.02
     shared_expert_width: int = 1
     shared_expert_gate_fill: float = 0.02
@@ -210,13 +221,14 @@ class Router:
     anyone who wants to twiddle knobs twiddle them. Every one of these was
     hardcoded in config.build_config.
 
-    It surfaced on the first real 0.5B run. The stitch zeroes the gate by
-    construction, so the router starts at exactly uniform; the run then trained
-    it for one epoch over 800 rows at batch 1 x accum 8 - a hundred optimizer
-    steps - at 1e-4. It came out at 1.02x enrichment, which is a gate that has
-    barely left its initialisation. The single most useful experiment at that
-    point is "same stitch, more router training", and there was no way to ask
-    for it from a recipe.
+    The router's own step count is the lever that decides whether a Ms.MoE
+    actually routes. Measured on a 0.5B rung (same stitch, same experts): 150
+    steps -> 1.06x enrichment, 500 -> 1.16x, 1000 -> 1.23x, 2000 -> 1.34x, and
+    the curve was steepening, not flattening. Corpus quality, domain contrast,
+    expert strength and the aux coefficient all measured ~no effect. The
+    defaults buy 2,000 steps: router_mix_total 16,000 over batch 8 x accum 1.
+    `batch` is 8 not 1 because the load-balancing loss must see a MIXED batch
+    to mean anything - at batch 1 every batch is a single domain.
 
     `-1` means "use the default", so a recipe that does not mention this block
     behaves exactly as before.
@@ -284,6 +296,10 @@ class Recipe:
     template/tier when not provided."""
     name: str = ""
     base: str = ""
+    # auto | reasoning | nonreasoning. Whether the base is a reasoning model
+    # (thinking-token / step-by-step trace in its output). `auto` sniffs the
+    # model id; set it explicitly when the id is not a known reasoning name.
+    base_kind: str = "auto"
     experts: List[Expert] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
     size: str = "auto"
@@ -297,6 +313,9 @@ class Recipe:
     eval: EvalSpec = field(default_factory=EvalSpec)
     smoke: SmokeSpec = field(default_factory=SmokeSpec)
     template: str = ""  # optional: "code" | "dnd" | "math" | "culinary"
+    # bool | mapping. When truthy, a tools (MCP) expert is added to `experts`:
+    # `true` uses the defaults, a mapping customises name/teacher/etc.
+    tools_expert: Any = False
 
     @property
     def tokens_per_step(self) -> int:
@@ -326,9 +345,9 @@ class Recipe:
 # ── parsing ────────────────────────────────────────────────────────────────────
 
 _KNOWN_TOP = {
-    "name", "base", "experts", "schema_version", "size", "budget",
+    "name", "base", "base_kind", "experts", "schema_version", "size", "budget",
     "moe", "gates", "runtime", "roots", "corpus", "router", "eval", "smoke",
-    "template",
+    "template", "tools_expert",
 }
 
 
@@ -396,9 +415,40 @@ def parse(data: Dict[str, Any]) -> Tuple[Recipe, List[str]]:
         expert.source = _build(Source, src, f"experts[{i}].source", warnings)
         experts.append(expert)
 
+    # -- the tools (MCP) expert --------------------------------------------
+    #
+    # `tools_expert: true` is the on-ramp: it INJECTS a default tools expert so
+    # a recipe with two code experts becomes a three-expert MoE with a
+    # tool-calling specialist, no knowledge of synth plumbing required. A
+    # mapping customises it. If an expert of that name already exists it is
+    # USED (and marked as the tools expert) rather than duplicated.
+    tools_expert = data.get("tools_expert", False)
+    tools_name = ""
+    if tools_expert:
+        spec = tools_expert if isinstance(tools_expert, dict) else {}
+        tools_name = str(spec.get("name") or DEFAULT_TOOLS_EXPERT_NAME).strip()
+        if not any(e.name == tools_name for e in experts):
+            src = {"kind": "synth",
+                   "teacher": spec.get("teacher") or DEFAULT_TOOLS_EXPERT_TEACHER}
+            # `kind` is fixed to synth (a tools expert IS generated); `name` is
+            # the expert's name, not a source field. Everything else passes
+            # through so _build can warn on typos rather than drop them.
+            src.update({k: v for k, v in spec.items() if k not in ("name", "kind")})
+            experts.append(Expert(
+                name=tools_name,
+                source=_build(Source, src, "tools_expert", warnings)))
+    elif any(e.name == DEFAULT_TOOLS_EXPERT_NAME
+             and getattr(getattr(e, "source", None), "kind", "") == "synth"
+             for e in experts):
+        # Legacy: an expert literally named "agentcore" with a synth source was
+        # the tools expert before the flag existed. Honour it so existing
+        # recipes keep their meaning without requiring the flag.
+        tools_name = DEFAULT_TOOLS_EXPERT_NAME
+
     rec = Recipe(
         name=data.get("name") or "",
         base=data.get("base") or "",
+        base_kind=data.get("base_kind", "auto"),
         experts=experts,
         schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
         size=data.get("size", "auto"),
@@ -412,7 +462,12 @@ def parse(data: Dict[str, Any]) -> Tuple[Recipe, List[str]]:
         eval=_build(EvalSpec, data.get("eval") or {}, "eval", warnings),
         smoke=_build(SmokeSpec, data.get("smoke") or {}, "smoke", warnings),
         template=data.get("template", ""),
+        tools_expert=tools_expert,
     )
+    # The tools expert's NAME, as resolved by the injection above. A plain
+    # instance attribute rather than a dataclass field so recipe_id() (asdict)
+    # is not polluted with a value derivable from `experts`.
+    rec.tools_expert_name = tools_name
     # Wire template tier → runtime hardware_tier
     t = data.get("default_tier") or data.get("tier")
     if t and t in ("nano", "xavier", "spark"):
@@ -443,6 +498,10 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     if rec.schema_version != SCHEMA_VERSION:
         warns.append(f"schema_version {rec.schema_version} != {SCHEMA_VERSION} "
                      f"- fields may be read differently than you intend")
+
+    if rec.base_kind not in ("auto", "reasoning", "nonreasoning"):
+        errs.append(f"base_kind must be auto | reasoning | nonreasoning, got "
+                    f"{rec.base_kind!r}")
 
     # -- base model architecture --------------------------------------------
     #
@@ -509,6 +568,14 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             if s.kind == "stack" and s.language:
                 warns.append(f"{e.name}: source.kind=stack language {s.language!r} "
                              f"must be spelled EXACTLY as the corpus spells it")
+            if getattr(s, "reasoning", False) and s.kind != "synth":
+                # reasoning: true GENERATES reasoning traces and ignores the
+                # scraped source. Say so rather than silently not scraping.
+                warns.append(
+                    f"{e.name}: source.reasoning=true generates reasoning "
+                    f"traces, so the {s.kind!r} source is NOT collected. This "
+                    f"is the R1-distill recipe - a reasoning teacher writes "
+                    f"<think>…answer pairs for this specialist.")
             if s.kind == "synth":
                 if s.teacher:
                     small = any(t in s.teacher for t in
@@ -629,6 +696,30 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             f"corpus.max_samples ({rec.corpus.max_samples}) - the floor is "
             f"higher than the ceiling, so no scan can satisfy it")
 
+    # A MIX THE CEILING CANNOT FILL. Same family as the check above, one step
+    # further out: corpus.max_samples caps what each expert may collect, and
+    # the router later asks for its share of router_mix_total out of the
+    # `.train` split of exactly that. If the cap is below what the mix needs,
+    # the corpus stage passes, every specialist trains, and the router comes up
+    # short of quota on every expert - hours later, reported as a gate that
+    # would not learn. Refuse in two seconds on a laptop instead.
+    if rec.corpus.max_samples > 0:
+        from .config import router_doc_need
+        _mix = (rec.corpus.router_mix_total
+                if rec.corpus.router_mix_total > 0 else 16_000)
+        _frac = (rec.router.agent_mix_fraction
+                 if rec.router.agent_mix_fraction >= 0 else 0.15)
+        _need = router_doc_need(rec, _mix, _frac)
+        if _need > rec.corpus.max_samples:
+            errs.append(
+                f"corpus.max_samples ({rec.corpus.max_samples:,}) cannot feed a "
+                f"{_mix:,}-row router mix: each expert would need about "
+                f"{_need:,} collected docs so its share survives the held-out "
+                f"split. Raise corpus.max_samples to {_need:,}+, lower "
+                f"corpus.router_mix_total, or buy the same router steps more "
+                f"cheaply with router.epochs "
+                f"(steps = router_mix_total x epochs / (batch x accum)).")
+
     if rec.gates.experts not in ("auto", "cheap", "skip"):
         errs.append(f"gates.experts must be auto | cheap | skip, got "
                     f"{rec.gates.experts!r}")
@@ -651,6 +742,11 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
 
 def resolve(rec: Recipe) -> Dict[str, Any]:
     """The EFFECTIVE build — derived values made explicit."""
+    # Roots come from the real resolver, not rec.roots verbatim: the raw
+    # templates still carry "{size}", and rec.size is "auto" in any recipe that
+    # lets the tier pick. resolve_run_roots answers both at once.
+    from .config import resolve_run_roots  # lazy: keep the base import light
+    roots = resolve_run_roots(rec)
     return {
         "recipe_id": rec.recipe_id(),
         "name": rec.name,
@@ -658,6 +754,7 @@ def resolve(rec: Recipe) -> Dict[str, Any]:
         "size": rec.size,
         "experts": [e.name for e in rec.experts],
         "sources": {e.name: e.source.kind for e in rec.experts if e.source},
+        "tools_expert": getattr(rec, "tools_expert_name", ""),
         "target_steps": rec.budget.target_steps,
         "tokens_per_step": rec.tokens_per_step,
         "tokens_per_expert": rec.tokens_per_expert,
@@ -667,8 +764,8 @@ def resolve(rec: Recipe) -> Dict[str, Any]:
         "experts_per_tok": rec.moe.experts_per_tok,
         "dense_layers": rec.moe.dense_layers,
         "gates": asdict(rec.gates),
-        "data_root": rec.roots.data,
-        "output_root": rec.roots.output.replace("{size}", rec.size),
+        "data_root": roots["data"],
+        "output_root": roots["output"],
     }
 
 

@@ -9,11 +9,14 @@ seren-theatre can still tweak behaviour without editing files.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+from . import hardware
 
 
 # ── what we can actually stitch ────────────────────────────────────────────────
@@ -42,6 +45,205 @@ SUPPORTED_MOE_ARCHS: Dict[str, str] = {
 SUPPORTED_BASE_HINTS: Dict[str, str] = {
     "qwen": "qwen2",
 }
+
+# ── reasoning tag styles & families ───────────────────────────────────────────
+#
+# A TAG STYLE is the delimiter scheme a model uses to separate its thinking
+# trace from its answer; a FAMILY is a set of models that share a style. The
+# style is the key and families hang off it — the same `<think>`/`</think>`
+# pair serves DeepSeek, Qwen and OpenThink, so it is written once. Data mirrors
+# `reasoning.yaml` in the repo root of the package.
+@dataclass(frozen=True)
+class ReasoningStyle:
+    name: str
+    open: str
+    close: str
+    interwoven: bool = False   # reasoning can interleave with tool calls
+
+
+REASONING_STYLES: Dict[str, ReasoningStyle] = {
+    "xml": ReasoningStyle("Standard XML Style", "<think>", "</think>"),
+    "agentic_xml": ReasoningStyle(
+        "Interleaved Agentic XML", "<think>", "</think>", interwoven=True),
+    "markdown": ReasoningStyle("Markdown Code Fence", "```thought", "```"),
+    "llama": ReasoningStyle(
+        "System Header Identification",
+        "<|start_header_id|>thought<|end_header_id|>",
+        "<|start_header_id|>assistant<|end_header_id|>",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ReasoningFamily:
+    name: str
+    hints: Tuple[str, ...]   # model-id substrings (matched case-insensitively)
+    style: str               # key into REASONING_STYLES
+
+
+REASONING_FAMILIES: Dict[str, ReasoningFamily] = {
+    "deepseek": ReasoningFamily("DeepSeek", ("deepseek-r1", "deepseek"), "xml"),
+    "kimi": ReasoningFamily("Kimi", ("kimi", "k2", "k3"), "agentic_xml"),
+    "qwen": ReasoningFamily(
+        "Qwen", ("qwen2.5-math", "qwen2.5-instruct-cpi", "qwen3", "qwq"), "xml"),
+    "openthink": ReasoningFamily("OpenThink", ("openthink", "open-think"), "xml"),
+    "llama": ReasoningFamily("Llama", ("llama-3", "llama3"), "llama"),
+}
+
+
+def reasoning_type_of(recipe) -> str:
+    """The reasoning STYLE key a base model uses, or '' for a non-reasoning base.
+
+    base_kind=reasoning -> the family's style, else 'xml'; nonreasoning -> '';
+    auto -> sniff the id against REASONING_FAMILIES.
+    """
+    kind = getattr(recipe, "base_kind", "auto")
+    if kind == "nonreasoning":
+        return ""
+    base = (getattr(recipe, "base", "") or "").lower()
+    for fam in REASONING_FAMILIES.values():
+        if any(h in base for h in fam.hints):
+            return fam.style
+    return "xml" if kind == "reasoning" else ""
+
+
+def reasoning_style_of(recipe) -> Optional[ReasoningStyle]:
+    """The ReasoningStyle, or None for a non-reasoning base."""
+    return REASONING_STYLES.get(reasoning_type_of(recipe))
+
+
+def is_reasoning_base(recipe) -> bool:
+    """Does this recipe's base model want reasoning handling?"""
+    return reasoning_type_of(recipe) != ""
+
+
+def teacher_for(recipe, config, expert_name: str) -> str:
+    """The teacher model for one GENERATED expert (synth / tools / reasoning).
+
+    Priority: the source's `teacher` field > the reasoning default (when the
+    expert is `reasoning: true`) > the generic synth teacher. `source.teacher`
+    was declared and validated for the whole life of the synth pipeline and
+    then never read — this is the threading that makes it real.
+    """
+    for e in getattr(recipe, "experts", None) or []:
+        if getattr(e, "name", "") == expert_name:
+            src = getattr(e, "source", None)
+            t = getattr(src, "teacher", None) if src else None
+            if t:
+                return t
+            if getattr(src, "reasoning", False):
+                return config.reasoning_teacher or config.teacher_model
+            break
+    return config.teacher_model
+
+
+# ── the router's appetite, expressed in documents ──────────────────────────────
+#
+# TWO NUMBERS FOR ONE FACT, AND THEY DID NOT TALK.
+#
+# `corpus.min_samples` is a floor on COLLECTED documents per expert, checked at
+# the end of the corpus stage.  `corpus.router_mix_total` is a row count the
+# ROUTER asks for hours later, split across experts, and drawn from the `.train`
+# split ONLY - held-out has to stay held out or eval's routing probe narrows
+# without saying so (see router.train_router for the run where that bit us).
+#
+# Nothing connected them.  So a recipe could collect exactly its floor, pass
+# the corpus stage green, and then have the router come up SHORT of quota on
+# every expert - which reads as "the gate did not learn" when the truth is
+# "the gate was not fed".  That is the exact class of bug this codebase keeps
+# finding: a check that reports less than it knows.
+#
+# One fact, one place.  Derive what the mix will ask for and let it RAISE the
+# floor.  It never lowers it: a recipe that asked for more still gets more.
+TRAIN_SPLIT_SHARE = 0.9   # complement of eval.held_out_fraction's default
+ROUTER_DOC_MARGIN = 1.05  # rounding, dedupe, and the odd unparseable row
+
+
+def router_doc_need(recipe, mix_total: int, agent_fraction: float = 0.15) -> int:
+    """Documents per expert the ROUTER's mix will ask for.
+
+    Mirrors the quota arithmetic in `router.train_router` deliberately rather
+    than importing it, because that module pulls torch and this one has to stay
+    laptop-safe - `validate` runs with no GPU and no transformers installed.
+    If the quota math there changes, change it here; the two are pinned
+    together by a test.
+
+    Returns 0 when there is nothing to derive (no experts, no mix, or a build
+    whose experts are all generated), which callers treat as "no opinion".
+    """
+    try:
+        mix_total = int(mix_total)
+    except (TypeError, ValueError):
+        return 0
+    if mix_total <= 0:
+        return 0
+
+    names = [getattr(e, "name", "") for e in (getattr(recipe, "experts", None) or [])]
+    names = [n for n in names if n]
+    if not names:
+        return 0
+
+    # The tools expert takes its slice off the top, then the rest is split
+    # evenly across the remaining (collected) experts - mirroring
+    # router.train_router's quota arithmetic.
+    tools_name = tools_expert_name_of(recipe)
+    rest = float(mix_total)
+    if tools_name and tools_name in names:
+        try:
+            rest -= int(mix_total * float(agent_fraction))
+        except (TypeError, ValueError):
+            rest -= int(mix_total * 0.15)
+
+    # The tools expert is GENERATED, not collected, so the corpus floor does
+    # not govern it - only the collected experts matter here.
+    collected = [n for n in names if n != tools_name]
+    if not collected or rest <= 0:
+        return 0
+    biggest = rest / len(collected)
+
+    # The mix is drawn from `.train`, which is the complement of whatever eval
+    # holds out - so ask for the docs that make the TRAIN half big enough.
+    share = 1.0 - held_out_fraction(recipe)
+
+    return int(math.ceil(biggest / share * ROUTER_DOC_MARGIN))
+
+
+def tools_expert_name_of(recipe) -> str:
+    """The name of THE tools/MCP expert, or '' when there is none.
+
+    The `tools_expert` flag sets it during parse. This fallback covers a Recipe
+    built by hand rather than parsed: a synth expert literally named 'agentcore'
+    is still recognised, preserving the pre-flag convention.
+    """
+    name = getattr(recipe, "tools_expert_name", "")
+    if name:
+        return name
+    for e in getattr(recipe, "experts", None) or []:
+        if getattr(e, "name", "") == "agentcore" and \
+                getattr(getattr(e, "source", None), "kind", "") == "synth":
+            return "agentcore"
+    return ""
+
+
+def held_out_fraction(recipe) -> float:
+    """The eval held-out fraction, resolved and clamped in ONE place.
+
+    router_doc_need's floor math and the router's `.train` split both derive
+    from this, and they have to agree or the raised floor is a lie - a recipe
+    whose held-out fraction differs from the split the router actually trains
+    on is the exact "two numbers for one fact" failure this module exists to
+    kill. A fraction of 0.95+ leaves no train split worth training a router
+    on, so it falls back to the default, mirroring the guard that used to live
+    inline in router_doc_need.
+    """
+    held_out = getattr(getattr(recipe, "eval", None), "held_out_fraction", 0.1)
+    try:
+        held_out = float(held_out)
+    except (TypeError, ValueError):
+        return 0.1
+    if 0.0 <= held_out < 0.95:
+        return held_out
+    return 0.1
 
 
 # ── pipeline constants ─────────────────────────────────────────────────────────
@@ -101,25 +303,10 @@ DISPLAY_LANG: Dict[str, str] = {
 }
 
 
-# ── hardware tier → model hints ───────────────────────────────────────────────
-
-_TIER_HINTS: Dict[str, Dict[str, str]] = {
-    "nano": {
-        "model_prefix": "Qwen/Qwen2.5",
-        "preferred_size": "3B",
-        "quant": "Q4_K_M",
-    },
-    "xavier": {
-        "model_prefix": "Qwen/Qwen2.5",
-        "preferred_size": "7B",
-        "quant": "Q5_K_M",
-    },
-    "spark": {
-        "model_prefix": "Qwen/Qwen2.5",
-        "preferred_size": "32B",
-        "quant": "Q8_0",
-    },
-}
+# ── hardware tiers ────────────────────────────────────────────────────────────
+# The tier table lives in hardware.py and is imported, not re-declared. A copy
+# here (`_TIER_HINTS` + `_TIER_RANK`) drifted from it: xavier's default size was
+# 9B there and 7B here, and 9B is not even a MODEL_SIZES key.
 
 
 @dataclass(frozen=True)
@@ -135,6 +322,17 @@ class PipelineConfig:
     size: str
     base: str
     base_safe: str
+    # Whether the base is a reasoning model (thinking trace before answers).
+    # Resolved once from base_kind (see is_reasoning_base); downstream prompt /
+    # eval handling keys off this rather than sniffing the id again.
+    reasoning: bool = False
+    # Which reasoning CONVENTION the base uses ('' when non-reasoning). Keys
+    # into REASONING_TYPES for the delimiters eval uses to split trace/answer.
+    reasoning_type: str = ""
+    # Expert names whose source carries `reasoning: true` — these get reasoning
+    # traces GENERATED for them (force reasoning into a non-reasoning base)
+    # instead of a scraped corpus.
+    reasoning_experts: List[str] = field(default_factory=list)
     dryrun: bool = False
     force: bool = False
 
@@ -153,6 +351,10 @@ class PipelineConfig:
     # Agent data
     num_agent_samples: int = 15_000
     teacher_model: str = ""
+    # Default teacher for a `reasoning: true` expert. A small R1-distill base,
+    # because that is the proof a small non-reasoning base can be trained into
+    # a reasoner, and it runs on the same hardware tiers.
+    reasoning_teacher: str = ""
     teacher_max_memory: str = "110GiB"
     teacher_batch: int = 96
     use_vllm: bool = False
@@ -161,6 +363,8 @@ class PipelineConfig:
     vllm_max_len: int = 4096
     vllm_quantization: Optional[str] = None
     teacher_max_new: int = 224
+    # Reasoning traces need headroom for think + answer, not just a tool call.
+    reasoning_teacher_max_new: int = 1024
 
     # LoRA / fine-tuning
     max_seq_length: int = 2048
@@ -186,16 +390,26 @@ class PipelineConfig:
     warmup_steps: int = 60
 
     # Router
-    router_mix_total: int = 12_000
+    #
+    # THE LEVER. The router's own step count is what decides whether a Ms.MoE
+    # actually routes: measured on a 0.5B rung, 150 steps -> 1.06x enrichment,
+    # 500 -> 1.16x, 1000 -> 1.23x, 2000 -> 1.34x, still climbing. Corpus
+    # quality, domain contrast, expert strength and aux_loss_coef all measured
+    # ~no effect. Steps = mix_total / (batch x accum) x epochs, so the defaults
+    # below buy 2,000 steps. batch is 8 not 1 because the load-balancing loss
+    # must see a MIXED batch to mean anything - at batch 1 every batch is one
+    # domain. aux stays at Mixtral's 0.02; lowering it buys nothing and spends
+    # margin against the collapse mode.
+    router_mix_total: int = 16_000
     per_repo_cap: int = 20
-    router_init: str = "zero"
+    router_init: str = "random"
     router_init_std: float = 0.02
     seed: int = 42
     agent_mix_fraction: float = 0.15
-    router_batch: int = 1
-    router_accum: int = 8
+    router_batch: int = 8
+    router_accum: int = 1
     lr_router: float = 1e-4
-    router_aux_loss_coef: float = 0.001
+    router_aux_loss_coef: float = 0.02
     router_epochs: float = 1.0
 
     # MoE
@@ -234,8 +448,27 @@ class PipelineConfig:
     # Expert order
     expert_names: List[str] = field(default_factory=list)
 
+    # The name of the tools/MCP expert, or '' when there is none. Downstream
+    # stages ask "is this the tools expert" via this name instead of the
+    # literal 'agentcore'.
+    tools_expert_name: str = ""
+
     # Hardware tier
     tier: str = "spark"
+
+    # Eval / reporting
+    #
+    # The held-out fraction the split machinery actually uses, resolved once
+    # so the gate's held-out split, the router's `.train` split and eval's own
+    # re-split all derive from the same number (see held_out_fraction).
+    eval_held_out_fraction: float = 0.1
+
+    # True when build_config raised the corpus floor above the recipe's
+    # explicit floor to feed the router mix. Recorded, never printed here:
+    # build_config runs under --json too, where stdout belongs to the event
+    # stream and nothing else may write to it. The CLI routes it to the prose
+    # channel (see _cmd_build).
+    floor_raised: bool = False
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -257,10 +490,12 @@ def resolve_roots(size: str, dryrun: bool) -> Dict[str, str]:
     return {"data": "msmoe_data", "output": f"msmoe_run_{size}"}
 
 
-def _resolve_base(recipe, size: str, tier_name: str) -> Tuple[str, str]:
-    """Resolve (safe_base_id, abliterated_id) from recipe + tier.
+def _resolve_base(recipe, size: str) -> Tuple[str, str]:
+    """Resolve (safe_base_id, abliterated_id) from recipe + size.
 
-    Priority: explicit recipe.base > env override > tier hint > model size.
+    Priority: explicit recipe.base > env override > the size's own default.
+    The tier no longer contributes here: every tier maps to the same model
+    family, and MODEL_SIZES is the real answer for a given size.
     """
     # 1. Explicit recipe base
     if recipe.base and recipe.base.strip():
@@ -280,26 +515,22 @@ def _resolve_base(recipe, size: str, tier_name: str) -> Tuple[str, str]:
             return env_base, safe
         return ablated if ablated else env_base, safe
 
-    # 3. Tier hint → auto-select best model
-    hint = _TIER_HINTS.get(tier_name, _TIER_HINTS["spark"])
-    prefix = hint["model_prefix"]
-    base = f"{prefix}-{size}"
-    safe, ablated = MODEL_SIZES.get(size, (base, ""))
+    # 3. The size's own default (the abliterated instruct coder, when it exists)
+    fallback = f"Qwen/Qwen2.5-{size}"
+    safe, ablated = MODEL_SIZES.get(size, (fallback, ""))
     if ablated and ("abliterated" in ablated or "Instruct" in ablated):
         base_model = ablated
     else:
-        base_model = base
+        base_model = safe
     return base_model, safe
 
 
 def _resolve_size(recipe, tier_name: str) -> str:
-    """Resolve model size.  Priority: recipe.size > tier default > '3B'."""
+    """Resolve model size.  Priority: recipe.size > the tier's default."""
     recipe_size = recipe.size if recipe.size else "auto"
     if recipe_size != "auto" and recipe_size in MODEL_SIZES:
         return recipe_size
-
-    hint = _TIER_HINTS.get(tier_name, _TIER_HINTS["spark"])
-    return hint["preferred_size"]
+    return hardware.get_tier(tier_name).default_size
 
 
 def _auto_name(recipe, expert_names: List[str]) -> str:
@@ -368,14 +599,22 @@ def resolve_dryrun(dryrun: Optional[bool] = None) -> bool:
 
 
 def resolve_tier(recipe) -> str:
-    """The hardware tier this recipe will actually run at."""
-    tier_name = "spark"
+    """The hardware tier this recipe will actually run at.
+
+    Priority: recipe runtime tier > MSMOE_TIER env > the middle tier (xavier).
+    Validated against hardware.TIERS, so a typo can't silently select a bogus
+    tier. The old copy here defaulted to 'spark' with a comment calling it the
+    "middle tier" - wrong twice - and never actually used that default, because
+    the recipe dataclass already defaults to 'xavier'.
+    """
+    tier_name = hardware.resolve_tier()  # the middle tier: 'xavier'
     rt = getattr(recipe, "runtime", None)
     t = getattr(rt, "hardware_tier", "") if rt is not None else ""
-    if t and t in _TIER_HINTS:
+    if t in hardware.TIERS:
         tier_name = t
-    if os.environ.get("MSMOE_TIER", "") in _TIER_HINTS:
-        tier_name = os.environ["MSMOE_TIER"]
+    env = os.environ.get("MSMOE_TIER", "")
+    if env in hardware.TIERS:
+        tier_name = env
     return tier_name
 
 
@@ -404,24 +643,26 @@ def build_config(recipe, force: bool = False,
     """
     dryrun = resolve_dryrun(dryrun)
 
-    # Detect tier from recipe or environment
-    tier_name = "spark"  # default middle tier
-    if hasattr(recipe, 'runtime') and hasattr(recipe.runtime, 'hardware_tier'):
-        t = recipe.runtime.hardware_tier
-        if t and t in _TIER_HINTS:
-            tier_name = t
-    if os.environ.get("MSMOE_TIER", "") in _TIER_HINTS:
-        tier_name = os.environ["MSMOE_TIER"]
+    tier_name = resolve_tier(recipe)
 
     # Size — auto-resolve from tier or recipe
     size = _resolve_size(recipe, tier_name)
 
-    # Base model — resolve from recipe/tier
-    base_model, base_safe = _resolve_base(recipe, size, tier_name)
+    # Base model — resolve from recipe/size
+    base_model, base_safe = _resolve_base(recipe, size)
 
     # Name — auto from experts
     expert_names = [e.name for e in recipe.experts]
     name = _auto_name(recipe, expert_names)
+
+    # The tools/MCP expert's name, resolved once (flag, or legacy 'agentcore').
+    tools_expert_name = tools_expert_name_of(recipe)
+
+    # Experts whose source asks to have reasoning baked in (reasoning: true).
+    reasoning_experts = [
+        e.name for e in recipe.experts
+        if getattr(getattr(e, "source", None), "reasoning", False)
+    ]
 
     # Compute budgets from steps
     b = recipe.budget
@@ -469,8 +710,23 @@ def build_config(recipe, force: bool = False,
     num_code_samples = _corpus_knob("max_samples", 10_000, 100_000)
     per_repo_cap = _corpus_knob("per_repo_cap", 20, 20)
 
-    # Hardware-appropriate defaults
-    tier_spec = _TIER_HINTS.get(tier_name, _TIER_HINTS["spark"])
+    # THE COLLECTOR NOW KNOWS WHAT THE ROUTER WILL ASK FOR. See router_doc_need
+    # at the top of this module for why these two numbers had to stop being
+    # independent. The floor is the LARGER of what the recipe asked for and
+    # what the mix needs, so nobody's explicit setting gets quietly lowered.
+    _mix_total = _corpus_knob("router_mix_total", 4_000, 16_000)
+    _agent_frac = _knob(recipe.router.agent_mix_fraction, 0.15)
+    _router_docs = router_doc_need(recipe, _mix_total, _agent_frac)
+    _asked_floor = _corpus_knob("min_samples", 500, 2_000)
+    min_samples = max(_asked_floor, _router_docs)
+    # NOT PRINTED HERE. build_config runs under --json too, where stdout
+    # belongs to the event stream and nothing else may write to it. Record the
+    # fact on the config object and let the CLI route it to the prose channel
+    # (see _cmd_build), which is stderr when --json is on.
+    floor_raised = bool(_router_docs) and _router_docs > _asked_floor
+
+    # Hardware-appropriate defaults, read from hardware.py rather than a copy.
+    tier_spec = hardware.get_tier(tier_name)
 
     # LoRA params — recipe first, then env, then the hardware tier.
     #
@@ -480,20 +736,19 @@ def build_config(recipe, force: bool = False,
     # was dead in both paths and read as though target_steps drove the rank.
     # A knob that appears to do something and does not is worse than a missing
     # one - the missing one at least makes you ask.
-    _TIER_RANK = {"nano": 32, "xavier": 64, "spark": 128}
     lora_r_env = os.environ.get("MSMOE_LORA_R", "").strip()
     if recipe.budget.lora_r and recipe.budget.lora_r > 0:
         lora_r = int(recipe.budget.lora_r)
     elif lora_r_env:
         lora_r = int(lora_r_env)
     else:
-        lora_r = _TIER_RANK.get(tier_name, 64)
+        lora_r = tier_spec.default_lora_r
     lora_r = max(1, min(lora_r, 256))
     lora_alpha = _knob(recipe.budget.lora_alpha, 32)
     lora_dropout = _knob(recipe.budget.lora_dropout, 0.0)
 
     # Quantization hint from tier
-    quant = tier_spec.get("quant", "Q4_K_M")
+    quant = tier_spec.default_quant
     load_4bit = quant in ("Q4_K_M", "Q4_0", "Q4_1") if tier_name == "nano" else False
 
     # Unsoth / vLLM
@@ -539,11 +794,18 @@ def build_config(recipe, force: bool = False,
     # Compute roots
     roots = resolve_roots(size, dryrun)
 
+    # Resolve the held-out fraction once, so the gate's held-out split and the
+    # router's `.train` split derive from the same number as eval's.
+    eval_held_out_fraction = held_out_fraction(recipe)
+
     return PipelineConfig(
         name=name,
         size=size,
         base=base_model,
         base_safe=base_safe,
+        reasoning=is_reasoning_base(recipe),
+        reasoning_type=reasoning_type_of(recipe),
+        reasoning_experts=reasoning_experts,
         dryrun=dryrun,
         force=force,
         data_root=roots["data"],
@@ -552,7 +814,7 @@ def build_config(recipe, force: bool = False,
         num_code_samples=num_code_samples,
         collect_token_target=collect_token_target,
         chars_per_token_est=3.2,
-        min_samples_per_expert=_corpus_knob("min_samples", 500, 2_000),
+        min_samples_per_expert=min_samples,
         max_shards=_corpus_knob("max_shards", 80, 80),
         shard_cache="shard_cache",
         # Agent data
@@ -560,6 +822,10 @@ def build_config(recipe, force: bool = False,
         teacher_model=(
             "Qwen/Qwen2.5-7B-Instruct" if dryrun
             else "Qwen/Qwen2.5-32B-Instruct"
+        ),
+        reasoning_teacher=(
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" if dryrun
+            else "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
         ),
         teacher_max_memory="110GiB",
         teacher_batch=(96 if not use_vllm else 512),
@@ -591,16 +857,16 @@ def build_config(recipe, force: bool = False,
         warmup_steps=warmup_steps,
         # Router
         per_repo_cap=per_repo_cap,
-        router_mix_total=_corpus_knob("router_mix_total", 4_000, 12_000),
+        router_mix_total=_mix_total,
         agent_mix_fraction=_knob(recipe.router.agent_mix_fraction, 0.15),
         # RECIPE FIRST, DEFAULT SECOND. `-1` means "you pick", which is how a
         # recipe that says nothing about the router keeps the old behaviour
         # exactly. See recipe.Router for why these stopped being hardcoded.
-        router_batch=_knob(recipe.router.batch, 1),
-        router_accum=_knob(recipe.router.accum, 8),
+        router_batch=_knob(recipe.router.batch, 8),
+        router_accum=_knob(recipe.router.accum, 1),
         router_epochs=_knob(recipe.router.epochs, 1.0),
         lr_router=_knob(recipe.router.lr, 1e-4),
-        router_aux_loss_coef=_knob(recipe.router.aux_loss_coef, 0.001),
+        router_aux_loss_coef=_knob(recipe.router.aux_loss_coef, 0.02),
         # MoE
         experts_per_tok=recipe.moe.experts_per_tok,
         norm_topk_prob=recipe.moe.norm_topk_prob,
@@ -619,6 +885,10 @@ def build_config(recipe, force: bool = False,
         hf_home=hf_home_override,
         # Prompts
         expert_names=expert_names,
+        tools_expert_name=tools_expert_name,
+        # Eval / reporting
+        eval_held_out_fraction=eval_held_out_fraction,
+        floor_raised=floor_raised,
         # Tier
         tier=tier_name,
     )
