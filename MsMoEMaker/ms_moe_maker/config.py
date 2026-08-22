@@ -313,30 +313,34 @@ def held_out_fraction(recipe) -> float:
 # ── pipeline constants ─────────────────────────────────────────────────────────
 
 MODEL_SIZES: Dict[str, Tuple[str, str]] = {
-    "0.5B": (
-        "Qwen/Qwen2.5-Coder-0.5B",
-        "huihui-ai/Qwen2.5-0.5B-Instruct-abliterated-v3",
-    ),
-    "1.5B": (
-        "Qwen/Qwen2.5-Coder-1.5B",
-        "huihui-ai/Qwen2.5-Coder-1.5B-Instruct-abliterated",
-    ),
-    "3B": (
-        "Qwen/Qwen2.5-Coder-3B",
-        "huihui-ai/Qwen2.5-3B-Instruct-abliterated-SFT",
-    ),
-    "7B": (
-        "Qwen/Qwen2.5-Coder-7B",
-        "huihui-ai/Qwen2.5-7B-Instruct-abliterated-v2",
-    ),
-    "14B": (
-        "Qwen/Qwen2.5-Coder-14B",
-        "huihui-ai/Qwen2.5-Coder-14B-Instruct-abliterated",
-    ),
-    "32B": (
-        "Qwen/Qwen2.5-Coder-32B",
-        "huihui-ai/Qwen2.5-32B-Instruct-abliterated",
-    ),
+    # (safe base, instruct/abliterated variant).
+    #
+    # THESE WERE huihui-ai's ABLITERATED CODER MODELS AND THE FAMILY IS GONE.
+    # Deleted upstream, not gated: only the 32B survives, and the smaller ones
+    # exist solely as third-party GGUF/AWQ mirrors of weights that no longer
+    # have a home. A build that had worked for months died at preflight with a
+    # 404 - which reads exactly like a bad credential, because
+    # huggingface_hub raises RepositoryNotFoundError for "gone" AND for "not
+    # allowed". Verify the client before you believe the table is wrong; then
+    # verify the table before you believe the client.
+    #
+    # The default is now the OFFICIAL Qwen Coder instruct line. It exists at
+    # every size, it is maintained, and it is code-specialised - which is the
+    # thing this tool is for. Abliteration bought refusal-free generation,
+    # which matters to a companion and almost not at all to a specialist that
+    # gets LoRA-tuned on code immediately afterwards; trading Coder for
+    # general to keep it gives up the point to keep the garnish.
+    #
+    # Want different weights? `models:` in ~/.msmoe/defaults.yaml overrides any
+    # of these per box, including local paths - see mirror_bases.py, which
+    # mirrors whatever you depend on and prints the block for you. That is the
+    # actual fix for "somebody deleted my base model".
+    "0.5B": ("Qwen/Qwen2.5-Coder-0.5B", "Qwen/Qwen2.5-Coder-0.5B-Instruct"),
+    "1.5B": ("Qwen/Qwen2.5-Coder-1.5B", "Qwen/Qwen2.5-Coder-1.5B-Instruct"),
+    "3B":   ("Qwen/Qwen2.5-Coder-3B",   "Qwen/Qwen2.5-Coder-3B-Instruct"),
+    "7B":   ("Qwen/Qwen2.5-Coder-7B",   "Qwen/Qwen2.5-Coder-7B-Instruct"),
+    "14B":  ("Qwen/Qwen2.5-Coder-14B",  "Qwen/Qwen2.5-Coder-14B-Instruct"),
+    "32B":  ("Qwen/Qwen2.5-Coder-32B",  "Qwen/Qwen2.5-Coder-32B-Instruct"),
 }
 
 CODE_LANGUAGES: List[str] = ["Python", "C#", "PowerShell", "Shell"]
