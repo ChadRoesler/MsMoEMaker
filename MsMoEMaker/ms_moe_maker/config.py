@@ -315,27 +315,27 @@ def held_out_fraction(recipe) -> float:
 MODEL_SIZES: Dict[str, Tuple[str, str]] = {
     "0.5B": (
         "Qwen/Qwen2.5-Coder-0.5B",
-        "huihui-ai/Qwen2.5-Coder-0.5B-Instruct-abliterated",
+        "Qwen/Qwen2.5-Coder-0.5B-Instruct",
     ),
     "1.5B": (
         "Qwen/Qwen2.5-Coder-1.5B",
-        "huihui-ai/Qwen2.5-Coder-1.5B-Instruct-abliterated",
+        "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     ),
     "3B": (
         "Qwen/Qwen2.5-Coder-3B",
-        "huihui-ai/Qwen2.5-Coder-3B-Instruct-abliterated",
+        "Qwen/Qwen2.5-Coder-3B-Instruct",
     ),
     "7B": (
         "Qwen/Qwen2.5-Coder-7B",
-        "huihui-ai/Qwen2.5-Coder-7B-Instruct-abliterated",
+        "Qwen/Qwen2.5-Coder-7B-Instruct",
     ),
     "14B": (
         "Qwen/Qwen2.5-Coder-14B",
-        "huihui-ai/Qwen2.5-Coder-14B-Instruct-abliterated",
+        "Qwen/Qwen2.5-Coder-14B-Instruct",
     ),
     "32B": (
         "Qwen/Qwen2.5-Coder-32B",
-        "huihui-ai/Qwen2.5-Coder-32B-Instruct-abliterated",
+        "Qwen/Qwen2.5-Coder-32B-Instruct",
     ),
 }
 
