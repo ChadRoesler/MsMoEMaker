@@ -21,10 +21,35 @@ class TestModelSizes:
             assert isinstance(pairs[0], str)
             assert isinstance(pairs[1], str)
 
-    def test_0_5B_correct_bases(self):
-        base, abliterated = config.MODEL_SIZES["0.5B"]
-        assert "Qwen2.5-Coder-0.5B" in base
-        assert "abliterated" in abliterated
+    def test_every_pair_describes_one_model_at_one_size(self):
+        """THE INVARIANT, NOT THE CHECKPOINT'S NAME.
+
+        This was `assert "abliterated" in abliterated`, which pinned a WORD IN
+        A FILENAME - so it snapped when the abliterated family was deleted
+        upstream and the table had to move, while saying nothing about the
+        thing that actually goes wrong.
+
+        What actually goes wrong is a MISMATCHED PAIR. The two halves are the
+        same model at the same size: one plain, one instruct/abliterated. Mix
+        them - a Coder base beside a general instruct variant, or a 0.5B beside
+        a 1.5B - and the build trains adapters against one model while
+        `base_safe` records another, which nothing downstream would notice.
+        That is the failure worth a test, and it covers every size instead of
+        one.
+        """
+        for size, (safe, variant) in config.MODEL_SIZES.items():
+            assert safe and variant, f"{size}: an empty half"
+            # both halves name THIS size
+            assert size.rstrip("B") in safe.replace("B", ""), \
+                f"{size}: safe half {safe!r} does not name the size"
+            assert size.rstrip("B") in variant.replace("B", ""), \
+                f"{size}: variant {variant!r} does not name the size"
+            # and they are the same model: the variant carries the safe id's
+            # own name, not a different family's
+            stem = safe.split("/")[-1]
+            assert stem in variant, (
+                f"{size}: {safe!r} and {variant!r} are different models. The "
+                f"pair is one model in two flavours, not two models.")
 
 
 class TestCodeLanguages:
@@ -235,9 +260,28 @@ class TestBuildConfig:
         )
         pc = config.build_config(recipe)
         assert pc.size == "0.5B"
-        assert "Qwen2.5-Coder-0.5B" in pc.base
-        assert "abliterated" in pc.base
-        assert "Qwen2.5-Coder-0.5B" in pc.base_safe
+
+        # THE DERIVATION, NOT THE CHECKPOINT'S NAME.
+        #
+        # This used to be `assert "Qwen2.5-Coder-0.5B" in pc.base`, which is a
+        # magic string standing in for an intention - the same shape as the
+        # `assert c.num_code_samples == 3000` that got replaced with an
+        # assertion about minutes. It snapped the day the 0.5B table entry
+        # changed, which is a TABLE edit, not a resolution bug: the behaviour
+        # under test never moved.
+        #
+        # What this test is actually for is the RESOLUTION: a size resolves to
+        # that size's entry, and an explicit `base:` that names neither an
+        # instruct nor an abliterated model gets SUBSTITUTED for the table's
+        # variant. Assert those, and swapping a checkpoint stops being a test
+        # failure while breaking the resolution still is.
+        safe, ablated = config.model_sizes(recipe)["0.5B"]
+        assert pc.base == ablated
+        assert pc.base_safe == safe
+        assert pc.base != recipe.base, (
+            "an explicit base that names neither instruct nor abliterated is "
+            "substituted for the table's variant - see recipe.validate, which "
+            "warns about exactly this")
 
     def test_build_config_sets_data_and_output_roots(self):
         from ms_moe_maker.recipe import Recipe, Expert, Source
