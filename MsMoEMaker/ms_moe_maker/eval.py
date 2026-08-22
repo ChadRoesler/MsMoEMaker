@@ -1527,8 +1527,10 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     if do_quality:
         from .config import REASONING_STYLES
         # Non-reasoning base → None (score the whole output). Reasoning base →
-        # the style whose delimiters split trace from answer.
-        reasoning_style = REASONING_STYLES.get(config.reasoning_type)
+        # the style whose delimiters split trace from answer. getattr so a
+        # minimal config (test double, or a hand-built one) still works.
+        reasoning_style = REASONING_STYLES.get(
+            getattr(config, "reasoning_type", ""))
 
         # ONE MODEL IN MEMORY AT A TIME, AND THE MoE LOADED ONCE.
         #
