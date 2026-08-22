@@ -228,6 +228,22 @@ jobs:
           assert any("torch" in r for r in train_reqs), (
               f"[train] does not declare torch: {train_reqs}")
 
+          # THE TABLE HAS TO SHIP. ms_moe_maker/defaults.yaml is the real
+          # defaults table — the Python FLOOR is only a panic minimum — so a
+          # wheel without it behaves differently from a checkout, quietly.
+          import pathlib, ms_moe_maker
+          _d = pathlib.Path(ms_moe_maker.__file__).parent / "defaults.yaml"
+          assert _d.is_file(), (
+              f"defaults.yaml missing from the installed package ({_d}). "
+              f"Check [tool.setuptools.package-data] in pyproject.toml.")
+          from ms_moe_maker import defaults as _defmod
+          _resolved, _, _warns = _defmod.resolve(include_user=False)
+          assert not _warns, f"packaged defaults.yaml does not parse clean: {_warns}"
+          for _blk, _vals in _defmod.FLOOR.items():
+              for _k, _v in _vals.items():
+                  assert _resolved[_blk][_k] == _v, (
+                      f"{_blk}.{_k}: floor and packaged defaults.yaml disagree")
+
           # THE THIRD TIER, WHICH IS FREE AND WORTH KEEPING. export and smoke
           # shell out to llama.cpp and import nothing but stdlib, so somebody
           # handed a finished MoE can convert it and PROVE IT GENERATES on a

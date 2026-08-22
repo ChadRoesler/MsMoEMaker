@@ -133,6 +133,23 @@ class Manifest:
     # just printed to a log, because the person reading the dashboard six hours
     # later is exactly who needs to know a lever was ignored. See levers.py.
     refusals: List[str] = field(default_factory=list)
+    # WHAT THIS RUN ACTUALLY BUILT, not what its recipe said.
+    #
+    # `recipe_id` excludes runtime and has never identified a build; once the
+    # defaults layer arrived, the values that decide what gets trained can
+    # legitimately live in a file the recipe never mentions. These three make a
+    # resumed run answerable:
+    #
+    #   build_id       digest of the resolved config (config.build_id)
+    #   resolved       the fingerprint itself, so a drifted resume can say
+    #                  WHICH field moved instead of only that one did
+    #   defaults_files {path: sha256[:12]} for each file that contributed
+    #
+    # Additive, so no schema bump: this format has an independent reader in
+    # seren-theatre and unknown keys already fall through to `extra`.
+    build_id: str = ""
+    resolved: Dict[str, Any] = field(default_factory=dict)
+    defaults_files: Dict[str, str] = field(default_factory=dict)
     # Anything a future ms-moe-maker adds that this reader does not know about.
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -213,6 +230,9 @@ def write(run_dir: Path, manifest: Manifest) -> Path:
         "finished": manifest.finished,
         "ok": manifest.ok,
         "refusals": list(manifest.refusals),
+        "build_id": manifest.build_id,
+        "resolved": dict(manifest.resolved),
+        "defaults_files": dict(manifest.defaults_files),
         "stages": [asdict(s) for s in manifest.stages],
     }
     payload.update(manifest.extra)
@@ -259,7 +279,8 @@ def read(run_dir: Path) -> Optional[Manifest]:
             f"understands ({SCHEMA_VERSION}). Upgrade the reader rather than "
             f"guessing at fields it has never seen.")
 
-    known = {"schema_version", "recipe_id", "name", "size", "base", "experts",
+    known = {"build_id", "resolved", "defaults_files",
+             "schema_version", "recipe_id", "name", "size", "base", "experts",
              "started", "updated", "finished", "ok", "refusals", "stages"}
 
     stages: List[Stage] = []
@@ -293,5 +314,9 @@ def read(run_dir: Path) -> Optional[Manifest]:
         ok=raw.get("ok"),
         stages=stages,
         refusals=[str(r) for r in (raw.get("refusals") or [])],
+        build_id=str(raw.get("build_id") or ""),
+        resolved=raw.get("resolved") if isinstance(raw.get("resolved"), dict) else {},
+        defaults_files=(raw.get("defaults_files")
+                        if isinstance(raw.get("defaults_files"), dict) else {}),
         extra={k: v for k, v in raw.items() if k not in known},
     )

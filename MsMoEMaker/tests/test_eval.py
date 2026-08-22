@@ -312,6 +312,33 @@ class TestRunEval:
         report = run_eval(cfg, spec={"mode": "quality"})
         assert any("dead-expert check" in u for u in report.unmeasured)
 
+    def test_a_reasoning_experts_corpus_is_found(self, tmp_path):
+        """THE EXPERT THAT VANISHED.
+
+        `reasoning: true` writes `<name>_reasoning.jsonl`, not `<name>.jsonl`.
+        eval re-derived the expert name from the filename and stripped only
+        `_code`, so the expert resolved as "math_reasoning", matched nothing in
+        expert_names, and disappeared from every table with no note anywhere.
+        """
+        data = tmp_path / "data"; out = tmp_path / "out"
+        data.mkdir(); out.mkdir()
+        rows = "\n".join(json.dumps({"prompt": f"q{i}", "answer": f"a{i}",
+                                     "text": f"body {i}"}) for i in range(10))
+        (data / "python_code.jsonl").write_text(rows + "\n", encoding="utf-8")
+        (data / "math_reasoning.jsonl").write_text(rows + "\n", encoding="utf-8")
+        cfg = _Cfg(str(data), str(out), ["python", "math"])
+        report = run_eval(cfg, spec={"mode": "quality"})
+        assert "math" in report.stages, (
+            f"reasoning expert dropped; stages={list(report.stages)}")
+        assert not any("corpus/math" in u for u in report.unmeasured)
+
+    def test_a_named_expert_with_no_corpus_is_stated_not_skipped(self, tmp_path):
+        """Silence is signal. A narrowed test has to say it narrowed."""
+        cfg = _cfg(tmp_path, with_data=True)
+        cfg.expert_names = list(cfg.expert_names) + ["ghost"]
+        report = run_eval(cfg, spec={"mode": "quality"})
+        assert any("corpus/ghost" in u for u in report.unmeasured), report.unmeasured
+
     def test_custom_script_missing_is_refused(self, tmp_path):
         cfg = _cfg(tmp_path, with_data=True)
         report = run_eval(cfg, spec={"script": str(tmp_path / "nope.py")})
@@ -325,6 +352,10 @@ class _Cfg:
         self.output_root = output_root
         self.expert_names = expert_names
         self.base = base
+        # run_eval reads these off the config; PipelineConfig declares them, so
+        # the stub has to as well or the test asserts a shape nothing ships.
+        self.reasoning_type = ""
+        self.reasoning_experts = []
 
 
 def _cfg(tmp_path, with_data=False):

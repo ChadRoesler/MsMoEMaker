@@ -1,0 +1,51 @@
+# Ms.MoE Maker — shipped defaults.
+#
+# THIS FILE IS A RECIPE WITH NO EXPERTS. Same keys, same `-1` sentinels, same
+# typo warnings. Anything you can write in a recipe's `budget:` / `corpus:` /
+# `router:` blocks you can write here, and every recipe on this box inherits
+# it without saying a word.
+#
+# Copy it to ~/.msmoe/defaults.yaml and edit that instead — setting a machine
+# up for someone else is exactly what this is for. Point at a third file with
+# `--defaults <path>` when you need to reproduce a run that was not made here.
+#
+# Precedence: floor -> this file -> ~/.msmoe/defaults.yaml -> --defaults -> recipe.
+# `-1` anywhere means "you decide", so the layer below shows through.
+#
+# `experts:`, `name:` and `template:` are NOT accepted here. Those describe one
+# build, not a box.
+
+# The tools (MCP) expert that `tools_expert: true` injects.
+tools_expert:
+  name: agentcore
+  teacher: Qwen/Qwen2.5-7B-Instruct
+  # Traces to generate. -1 keeps the pipeline's own budget.
+  examples: -1
+
+# ── THE BOX ITSELF ────────────────────────────────────────────────────────────
+# `tiers:` and `models:` are box-only. A recipe may NAME a tier; it may not
+# redefine one, or the same recipe would describe different hardware depending
+# on who ran it. Both are commented out here — the built-in table is the floor.
+#
+# Redefine a tier, or add one. `like:` inherits an existing tier so you change
+# two fields instead of restating nine:
+#
+# tiers:
+#   spark:
+#     default_size: 14B          # this box would rather not reach for 32B
+#     default_lora_r: 96
+#   orin_agx:                    # a tier the tool has never heard of
+#     like: spark
+#     max_vram_gb: 64
+#     default_size: 7B
+#     default_quant: Q5_K_M
+#
+# Point a size at a different checkpoint — a local mirror, or a house
+# preference. A bare string means "this size is this model"; the mapping form
+# sets the base and the abliterated/instruct variant separately.
+#
+# models:
+#   "0.5B": D:/models/Qwen2.5-Coder-0.5B-Instruct
+#   "7B":
+#     safe: Qwen/Qwen2.5-Coder-7B
+#     abliterated: huihui-ai/Qwen2.5-Coder-7B-Instruct-abliterated

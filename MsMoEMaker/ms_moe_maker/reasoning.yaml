@@ -1,0 +1,89 @@
+# Ms.MoE Maker — reasoning tag styles and model families.
+#
+# A LIVING TABLE. A wrong tag style is a silent wrong answer, not a crash: the
+# splitter finds no delimiters, reports "did not reason", and the whole think
+# block gets scored as if it were the answer. So when a new model family ships
+# a new delimiter, you should be able to drop a yaml on the box and carry on
+# rather than wait for a release.
+#
+# Copy this to ~/.msmoe/reasoning.yaml and edit that (or point $MSMOE_REASONING
+# at a file). Layers merge BY NAME, later wins — adding one family never costs
+# you the other four.
+#
+# `Key` is the stable id the pipeline stores and fingerprints. `TagStyleName`
+# is for humans. `PreferredStyle` may name either.
+#
+# Model names are matched loosely: case, spaces, dots and hyphens are all
+# ignored on both sides, so you can write what is on the model card and it will
+# match "meta-llama/Llama-3.1-8B-Instruct". The LONGEST matching name wins, so
+# the answer never depends on the order of this file.
+
+TagStyles:
+  - Key: xml
+    TagStyleName: Standard XML Style
+    OpeningTag: "<think>"
+    ClosingTag: "</think>"
+    Interwoven: false
+
+  - Key: agentic_xml
+    TagStyleName: Interleaved Agentic XML
+    OpeningTag: "<think>"
+    ClosingTag: "</think>"
+    # Reasoning interleaves with tool calls: many blocks per turn. The splitter
+    # strips them ALL — taking only the first would leave later think blocks
+    # inside the thing being scored.
+    Interwoven: true
+
+  - Key: markdown
+    TagStyleName: Markdown Code Fence
+    OpeningTag: "```thought"
+    ClosingTag: "```"
+    Interwoven: false
+
+  - Key: llama
+    TagStyleName: System Header Identification
+    OpeningTag: "<|start_header_id|>thought<|end_header_id|>"
+    ClosingTag: "<|start_header_id|>assistant<|end_header_id|>"
+    Interwoven: false
+
+Families:
+  - Key: deepseek
+    FamilyName: DeepSeek Family
+    Models:
+      - DeepSeek-R1
+      - DeepSeek V4
+      - deepseek
+    PreferredStyle: xml
+
+  - Key: kimi
+    FamilyName: Kimi Family
+    Models:
+      - Kimi K2
+      - Kimi K3
+      - kimi
+    PreferredStyle: agentic_xml
+
+  - Key: qwen
+    FamilyName: Qwen Family
+    Models:
+      - Qwen2.5-Math
+      - Qwen2.5-Instruct-CPI
+      - Qwen3
+      - QwQ
+    PreferredStyle: xml
+
+  - Key: openthink
+    FamilyName: OpenThink Family
+    Models:
+      - OpenThink-Qwen
+      - OpenThink-Llama
+      - open-think
+    PreferredStyle: xml
+
+  - Key: llama
+    FamilyName: Llama Base Family
+    Models:
+      - Llama 3.1
+      - Llama 3.2
+      - Llama 3.3
+    PreferredStyle: llama

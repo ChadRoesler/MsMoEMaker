@@ -155,6 +155,155 @@ can tell which of the two you are about to start.
 
 See `recipe.flow-0.5B.yaml` for a complete worked example.
 
+### Defaults, and setting a box up for someone else
+
+Every knob below has a default. Those defaults live in a **file**, not in the
+code, so you can configure a machine once — for yourself, or for someone you're
+handing it to — and every recipe on that box inherits it without saying a word.
+
+A defaults file is just **a recipe with no experts**. Same keys, same blocks,
+same `-1` sentinels, same typo warnings. Anything you can write in a recipe's
+`budget:` / `corpus:` / `router:` blocks, you can write here.
+
+Start from a commented starter rather than from memory:
+
+```bash
+ms-moe-maker init --defaults-template          # writes ~/.msmoe/defaults.yaml
+ms-moe-maker init --defaults-template --output -   # or just look at it
+```
+
+```yaml
+# ~/.msmoe/defaults.yaml — the box, set up once
+budget:  { target_steps: 400 }
+corpus:  { max_samples: 9000, router_mix_total: 8000 }
+tools_expert: { teacher: Qwen/Qwen2.5-7B-Instruct }
+```
+
+```yaml
+# and then this is a whole recipe
+schema_version: 1
+name: sister-moe
+size: 0.5B
+tools_expert: true
+experts:
+  - name: python
+    source: { kind: stack, language: Python }
+  - name: markdown
+    source: { kind: stack, language: Markdown }
+```
+
+Layers, later wins — and **the recipe always wins**:
+
+| | where | |
+|---|---|---|
+| 1 | built in | a floor that can never be missing, so the tool always runs |
+| 2 | `<package>/defaults.yaml` | what ships |
+| 3 | `~/.msmoe/defaults.yaml` | **the file you edit for someone else** (or `$MSMOE_DEFAULTS`) |
+| 4 | `--defaults PATH` | explicit, for CI and for reproducing someone else's run |
+| 5 | the recipe | always |
+
+`-1` still means "you decide" at every layer, so it falls through instead of
+overwriting the layer below.
+
+`experts:`, `name:` and `template:` are **not** accepted in a defaults file.
+Those describe one build, not a box.
+
+#### Your hardware, and your checkpoints
+
+Two blocks are the other way round — **box only**. A recipe may *name* a tier;
+it may not redefine one, or the same recipe would mean different hardware
+depending on who ran it.
+
+```yaml
+tiers:
+  spark:
+    default_size: 14B        # this box would rather not reach for 32B
+    default_lora_r: 96
+  orin_agx:                  # a tier the tool has never heard of
+    like: spark              # inherit the rest, change three things
+    max_vram_gb: 64
+    default_size: 7B
+    default_quant: Q5_K_M
+
+models:
+  "0.5B": D:/models/Qwen2.5-Coder-0.5B-Instruct   # a local mirror
+  "7B":
+    safe: Qwen/Qwen2.5-Coder-7B
+    abliterated: huihui-ai/Qwen2.5-Coder-7B-Instruct-abliterated
+```
+
+Adding hardware is the normal case, not the exotic one, so an unknown tier name
+is *created*, not refused. It needs either every field or a `like:` to inherit
+from — and if it's missing something, the run says which. Nothing here raises:
+a bad tier, an unknown field, a `like:` pointing at nothing, or a recipe asking
+for a tier this box doesn't have all come back as warnings.
+
+`--describe` reports the tiers **this install** actually offers, so a
+`ms-moe-maker build --plan` tells you what your tier means here:
+
+```
+Ms.MoE — sister-moe  size=7B  tier=orin_agx
+  tier     orin_agx: 64 GB, default 7B, lora_r 96, Q5_K_M
+  base     /mnt/models/Qwen2.5-Coder-7B-Instruct-abliterated
+```
+
+**Where did that number come from?** `validate` and `build --plan` print every
+value that came from outside the recipe, and name the file:
+
+```
+DEFAULTS (5 from outside the recipe):
+  budget.target_steps      <- ~/.msmoe/defaults.yaml
+  corpus.max_samples       <- ~/.msmoe/defaults.yaml
+  tools_expert.teacher     <- ~/.msmoe/defaults.yaml
+```
+
+#### Two ids, because there are two questions
+
+Because defaults live on the box, a recipe on its own no longer fully determines
+a build. So there are two ids and they mean different things:
+
+| | answers |
+|---|---|
+| `recipe_id` | is this the recipe you sent me? |
+| `build_id` | will my machine build what yours did? |
+
+Both print in `validate` and `build --plan`. `recipe_id` is the recipe **as
+written** — it does not move when you change your box.
+
+The run manifest records the `build_id`, the whole resolved configuration, and a
+hash of every defaults file that contributed. That is what lets a resumed build
+notice it is not the same build:
+
+```
+REFUSING TO RESUME: this run directory was built by a different build.
+2 stage(s) already finished and would be kept as-is: data.corpus, finetune.python
+
+What changed:
+  · target_steps: 400 -> 1200
+  · defaults file box.yaml: 4d38202c5581 -> 22de8b740060
+
+Pick one:
+  --force                 rebuild everything with the new settings
+  --defaults <the old file>   reproduce the original build
+  build somewhere else    change roots.output, keep both
+```
+
+Without that, changing a knob halfway through a build gives you a model whose
+specialists were trained differently from each other — silently, because
+finished stages skip themselves. It only refuses when something is already
+finished and would be inherited; a fresh directory just gets restamped.
+
+Pass `--defaults` when you need two machines to agree, and read the provenance
+block when they don't.
+
+`ms-moe-maker --describe` reports what a box presets — the layers, whether each
+is present, its hash, and which key came from which file — so a front-end can
+show a machine's configuration without re-implementing the merge. Under
+`--json`, `validate` and `build` emit a `defaults` event carrying the same
+provenance.
+
+The full design and roadmap live in [`docs/DEFAULTS.md`](docs/DEFAULTS.md).
+
 ### Every knob, and what actually moves
 
 Everything below is optional. A recipe with nothing but `experts:` builds.
@@ -472,10 +621,46 @@ experts:
 The default reasoning teacher is `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`
 (`-1.5B` on a dryrun); set `teacher:` on the source to override it.
 
-**The reasoning families** (from `reasoning.yaml`): DeepSeek, Qwen, OpenThink →
-Standard XML (`<think>`…`</think>`); Kimi → Interleaved Agentic XML; Llama →
-system-header tags. Eval scores the *answer* after the close tag, and reports
-separately how often the model actually emitted a think block.
+#### The tag table is a file, on purpose
+
+**The families that ship**: DeepSeek, Qwen, OpenThink → Standard XML
+(`<think>`…`</think>`); Kimi → Interleaved Agentic XML; Llama → system-header
+tags. Eval scores the *answer*, and reports separately how often the model
+actually emitted a think block.
+
+A **wrong tag style is a silent wrong answer, not a crash.** The splitter finds
+no delimiters, reports "did not reason", and the whole think block gets scored
+as if it were the answer. So when a new model family ships a new delimiter, you
+should not have to wait for a release — drop a file:
+
+```yaml
+# ~/.msmoe/reasoning.yaml   (or point $MSMOE_REASONING at one)
+Families:
+  - Key: acme
+    FamilyName: Acme Thinkers
+    Models: [Acme-R2, acme-thinker]     # write what's on the model card
+    PreferredStyle: xml
+```
+
+Layers merge **by name** — adding one family never costs you the other four —
+and model names match loosely: case, spaces, dots and hyphens are ignored on
+both sides, so `Llama 3.1` matches `meta-llama/Llama-3.1-8B-Instruct`. The
+*longest* matching name wins, so the answer never depends on the order of the
+file.
+
+And because the two cases look identical from the outside, eval says so rather
+than guessing:
+
+```
+almost nothing emitted a think block, and this run expected '<think>'…'</think>'.
+That is either a model that does not reason or the WRONG TAG STYLE - the two
+look identical from here, and every quality score above includes the trace if
+it is the second.
+```
+
+The tags a run writes are stamped into its resolved config and carried, so eval
+splits with exactly the delimiters the generator used — and editing your table
+correctly changes the `build_id`.
 
 ## Where llama.cpp lives
 

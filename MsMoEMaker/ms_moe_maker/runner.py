@@ -185,6 +185,19 @@ class Runner:
             stages=[mf.Stage(id=sid, label=label)
                     for sid, label in st.plan(experts, synth, gates=False)],
         )
+        # WHAT THIS RUN IS BUILDING, stamped before a single stage runs.
+        # Best-effort: a fingerprint that cannot be computed must not take a
+        # build down, it just costs the drift check.
+        try:
+            from . import config as _cfg_mod
+            _c = _cfg_mod.build_config(recipe, dryrun=bool(self.dryrun))
+            self.manifest.resolved = _cfg_mod.build_fingerprint(_c)
+            self.manifest.build_id = _cfg_mod.build_id(_c)
+        except Exception:
+            pass
+        self.manifest.defaults_files = dict(
+            getattr(recipe, "defaults_digests", None) or {})
+        self._drift: List[str] = []
         self._current: Optional[str] = None
         self._missing_module: Optional[str] = None
 
@@ -242,6 +255,50 @@ class Runner:
             self._current = None
 
     # -- the run ------------------------------------------------------------
+
+    # -- resume safety -------------------------------------------------------
+
+    def drift(self):
+        """(changed_fields, finished_stage_ids) if this run dir was built by a
+        DIFFERENT build, else ([], []).
+
+        THE FAILURE THIS EXISTS FOR. Stages self-skip on artifacts found on
+        disk. So: build with target_steps 400, stop halfway, edit the number -
+        in the recipe, or now just as easily in a defaults file the recipe
+        never mentions - and resume. The finished expert is SKIPPED at 400, the
+        rest train at 1200, and the result is a model whose specialists were
+        not trained the same way, with nothing anywhere saying so.
+
+        A recipe edit at least leaves a diff you made on purpose. A defaults
+        edit is a file three directories away that another person may have
+        changed. Same class of bug, much easier to hit, so the check is worth
+        more than it costs.
+        """
+        if not self.manifest.build_id:
+            return [], []
+        try:
+            prev = mf.read(self.run_dir)
+        except Exception:
+            return [], []
+        if prev is None or not prev.build_id:
+            return [], []
+        if prev.build_id == self.manifest.build_id:
+            return [], []
+        finished = [s.id for s in prev.stages if s.status in (mf.DONE, mf.SKIPPED)]
+        try:
+            from .config import fingerprint_diff
+            changed = [f"{k}: {was!r} -> {now!r}"
+                       for k, was, now in fingerprint_diff(
+                           prev.resolved or {}, self.manifest.resolved or {})]
+        except Exception:
+            changed = ["(the previous manifest recorded no resolved config)"]
+        if not changed:
+            changed = [f"build_id {prev.build_id} -> {self.manifest.build_id}"]
+        for path, digest in (prev.defaults_files or {}).items():
+            now = (self.manifest.defaults_files or {}).get(path)
+            if now and now != digest:
+                changed.append(f"defaults file {path}: {digest} -> {now}")
+        return changed, finished
 
     def run(self) -> int:
         """Execute the build.

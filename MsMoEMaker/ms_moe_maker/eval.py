@@ -965,26 +965,16 @@ def _prompt_and_reference(item: Dict[str, Any],
 
 
 def _split_reasoning_answer(text: str, style) -> Tuple[str, bool]:
-    """Split a reasoning model's output into (answer, reasoned).
+    """(answer, reasoned). The shared splitter, in eval's shape.
 
-    `style` is a config.ReasoningStyle or None. None → the whole text is the
-    answer and `reasoned` is False (nothing to strip). When the text has no
-    clean think/answer split, the whole text is scored as the answer and
-    `reasoned` is False — a reasoning model that did not reason is a FINDING,
-    not a crash.
+    THE SPLIT LIVES IN ONE PLACE NOW. There were two implementations - this
+    one, which scored the answer, and data's, which validated a generated
+    trace - and a scorer that splits differently from the writer is measuring
+    a different artifact than the one on disk. reasoning.split() is both.
     """
-    if style is None:
-        return text, False
-    open_i = text.find(style.open)
-    if open_i == -1:
-        return text, False
-    after = text[open_i + len(style.open):]
-    close_i = after.find(style.close)
-    if close_i == -1:
-        return text, False
-    think = after[:close_i].strip()
-    answer = after[close_i + len(style.close):].strip()
-    return (answer or text), bool(think)
+    from .reasoning import split
+    _think, answer, reasoned = split(text, style)
+    return answer, reasoned
 
 
 def eval_generation(model_dir: str, test_data_path: str,
@@ -1402,8 +1392,22 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     # ── locate corpora and artifacts ───────────────────────────────────────
     code_paths: Dict[str, str] = {}
     data_root = Path(config.data_root)
+    # THE FILENAME IS A RE-DERIVATION, AND IT DROPPED AN EXPERT.
+    #
+    # builder hands the router `expert_corpus_paths` precisely so nothing
+    # downstream has to guess a corpus path from a name - and then eval guessed
+    # anyway, stripping only `_code`. A `reasoning: true` expert writes
+    # `<name>_reasoning.jsonl`, so it resolved to the expert "math_reasoning",
+    # matched nothing in expert_names, and vanished from BOTH the quality table
+    # and the routing columns without a word. Silence is signal: strip every
+    # suffix the generators actually write, and say so below when an expert
+    # still has no corpus.
     for f in sorted(data_root.glob("*.jsonl")):
-        name = f.stem.replace("_code", "")
+        name = f.stem
+        for _suffix in ("_reasoning", "_code"):
+            if name.endswith(_suffix) and len(name) > len(_suffix):
+                name = name[:-len(_suffix)]
+                break
         if name:
             code_paths[name] = str(f)
 
@@ -1434,6 +1438,13 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     # it over the recipe, and say loudly when they disagree.
     expert_order = [n for n in (config.expert_names or list(code_paths))
                     if n in code_paths]
+    # AN EXPERT WITH NO CORPUS IS A NARROWED TEST, NOT A SMALLER ONE. Anything
+    # the recipe names and eval cannot find is stated, not skipped - the same
+    # rule that made the router mix stop silently eating held-out rows.
+    for _missing in (n for n in (config.expert_names or []) if n not in code_paths):
+        report.unmeasured.append(
+            f"corpus/{_missing}: no .jsonl in {data_root} - this expert is "
+            f"absent from every table below")
     routing_refused = ""
     try:
         with open(Path(moe_dir) / "config.json", encoding="utf-8") as _fh:
@@ -1525,12 +1536,12 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
 
     # ── quality: real generation against held-out references ───────────────
     if do_quality:
-        from .config import REASONING_STYLES
-        # Non-reasoning base → None (score the whole output). Reasoning base →
-        # the style whose delimiters split trace from answer. getattr so a
-        # minimal config (test double, or a hand-built one) still works.
-        reasoning_style = REASONING_STYLES.get(
-            getattr(config, "reasoning_type", ""))
+        from .config import reasoning_style_of_config
+        # None → score the whole output. Otherwise the tags this RUN wrote its
+        # traces with, carried on the config rather than looked up again: the
+        # table is a file now, and a scorer splitting on different delimiters
+        # than the generator used is measuring a different artifact.
+        reasoning_style = reasoning_style_of_config(config)
 
         # ONE MODEL IN MEMORY AT A TIME, AND THE MoE LOADED ONCE.
         #
@@ -1588,6 +1599,30 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             moe_model = moe_tok = None
             release_memory()
             _trace("after MoE released")
+
+        # DID YOU PICK THE RIGHT TAG STYLE?
+        #
+        # This is the one place a misconfiguration is INDISTINGUISHABLE from a
+        # real finding. `_split_reasoning_answer` returns "no clean split" when
+        # the delimiters do not match the output - which is exactly what a
+        # model that simply did not reason looks like. So a table that is one
+        # release behind a new model family reports "never reasons", every
+        # score silently includes the think block, and the numbers look like a
+        # result instead of a mistake.
+        #
+        # We cannot tell the two apart. We CAN say so, which is the whole job.
+        if reasoning_style is not None:
+            scored = [r for r in report.stages.values() if r.reasoned >= 0]
+            if scored and (sum(r.reasoned for r in scored) / len(scored)) < 0.1:
+                report.caveats.append(
+                    f"almost nothing emitted a think block, and this run "
+                    f"expected {reasoning_style.open!r}…{reasoning_style.close!r}. "
+                    f"That is either a model that does not reason or the WRONG "
+                    f"TAG STYLE - the two look identical from here, and every "
+                    f"quality score above includes the trace if it is the "
+                    f"second. Check the family for this base in reasoning.yaml "
+                    f"(drop a corrected one at ~/.msmoe/reasoning.yaml; no "
+                    f"release needed).")
 
     # ── verdict ────────────────────────────────────────────────────────────
     if do_routing:

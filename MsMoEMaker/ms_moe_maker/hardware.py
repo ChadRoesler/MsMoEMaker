@@ -19,7 +19,7 @@ used to keep were the second copy, and they drifted.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,86 @@ TIERS: Dict[str, TierSpec] = {
         supports_fp8=True,
     ),
 }
+
+
+# ── the box's own tier table ──────────────────────────────────────────────────
+#
+# TIERS above is the FLOOR. The real table can be overridden per box from a
+# defaults file, because "what is a spark" is a statement about a machine and
+# machines differ — somebody with an Orin AGX 64GB should not have to say so in
+# every recipe, and somebody setting a box up for someone else should be able
+# to say it once and hand over the keys.
+#
+# A recipe cannot do this. It names a tier; it does not get to redefine what
+# that tier means, or the same recipe would describe different hardware
+# depending on who ran it.
+
+# Fields a defaults file may set on a tier. `like` is not a field — it is the
+# low-barrier-to-entry move: inherit an existing tier and change two things,
+# instead of restating nine.
+_TIER_FIELDS = frozenset({
+    "max_vram_gb", "recommended_sizes", "default_size", "default_lora_r",
+    "default_quant", "supports_mgpu", "supports_8bit", "supports_fp8",
+})
+
+
+def merge_tiers(overrides: Optional[Dict[str, Any]] = None
+                ) -> Tuple[Dict[str, TierSpec], List[str]]:
+    """The floor, with a box's overrides laid on top. Returns (table, warnings).
+
+    Pure stdlib and no imports from config or defaults, so this module stays
+    the bottom of the stack and `validate` keeps running on a laptop.
+
+    A tier the floor does not have is CREATED, not refused — adding hardware is
+    the normal case, not the exotic one. It needs either every field or a
+    `like:` to inherit from, and saying so is kinder than a KeyError three
+    stages into a build.
+    """
+    table: Dict[str, TierSpec] = dict(TIERS)
+    warns: List[str] = []
+    if not overrides:
+        return table, warns
+    if not isinstance(overrides, dict):
+        return table, [f"tiers: expected a mapping, got {type(overrides).__name__} "
+                       f"- IGNORED"]
+
+    for name, spec in overrides.items():
+        if not isinstance(spec, dict):
+            warns.append(f"tiers.{name}: expected a mapping of fields - IGNORED")
+            continue
+        parent = spec.get("like")
+        if parent is not None and parent not in table:
+            warns.append(
+                f"tiers.{name}.like={parent!r} is not a known tier "
+                f"({', '.join(sorted(table))}) - IGNORED")
+            parent = None
+        base = table.get(name) or (table.get(parent) if parent else None)
+
+        unknown = [k for k in spec if k not in _TIER_FIELDS and k != "like"]
+        for k in unknown:
+            warns.append(
+                f"tiers.{name}.{k} is not a tier field - IGNORED. Known: "
+                f"{', '.join(sorted(_TIER_FIELDS))}")
+        fields = {k: v for k, v in spec.items() if k in _TIER_FIELDS}
+
+        if base is None:
+            missing = sorted(_TIER_FIELDS - set(fields))
+            if missing:
+                warns.append(
+                    f"tiers.{name} is a new tier and is missing "
+                    f"{', '.join(missing)} - IGNORED. Add the fields, or use "
+                    f"`like: <existing tier>` to inherit them.")
+                continue
+            table[name] = TierSpec(**fields)
+            continue
+
+        merged = {f: getattr(base, f) for f in _TIER_FIELDS}
+        merged.update(fields)
+        try:
+            table[name] = TierSpec(**merged)
+        except TypeError as exc:  # pragma: no cover - defensive
+            warns.append(f"tiers.{name}: {exc} - IGNORED")
+    return table, warns
 
 
 def resolve_tier(recipe_tier: Optional[str] = None,

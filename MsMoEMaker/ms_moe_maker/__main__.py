@@ -31,6 +31,60 @@ from . import _describe as _d
 from . import hardware
 from .events import Events
 
+
+def _box_defaults():
+    """The layers this install would apply, and what each one sets.
+
+    Reading two small yamls is a READ, not a side effect, so --describe keeps
+    its promise. `keys` is provenance: dotted key -> the file that last set it,
+    which is the difference between showing a number and explaining it.
+    """
+    try:
+        from . import defaults as _defaults
+        resolved, prov, warns = _defaults.resolve()
+        digests = _defaults.file_digests()
+        layers = [{"label": label, "path": path,
+                   "present": path in digests,
+                   "sha256": digests.get(path, "")}
+                  for label, path in _defaults.layer_paths()]
+        return {"layers": layers, "keys": prov,
+                "blocks": sorted(resolved), "warnings": list(warns)}
+    except Exception:
+        return {"layers": [], "keys": {}, "blocks": [], "warnings": []}
+
+
+def _box_reasoning():
+    """Tag styles and model families this install knows about."""
+    try:
+        from . import reasoning as _rz
+        styles, families, warns = _rz.load()
+        return {
+            "styles": [{"key": k, "name": v.name, "open": v.open,
+                        "close": v.close, "interwoven": v.interwoven}
+                       for k, v in sorted(styles.items())],
+            "families": [{"key": k, "name": v.name, "style": v.style}
+                         for k, v in sorted(families.items())],
+            "warnings": list(warns),
+        }
+    except Exception:
+        return {"styles": [], "families": [], "warnings": []}
+
+
+def _box_tiers():
+    """Tier names this install offers, floor + whatever the box adds.
+
+    Defensive to a fault because it runs at import time and feeds --describe,
+    which promises exit 0 and one line of JSON. A broken defaults file must
+    degrade to the floor, never take the contract down with it.
+    """
+    try:
+        from . import defaults as _defaults
+        box, _, _ = _defaults.resolve()
+        table, _ = hardware.merge_tiers(box.get("tiers"))
+        return sorted(table)
+    except Exception:
+        return sorted(hardware.TIERS)
+
 # ── allocator policy, set BEFORE anything can initialise CUDA ─────────────
 #
 # On unified memory the caching allocator's RESERVATION is host RAM. Torch's
@@ -126,12 +180,22 @@ DESCRIBE = {
     "kinds": _corpus_kinds(),
     "gates": ["auto", "manual", "skip"],
     "templates": ["code", "dnd", "math", "culinary"],
-    "tiers": list(hardware.TIERS),
+    # THE TIERS THIS INSTALL ACTUALLY HAS, not the ones the source ships. A box
+    # can add or redefine a tier from its defaults file, and --describe is how
+    # Starwright and Theatre find out what a machine offers - reporting the
+    # built-in floor there would describe a different install than the one
+    # answering. Reading two small yamls is a read, not a side effect.
+    "tiers": _box_tiers(),
+    # WHAT THIS BOX PRESETS, so a front-end can show a machine's configuration
+    # without re-implementing the merge. Same defensiveness as _box_tiers: a
+    # broken file degrades to "nothing configured", never to a broken contract.
+    "defaults": _box_defaults(),
+    "reasoning": _box_reasoning(),
     "modes": list(_d.EVAL_MODES),
 }
 
 
-def _load_recipe(path, quiet: bool = False):
+def _load_recipe(path, quiet: bool = False, defaults_path=None):
     """Load and validate a recipe file. Returns (Recipe, errs, warns).
 
     `quiet` exists because under --json stdout belongs to the event stream and
@@ -147,7 +211,7 @@ def _load_recipe(path, quiet: bool = False):
             print(msg)
 
     try:
-        rec, parse_warns = load(path)
+        rec, parse_warns = load(path, defaults_path=defaults_path)
     except Exception as exc:
         out(f"FAILED to parse {path}: {exc}")
         return None, None, None
@@ -186,6 +250,105 @@ def _find_gguf(output_dir: str):
 
 # ── commands ─────────────────────────────────────────────────────────────────
 
+DEFAULTS_TEMPLATE_HEADER = """\
+# Written by `ms-moe-maker init --defaults-template`.
+#
+# THIS FILE IS A RECIPE WITH NO EXPERTS. Same keys, same blocks, same `-1`
+# sentinels ("you decide"), same typo warnings. Anything you can put in a
+# recipe's budget:/corpus:/router:/moe:/eval:/runtime: blocks belongs here too,
+# and every recipe on this box inherits it without saying a word.
+#
+# That is what this is FOR: set a machine up once - for yourself, or for
+# somebody you are handing it to - so their recipes stay six lines instead of
+# carrying eleven lines they would have to be told about.
+#
+# Precedence: built-in floor -> packaged defaults.yaml -> THIS FILE ->
+# --defaults <path> -> the recipe. The recipe always wins.
+#
+# `experts:`, `name:` and `template:` are NOT accepted here. Those describe one
+# build, not a box. `tiers:` and `models:` are the other way round: box only.
+#
+# Everything below is commented out. Uncomment what you mean.
+"""
+
+
+def _defaults_template_body() -> str:
+    """The starter file. Every line commented; uncommenting beats inventing."""
+    return DEFAULTS_TEMPLATE_HEADER + """
+# budget:
+#   target_steps: 1200        # the biggest lever on wall-clock
+#   max_seq_length: 2048
+#   lora_r: -1                # -1 = this tier's default
+
+# corpus:
+#   min_samples: -1           # floor per expert; rises to meet router_mix_total
+#   max_samples: 100000
+#   router_mix_total: 16000   # / (batch x accum) = router steps
+#   per_repo_cap: 20          # ONE repo must not become the corpus
+
+# router:
+#   epochs: 1.0               # the cheapest way to buy router steps
+#   batch: 8                  # must be > 1 or the aux loss sees one domain
+#   accum: 1
+
+# runtime:
+#   hardware_tier: xavier     # see `tiers:` below to add your own
+#   llama_cpp: ''             # the path most likely to differ per box
+
+# tools_expert:               # what `tools_expert: true` gets you
+#   name: agentcore
+#   teacher: Qwen/Qwen2.5-7B-Instruct
+
+# ── BOX ONLY ────────────────────────────────────────────────────────────────
+# A recipe may NAME a tier; it may never redefine one, or the same recipe would
+# mean different hardware depending on who ran it.
+
+# tiers:
+#   spark:
+#     default_size: 14B
+#     default_lora_r: 96
+#   orin_agx:                 # a tier the tool has never heard of
+#     like: spark             # inherit the rest, change three things
+#     max_vram_gb: 64
+#     default_size: 7B
+#     default_quant: Q5_K_M
+
+# models:                     # a local mirror, or a house preference
+#   "0.5B": /mnt/models/Qwen2.5-Coder-0.5B-Instruct
+#   "7B":
+#     safe: Qwen/Qwen2.5-Coder-7B
+#     abliterated: huihui-ai/Qwen2.5-Coder-7B-Instruct-abliterated
+"""
+
+
+def _write_defaults_template(args) -> int:
+    """`init --defaults-template` — the on-ramp for the BOX, not the build.
+
+    Same reasoning as the recipe on-ramp one function down: a newcomer had to
+    know the schema before they could type anything, and the only worked
+    example was a file in a repo they might never open. Refuses to clobber,
+    because the file this overwrites is somebody's machine configuration.
+    """
+    from . import defaults as _defaults
+    target = getattr(args, "output", "") or ""
+    if target == "-":
+        print(_defaults_template_body())
+        return 0
+    dest = Path(target or _defaults._user_path()).expanduser()
+    if dest.exists() and not args.force:
+        print(f"{dest} already exists. Pass --force to overwrite it, or "
+              f"--output <path> to write somewhere else.", file=sys.stderr)
+        return 1
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(_defaults_template_body(), encoding="utf-8")
+    print(f"wrote {dest}")
+    print("Every line is commented out; uncomment what you want this box to "
+          "preset.")
+    print("`ms-moe-maker validate <recipe>` will then show you which values "
+          "came from it.")
+    return 0
+
+
 def _cmd_init(args):
     """Write a starting recipe. The lowest-barrier on-ramp there is.
 
@@ -200,6 +363,9 @@ def _cmd_init(args):
     inventing.
     """
     from .template import TEMPLATES, get_template
+
+    if getattr(args, "defaults_template", False):
+        return _write_defaults_template(args)
 
     name = args.template or ""
     if name and name not in TEMPLATES:
@@ -295,7 +461,7 @@ def _cmd_build(args):
       * the run manifest, which Theatre treats as authoritative when present
       * levers.Translation, i.e. every refusal the recipe earned
     """
-    rec, errs, warns = _load_recipe(args.recipe)
+    rec, errs, warns = _load_recipe(args.recipe, defaults_path=getattr(args, 'defaults', None))
     if rec is None:
         return 1
 
@@ -316,7 +482,27 @@ def _cmd_build(args):
     config = build_config(rec, force=args.force, dryrun=args.dryrun)
     translation = translate(rec, force=args.force, dryrun=args.dryrun)
 
+    # TWO IDS, TWO QUESTIONS. recipe_id answers "is this the recipe you sent
+    # me"; build_id answers "will my machine build what yours did". They stopped
+    # being the same question when defaults moved onto the box.
+    try:
+        from .config import build_id as _bid
+        _build = _bid(config)
+    except Exception:
+        _build = "?"
     say(f"Ms.MoE — {config.name}  size={config.size}  tier={config.tier}")
+    say(f"  ids      recipe {rec.recipe_id()}   build {_build}")
+    # WHAT THAT TIER MEANS ON THIS BOX. The name alone stopped being enough the
+    # moment a defaults file could redefine one: two machines can both say
+    # `tier=spark` and mean different sizes, ranks and quants.
+    try:
+        from .config import tier_table as _tt
+        _spec = _tt(rec)[config.tier]
+        say(f"  tier     {config.tier}: {_spec.max_vram_gb} GB, "
+            f"default {_spec.default_size}, lora_r {_spec.default_lora_r}, "
+            f"{_spec.default_quant}")
+    except Exception:
+        pass
     say(f"  base     {config.base}")
     say(f"  experts  {config.expert_names}")
     say(f"  steps    {config.target_steps}  "
@@ -328,6 +514,32 @@ def _cmd_build(args):
     say(f"  corpus   {config.min_samples_per_expert:,}-{config.num_code_samples:,}"
         f" samples/expert, {config.collect_token_target/1e6:.1f}M tokens target,"
         f" router mix {config.router_mix_total:,}")
+    prov = getattr(rec, "defaults_provenance", None) or {}
+    if prov:
+        # LAYERED CONFIG WITHOUT PROVENANCE IS A SEANCE. A value that came from
+        # a file the recipe never mentions has to say which file, or "why did
+        # mine come out different" has no answer that is not archaeology.
+        say("  defaults")
+        # TERSE HERE, EXHAUSTIVE IN `validate`. --plan is the pre-flight read;
+        # a five-field tier definition should not push the disk checks off the
+        # screen. `validate` is the command you run when something is
+        # surprising, so that one lists every leaf.
+        from . import defaults as _dm
+        _blocks, _leaves = {}, []
+        for _k, _v in sorted(prov.items()):
+            _top = _k.split(".")[0]
+            if _top in _dm.BOX_ONLY:
+                _blocks.setdefault(".".join(_k.split(".")[:2]), [_v, 0])[1] += 1
+            else:
+                _leaves.append((_k, _v))
+        for _k, _v in _leaves:
+            say(f"    {_k:28} <- {_v}")
+        for _k, (_v, _n) in sorted(_blocks.items()):
+            say(f"    {_k + f' ({_n} fields)':28} <- {_v}")
+        # The wire gets the FULL provenance even though the prose is terse:
+        # a screen has a width, a consumer does not.
+        events.emit("defaults", provenance=prov,
+                    files=dict(getattr(rec, "defaults_digests", None) or {}))
     if config.floor_raised:
         say(f"  floor    corpus floor raised to "
             f"{config.min_samples_per_expert:,} docs/expert so the "
@@ -398,6 +610,35 @@ def _cmd_build(args):
         dryrun=args.dryrun,
         python=args.python,
     )
+
+    # RESUMING INTO A DIFFERENT BUILD. Stages self-skip on artifacts found on
+    # disk, so a changed knob plus a half-finished run produces a model whose
+    # specialists were trained differently from each other - silently. Refuse
+    # only when something is ALREADY DONE and would therefore be inherited
+    # under the old settings; a fresh directory just gets restamped.
+    changed, finished = runner.drift()
+    if changed and finished and not translation.force:
+        say("\n  REFUSING TO RESUME: this run directory was built by a "
+            "different build.")
+        say(f"  {len(finished)} stage(s) already finished and would be kept "
+            f"as-is: {', '.join(finished)}")
+        say("\n  What changed:")
+        for c in changed:
+            say(f"    · {c}")
+        say("\n  Pick one:")
+        say("    --force                 rebuild everything with the new settings")
+        say("    --defaults <the old file>   reproduce the original build")
+        say("    build somewhere else    change roots.output, keep both")
+        events.error(stage="build",
+                     message="run directory belongs to a different build_id")
+        events.done(ok=False, errors=1, warnings=0)
+        return 1
+    if changed:
+        say("  note: this run directory's settings changed since the last "
+            "attempt, but nothing had finished yet - restamping.")
+        for c in changed:
+            say(f"    · {c}")
+
     return runner.run()
 
 
@@ -405,7 +646,7 @@ def _cmd_smoke(args):
     """Smoke-test the GGUF model — proves it generates outside Python."""
     from .export import smoke_gguf
     
-    rec, errs, warns = _load_recipe(args.recipe)
+    rec, errs, warns = _load_recipe(args.recipe, defaults_path=getattr(args, 'defaults', None))
     if rec is None:
         return 1
     
@@ -470,7 +711,7 @@ def _cmd_eval(args):
     was hardcoded in the function body, so the recipe's `eval:` block, which
     the README documents and run_eval reads, could not reach it.
     """
-    rec, errs, warns = _load_recipe(args.recipe)
+    rec, errs, warns = _load_recipe(args.recipe, defaults_path=getattr(args, 'defaults', None))
     if rec is None:
         return 1
 
@@ -663,7 +904,7 @@ def _cmd_corpus(args):
     from . import corpus as corpus_mod
     from . import corpushealth as ch
 
-    rec, errs, _ = _load_recipe(args.recipe)
+    rec, errs, _ = _load_recipe(args.recipe, defaults_path=getattr(args, 'defaults', None))
     if rec is None:
         for e in (errs or [f"could not parse {args.recipe}"]):
             print(f"  ✗ {e}")
@@ -723,7 +964,7 @@ def _cmd_validate(args):
     events = Events(enabled=bool(args.json))
     say = events.say if args.json else print
 
-    rec, errs, warns = _load_recipe(args.recipe, quiet=bool(args.json))
+    rec, errs, warns = _load_recipe(args.recipe, quiet=bool(args.json), defaults_path=getattr(args, 'defaults', None))
     if rec is None:
         events.emit("started", recipe=str(args.recipe))
         for e in (errs or []):
@@ -738,10 +979,34 @@ def _cmd_validate(args):
                 experts=[e.name for e in rec.experts])
 
     say(f"\n  Recipe: {rec.name or '(auto-filled)'}  [{rec.recipe_id()}]")
+    # The recipe id is what you wrote; the build id is what this box will make
+    # of it. Printing only the first is how "but it works on mine" happens.
+    try:
+        from .config import build_config as _bc, build_id as _bid
+        say(f"  Build:  {_bid(_bc(rec, dryrun=False))}")
+    except Exception:
+        pass
     say(f"  Base:   {rec.base or '(auto-filled from tier)'}")
     say(f"  Size:   {rec.size}")
     say(f"  Experts: {[e.name for e in rec.experts]}")
     say(f"  Template: {rec.template or '(none)'}")
+
+    # WHERE EVERY NON-RECIPE VALUE CAME FROM. Defaults live in a file on this
+    # box on purpose - so a machine can be set up once for someone else - and
+    # the cost of that is a recipe that no longer fully describes its own
+    # build. Provenance is what keeps that honest, and validate is the command
+    # people run when something is surprising.
+    prov = getattr(rec, "defaults_provenance", None) or {}
+    if prov:
+        say(f"\n  DEFAULTS ({len(prov)} from outside the recipe):")
+        for _k, _v in sorted(prov.items()):
+            say(f"    {_k:28} <- {_v}")
+        # ON THE WIRE NOW. `defaults` is declared in _describe.EVENTS, and the
+        # rule there is explicit: a consumer that does not know a kind ignores
+        # it, so adding one is additive. It was held back until there was
+        # something to say - a vocabulary is easier to add to than to take back.
+        events.emit("defaults", provenance=prov,
+                    files=dict(getattr(rec, "defaults_digests", None) or {}))
 
     if warns:
         say(f"\n  WARNINGS ({len(warns)}):")
@@ -867,6 +1132,17 @@ def main(argv=None):
     #   --dryrun  a real build on the smallest rung. Needs torch, like a build.
     ap.add_argument("--plan", action="store_true",
                     help="resolve config and stages, run nothing (no GPU)")
+    # THE FILE THAT MAKES A RECIPE PORTABLE AGAIN. Defaults normally come from
+    # this box (~/.msmoe/defaults.yaml), which is the point - but it also means
+    # the same recipe can build differently in two places. Point at an explicit
+    # file to reproduce someone else's run, or to pin a build in CI.
+    ap.add_argument("--defaults-template", action="store_true",
+                    dest="defaults_template",
+                    help="init: write a commented defaults file for this box "
+                         "(default: ~/.msmoe/defaults.yaml)")
+    ap.add_argument("--defaults", metavar="PATH", default=None,
+                    help="defaults file to layer under the recipe "
+                         "(default: packaged, then ~/.msmoe/defaults.yaml)")
     ap.add_argument("--offline", action="store_true",
                     help="skip reachability checks (no network calls)")
     ap.add_argument("--dryrun", action="store_true",

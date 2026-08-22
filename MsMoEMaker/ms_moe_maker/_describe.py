@@ -46,7 +46,13 @@ EVAL_MODES = ("routing", "quality", "experts", "all")
 # The event vocabulary emitted under --json. A consumer that does not know an
 # event kind must ignore it, so adding one is not a breaking change; removing
 # or renaming one is.
-EVENTS = ("started", "stage", "progress", "refused", "warning", "error", "done")
+# `defaults` carries where each non-recipe value came from, so a front-end can
+# show "target_steps 400, from ~/.msmoe/defaults.yaml" instead of a number with
+# no history. Additive by the rule above; it was deliberately held back until
+# there was a consumer, because a wire vocabulary is easier to add to than to
+# take back.
+EVENTS = ("started", "stage", "progress", "refused", "warning", "error",
+          "defaults", "done")
 
 DESCRIBE = {
     "name": NAME,

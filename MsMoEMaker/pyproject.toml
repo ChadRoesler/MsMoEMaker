@@ -62,6 +62,12 @@ Repository = "https://github.com/ChadRoesler/MsMoEMaker"
 where = ["."]
 include = ["ms_moe_maker*"]
 
+# DATA THAT SHIPS. defaults.yaml is the real defaults table (the Python FLOOR
+# is only a panic minimum), so a wheel without it is a wheel that quietly
+# behaves differently. CI asserts it is present in the built artifact.
+[tool.setuptools.package-data]
+ms_moe_maker = ["*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

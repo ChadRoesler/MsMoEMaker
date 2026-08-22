@@ -1052,9 +1052,12 @@ def generate_reasoning_traces(config, expert_name, callback=None,
 
     Returns the JSONL path, or None if generation was skipped.
     """
-    from .config import DISPLAY_LANG, REASONING_STYLES
+    from .config import DISPLAY_LANG, reasoning_style_of_config
+    from .reasoning import FLOOR_STYLES
 
-    style = REASONING_STYLES.get(config.reasoning_type or "xml") or REASONING_STYLES["xml"]
+    # The same tags eval reads back with, off the same config - these two
+    # spelled it separately once and disagreed.
+    style = reasoning_style_of_config(config) or FLOOR_STYLES["xml"]
     n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_reasoning.jsonl"
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -1138,16 +1141,15 @@ def _reasoning_msgs(system: str, display: str, i: int):
 
 
 def _split_reasoning(text: str, style) -> tuple:
-    """Return (think, answer); both must be non-empty for a trace to pass."""
-    open_i = text.find(style.open)
-    if open_i == -1:
+    """(think, answer); both must be non-empty for a trace to pass.
+
+    Delegates to the shared splitter so the rejection sampler validates traces
+    the exact way eval will later read them.
+    """
+    from .reasoning import split
+    think, answer, reasoned = split(text, style)
+    if not reasoned:
         return "", ""
-    after_open = text[open_i + len(style.open):]
-    close_i = after_open.find(style.close)
-    if close_i == -1:
-        return "", ""
-    think = after_open[:close_i].strip()
-    answer = after_open[close_i + len(style.close):].strip()
     return think, answer
 
 

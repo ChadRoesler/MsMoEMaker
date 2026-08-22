@@ -9,14 +9,17 @@ seren-theatre can still tweak behaviour without editing files.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import hardware
+from . import reasoning as _reasoning
 
 
 # ── what we can actually stitch ────────────────────────────────────────────────
@@ -48,73 +51,64 @@ SUPPORTED_BASE_HINTS: Dict[str, str] = {
 
 # ── reasoning tag styles & families ───────────────────────────────────────────
 #
-# A TAG STYLE is the delimiter scheme a model uses to separate its thinking
-# trace from its answer; a FAMILY is a set of models that share a style. The
-# style is the key and families hang off it — the same `<think>`/`</think>`
-# pair serves DeepSeek, Qwen and OpenThink, so it is written once. Data mirrors
-# `reasoning.yaml` in the repo root of the package.
-@dataclass(frozen=True)
-class ReasoningStyle:
-    name: str
-    open: str
-    close: str
-    interwoven: bool = False   # reasoning can interleave with tool calls
+# THE TABLE MOVED TO A FILE. It used to be two dicts here with a comment saying
+# they mirrored `reasoning.yaml` - which is two sources of truth for one fact,
+# declared as intent, and they had already drifted: the yaml knew DeepSeek V4
+# and Llama 3.3, the Python knew QwQ, and neither knew what the other did.
+#
+# `reasoning.py` owns it now, loads it from a layered yaml, and keeps a
+# one-entry floor so a missing file cannot take a build down. Nothing here
+# holds a copy. See that module for why this is a file at all: a wrong tag
+# style is a silent wrong answer, not a crash.
+from .reasoning import ReasoningStyle, ReasoningFamily  # noqa: F401  (re-export)
 
 
-REASONING_STYLES: Dict[str, ReasoningStyle] = {
-    "xml": ReasoningStyle("Standard XML Style", "<think>", "</think>"),
-    "agentic_xml": ReasoningStyle(
-        "Interleaved Agentic XML", "<think>", "</think>", interwoven=True),
-    "markdown": ReasoningStyle("Markdown Code Fence", "```thought", "```"),
-    "llama": ReasoningStyle(
-        "System Header Identification",
-        "<|start_header_id|>thought<|end_header_id|>",
-        "<|start_header_id|>assistant<|end_header_id|>",
-    ),
-}
-
-
-@dataclass(frozen=True)
-class ReasoningFamily:
-    name: str
-    hints: Tuple[str, ...]   # model-id substrings (matched case-insensitively)
-    style: str               # key into REASONING_STYLES
-
-
-REASONING_FAMILIES: Dict[str, ReasoningFamily] = {
-    "deepseek": ReasoningFamily("DeepSeek", ("deepseek-r1", "deepseek"), "xml"),
-    "kimi": ReasoningFamily("Kimi", ("kimi", "k2", "k3"), "agentic_xml"),
-    "qwen": ReasoningFamily(
-        "Qwen", ("qwen2.5-math", "qwen2.5-instruct-cpi", "qwen3", "qwq"), "xml"),
-    "openthink": ReasoningFamily("OpenThink", ("openthink", "open-think"), "xml"),
-    "llama": ReasoningFamily("Llama", ("llama-3", "llama3"), "llama"),
-}
+def reasoning_table(recipe=None):
+    """(styles, families) for this box. Warnings are surfaced by recipe.load."""
+    styles, families, _ = _reasoning.load()
+    return styles, families
 
 
 def reasoning_type_of(recipe) -> str:
-    """The reasoning STYLE key a base model uses, or '' for a non-reasoning base.
+    """The reasoning STYLE key a base model uses, or '' for a plain base.
 
-    base_kind=reasoning -> the family's style, else 'xml'; nonreasoning -> '';
-    auto -> sniff the id against REASONING_FAMILIES.
+    base_kind=nonreasoning -> ''; reasoning -> the family's style, else 'xml';
+    auto -> sniff the id against the families table.
     """
-    kind = getattr(recipe, "base_kind", "auto")
-    if kind == "nonreasoning":
-        return ""
-    base = (getattr(recipe, "base", "") or "").lower()
-    for fam in REASONING_FAMILIES.values():
-        if any(h in base for h in fam.hints):
-            return fam.style
-    return "xml" if kind == "reasoning" else ""
+    styles, families = reasoning_table(recipe)
+    return _reasoning.style_for_base(
+        getattr(recipe, "base", "") or "",
+        getattr(recipe, "base_kind", "auto"),
+        styles, families)
 
 
 def reasoning_style_of(recipe) -> Optional[ReasoningStyle]:
     """The ReasoningStyle, or None for a non-reasoning base."""
-    return REASONING_STYLES.get(reasoning_type_of(recipe))
+    styles, _ = reasoning_table(recipe)
+    return styles.get(reasoning_type_of(recipe))
 
 
 def is_reasoning_base(recipe) -> bool:
     """Does this recipe's base model want reasoning handling?"""
     return reasoning_type_of(recipe) != ""
+
+
+def reasoning_style_of_config(config) -> Optional[ReasoningStyle]:
+    """The style a RUN writes and reads, rebuilt from the resolved config.
+
+    The delimiters are stamped INTO PipelineConfig at build time rather than
+    looked up later, so a run keeps reading traces with the same tags it wrote
+    them with even if the box's table is edited mid-build - and so the tags
+    land in build_fingerprint, where changing your reasoning table correctly
+    counts as changing the build.
+    """
+    if not getattr(config, "reasoning_open", "") or \
+            not getattr(config, "reasoning_close", ""):
+        return None
+    return ReasoningStyle(
+        name=getattr(config, "reasoning_type", "") or "reasoning",
+        open=config.reasoning_open, close=config.reasoning_close,
+        interwoven=bool(getattr(config, "reasoning_interwoven", False)))
 
 
 def teacher_for(recipe, config, expert_name: str) -> str:
@@ -135,6 +129,76 @@ def teacher_for(recipe, config, expert_name: str) -> str:
                 return config.reasoning_teacher or config.teacher_model
             break
     return config.teacher_model
+
+
+# ── what a BUILD is, as opposed to what a RECIPE is ───────────────────────────
+#
+# `recipe_id` hashes the recipe. It excludes `runtime`, so it has never
+# identified a build - two boxes could always produce different artifacts from
+# the same id. The defaults layer made that gap load-bearing: the values that
+# decide what gets trained now legitimately live in a file the recipe never
+# mentions, so "same recipe" stopped implying "same build" in the normal case
+# rather than the exotic one.
+#
+# `build_id` closes it. It hashes the RESOLVED config - everything that
+# actually determines an artifact, after every layer has had its say.
+#
+# FAIL CLOSED. The fingerprint is every PipelineConfig field MINUS an explicit
+# exclusion list, not a hand-picked list of included ones. A field added next
+# year is covered by default; forgetting to add it to a list is the failure
+# mode that makes a fingerprint quietly stop fingerprinting, and this codebase
+# has met that bug under several other names.
+_FINGERPRINT_EXCLUDE: frozenset = frozenset({
+    # Identity and location, not content.
+    "name",          # _auto_name embeds a timestamp
+    "data_root", "output_root", "shard_cache", "hf_home", "llama_cpp_dir",
+    # Flags about REDOING work, not about what the work produces.
+    "force", "floor_raised",
+    # Throughput. Changing how fast the teacher runs does not change what a
+    # specialist learns; changing WHAT it generates does, so use_vllm,
+    # vllm_quantization, vllm_max_len and teacher_max_new stay IN.
+    "teacher_max_memory", "teacher_batch", "vllm_batch", "vllm_gpu_util",
+    # The smoke test inspects the artifact; it does not build it.
+    "gguf_smoke_prompt", "gguf_smoke_tokens", "gguf_smoke_timeout",
+    "gguf_degenerate_run",
+})
+
+
+def build_fingerprint(config) -> Dict[str, Any]:
+    """Every resolved value that decides what this build produces.
+
+    Sorted and JSON-safe, because it is hashed and also stored in the manifest
+    so a resumed run can say WHICH field moved rather than only that something
+    did. "The fingerprint changed" is a fact; "target_steps 400 -> 1200" is an
+    answer.
+    """
+    out: Dict[str, Any] = {}
+    for f in fields(config):
+        if f.name in _FINGERPRINT_EXCLUDE:
+            continue
+        v = getattr(config, f.name)
+        if isinstance(v, (list, tuple)):
+            v = list(v)
+        elif isinstance(v, dict):
+            v = {str(k): v[k] for k in sorted(v)}
+        out[f.name] = v
+    return dict(sorted(out.items()))
+
+
+def build_id(config) -> str:
+    """A short stable digest of build_fingerprint(config)."""
+    blob = json.dumps(build_fingerprint(config), sort_keys=True,
+                      separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+def fingerprint_diff(old: Dict[str, Any],
+                     new: Dict[str, Any]) -> List[Tuple[str, Any, Any]]:
+    """(field, was, now) for every value that moved. Sorted, so it reads the
+    same twice."""
+    keys = sorted(set(old) | set(new))
+    return [(k, old.get(k, "(absent)"), new.get(k, "(absent)"))
+            for k in keys if old.get(k, "(absent)") != new.get(k, "(absent)")]
 
 
 # ── the router's appetite, expressed in documents ──────────────────────────────
@@ -307,6 +371,48 @@ DISPLAY_LANG: Dict[str, str] = {
 # The tier table lives in hardware.py and is imported, not re-declared. A copy
 # here (`_TIER_HINTS` + `_TIER_RANK`) drifted from it: xavier's default size was
 # 9B there and 7B here, and 9B is not even a MODEL_SIZES key.
+#
+# And hardware.TIERS is now the FLOOR, not the last word. A box can redefine a
+# tier - or add one - from its defaults file, because "what is a spark" is a
+# fact about a machine. Everything below asks the RECIPE for the table rather
+# than reading the module global, so a build sees the box it is running on.
+
+
+def tier_table(recipe=None) -> Dict[str, "hardware.TierSpec"]:
+    """The tier table this recipe builds against: floor + the box's overrides.
+
+    A recipe parsed from a dict (not loaded from a path) carries no box, which
+    is deliberate - parse() is pure, so it resolves against the floor alone and
+    a unit test does not inherit whoever's laptop it runs on.
+    """
+    return _tier_table_and_warnings(recipe)[0]
+
+
+def _tier_table_and_warnings(recipe=None):
+    box = getattr(recipe, "resolved_defaults", None) or {}
+    return hardware.merge_tiers(box.get("tiers"))
+
+
+def model_sizes(recipe=None) -> Dict[str, Tuple[str, str]]:
+    """size -> (safe base id, abliterated/instruct id), floor + the box.
+
+    A box with a local mirror, or a house-preferred checkpoint for one size,
+    says so once here instead of in every recipe's `base:`.
+    """
+    table = dict(MODEL_SIZES)
+    box = getattr(recipe, "resolved_defaults", None) or {}
+    over = box.get("models")
+    if not isinstance(over, dict):
+        return table
+    for size, spec in over.items():
+        if isinstance(spec, dict):
+            safe, abl = table.get(size, ("", ""))
+            table[size] = (str(spec.get("safe") or safe),
+                           str(spec.get("abliterated") or abl))
+        elif isinstance(spec, str):
+            # A bare string is the kind reading: "this size is this model."
+            table[size] = (spec, spec)
+    return table
 
 
 @dataclass(frozen=True)
@@ -326,9 +432,18 @@ class PipelineConfig:
     # Resolved once from base_kind (see is_reasoning_base); downstream prompt /
     # eval handling keys off this rather than sniffing the id again.
     reasoning: bool = False
-    # Which reasoning CONVENTION the base uses ('' when non-reasoning). Keys
-    # into REASONING_TYPES for the delimiters eval uses to split trace/answer.
+    # Which reasoning CONVENTION this run uses ('' when nothing reasons). A key
+    # into the reasoning table; the DELIMITERS themselves are stamped below.
     reasoning_type: str = ""
+    # THE TAGS, RESOLVED AND CARRIED. The table is a file now, so looking the
+    # style up again at eval time could read a table that was edited while the
+    # build ran - a scorer splitting on different tags than the generator wrote
+    # is measuring a different artifact than the one on disk. Stamping them
+    # also puts them in build_fingerprint, where "I changed my reasoning table"
+    # correctly counts as changing the build.
+    reasoning_open: str = ""
+    reasoning_close: str = ""
+    reasoning_interwoven: bool = False
     # Expert names whose source carries `reasoning: true` — these get reasoning
     # traces GENERATED for them (force reasoning into a non-reasoning base)
     # instead of a scraped corpus.
@@ -500,7 +615,7 @@ def _resolve_base(recipe, size: str) -> Tuple[str, str]:
     # 1. Explicit recipe base
     if recipe.base and recipe.base.strip():
         base = recipe.base.strip()
-        safe, ablated = MODEL_SIZES.get(size, ("", ""))
+        safe, ablated = model_sizes(recipe).get(size, ("", ""))
         if "abliterated" in base or "Instruct" in base:
             base_model = base
         else:
@@ -510,27 +625,32 @@ def _resolve_base(recipe, size: str) -> Tuple[str, str]:
     # 2. Env override
     env_base = os.environ.get("MSMOE_BASE_MODEL", "").strip()
     if env_base:
-        safe, ablated = MODEL_SIZES.get(size, ("", ""))
+        safe, ablated = model_sizes(recipe).get(size, ("", ""))
         if "abliterated" in env_base or "Instruct" in env_base:
             return env_base, safe
         return ablated if ablated else env_base, safe
 
     # 3. The size's own default (the abliterated instruct coder, when it exists)
+    #
+    # THE SUBSTRING SNIFF USED TO GATE THIS: `if ablated and ("abliterated" in
+    # ablated or "Instruct" in ablated)`. Every entry in the built-in table
+    # passes that test, so it never did anything there - but the table is no
+    # longer only ours. A box that points a size at `/mnt/models/local-0.5B`
+    # is making an explicit statement, and a name-sniff quietly discarding it
+    # in favour of a HuggingFace id is the tool deciding it knows better than
+    # the person who configured the machine. An explicit answer beats a guess
+    # about a filename.
     fallback = f"Qwen/Qwen2.5-{size}"
-    safe, ablated = MODEL_SIZES.get(size, (fallback, ""))
-    if ablated and ("abliterated" in ablated or "Instruct" in ablated):
-        base_model = ablated
-    else:
-        base_model = safe
-    return base_model, safe
+    safe, ablated = model_sizes(recipe).get(size, (fallback, ""))
+    return (ablated or safe), safe
 
 
 def _resolve_size(recipe, tier_name: str) -> str:
     """Resolve model size.  Priority: recipe.size > the tier's default."""
     recipe_size = recipe.size if recipe.size else "auto"
-    if recipe_size != "auto" and recipe_size in MODEL_SIZES:
+    if recipe_size != "auto" and recipe_size in model_sizes(recipe):
         return recipe_size
-    return hardware.get_tier(tier_name).default_size
+    return tier_table(recipe)[tier_name].default_size
 
 
 def _auto_name(recipe, expert_names: List[str]) -> str:
@@ -607,14 +727,17 @@ def resolve_tier(recipe) -> str:
     "middle tier" - wrong twice - and never actually used that default, because
     the recipe dataclass already defaults to 'xavier'.
     """
+    table = tier_table(recipe)
     tier_name = hardware.resolve_tier()  # the middle tier: 'xavier'
     rt = getattr(recipe, "runtime", None)
     t = getattr(rt, "hardware_tier", "") if rt is not None else ""
-    if t in hardware.TIERS:
+    if t in table:
         tier_name = t
     env = os.environ.get("MSMOE_TIER", "")
-    if env in hardware.TIERS:
+    if env in table:
         tier_name = env
+    if tier_name not in table:  # the floor's middle tier was renamed away
+        tier_name = sorted(table)[0]
     return tier_name
 
 
@@ -658,11 +781,25 @@ def build_config(recipe, force: bool = False,
     # The tools/MCP expert's name, resolved once (flag, or legacy 'agentcore').
     tools_expert_name = tools_expert_name_of(recipe)
 
+    # THE RUN'S STYLE, resolved once. `reasoning_type` is about the BASE; a
+    # `reasoning: true` expert puts think blocks in a build whose base does not
+    # reason, so the tags have to exist in that case too. Falls back to plain
+    # xml exactly the way the generator does - one answer, one place.
+    def _resolve_run_style(rec, experts):
+        styles, families = reasoning_table(rec)
+        key = _reasoning.style_for_base(
+            getattr(rec, "base", "") or "", getattr(rec, "base_kind", "auto"),
+            styles, families)
+        if not key and experts:
+            key = "xml"
+        return key, styles.get(key)
+
     # Experts whose source asks to have reasoning baked in (reasoning: true).
     reasoning_experts = [
         e.name for e in recipe.experts
         if getattr(getattr(e, "source", None), "reasoning", False)
     ]
+    _run_style = _resolve_run_style(recipe, reasoning_experts)
 
     # Compute budgets from steps
     b = recipe.budget
@@ -726,7 +863,7 @@ def build_config(recipe, force: bool = False,
     floor_raised = bool(_router_docs) and _router_docs > _asked_floor
 
     # Hardware-appropriate defaults, read from hardware.py rather than a copy.
-    tier_spec = hardware.get_tier(tier_name)
+    tier_spec = tier_table(recipe)[tier_name]
 
     # LoRA params — recipe first, then env, then the hardware tier.
     #
@@ -804,7 +941,10 @@ def build_config(recipe, force: bool = False,
         base=base_model,
         base_safe=base_safe,
         reasoning=is_reasoning_base(recipe),
-        reasoning_type=reasoning_type_of(recipe),
+        reasoning_type=_run_style[0],
+        reasoning_open=_run_style[1].open if _run_style[1] else "",
+        reasoning_close=_run_style[1].close if _run_style[1] else "",
+        reasoning_interwoven=bool(_run_style[1].interwoven if _run_style[1] else False),
         reasoning_experts=reasoning_experts,
         dryrun=dryrun,
         force=force,

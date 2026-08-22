@@ -28,8 +28,14 @@ SCHEMA_VERSION = 1
 # "is this the tools expert" rather than the literal "agentcore" — which is how
 # a differently-named tools expert used to silently become a code expert in the
 # router's formatting and quota logic.
-DEFAULT_TOOLS_EXPERT_NAME = "agentcore"
-DEFAULT_TOOLS_EXPERT_TEACHER = "Qwen/Qwen2.5-7B-Instruct"
+# These two now come from `defaults.FLOOR` / `defaults.yaml` so a box can be
+# configured once for someone else instead of every recipe carrying the values.
+# They are re-exported here because the legacy "an expert literally named
+# agentcore IS the tools expert" convention has to keep working.
+from . import defaults as _defaults
+
+DEFAULT_TOOLS_EXPERT_NAME = _defaults.FLOOR["tools_expert"]["name"]
+DEFAULT_TOOLS_EXPERT_TEACHER = _defaults.FLOOR["tools_expert"]["teacher"]
 
 
 @dataclass
@@ -336,6 +342,18 @@ class Recipe:
         return int(self.tokens_per_expert * self.budget.collect_headroom)
 
     def recipe_id(self) -> str:
+        """The identity of the RECIPE AS WRITTEN. Not of the build.
+
+        `load()` sets `_recipe_only_id` from a parse of the raw file, before
+        any defaults are laid under it - because otherwise this moved with the
+        box, and a recipe you email someone would have a different id on their
+        machine. Two levels, two names: `recipe_id` is what you wrote,
+        `config.build_id` is what will actually be built. Conflating them
+        leaves no word for either.
+        """
+        pinned = getattr(self, "_recipe_only_id", "")
+        if pinned:
+            return pinned
         payload = {k: v for k, v in asdict(self).items()
                    if k not in ("runtime", "name")}
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -382,7 +400,8 @@ def _apply_template(data: Dict[str, Any]) -> Dict[str, Any]:
         return data
 
 
-def parse(data: Dict[str, Any]) -> Tuple[Recipe, List[str]]:
+def parse(data: Dict[str, Any],
+          defaults: Optional[Dict[str, Any]] = None) -> Tuple[Recipe, List[str]]:
     warnings: List[str] = []
 
     if not isinstance(data, dict):
@@ -422,10 +441,19 @@ def parse(data: Dict[str, Any]) -> Tuple[Recipe, List[str]]:
     # tool-calling specialist, no knowledge of synth plumbing required. A
     # mapping customises it. If an expert of that name already exists it is
     # USED (and marked as the tools expert) rather than duplicated.
+    # THE DEFAULTS LAYER IS WHERE `true` GETS ITS CONTENT. `tools_expert: true`
+    # is the whole point of the flag - one word, and the box's own answer for
+    # what a tool-calling specialist should be fills in the rest. A mapping in
+    # the recipe still overrides key by key.
+    tools_defaults = dict((defaults or {}).get("tools_expert") or {})
     tools_expert = data.get("tools_expert", False)
     tools_name = ""
     if tools_expert:
-        spec = tools_expert if isinstance(tools_expert, dict) else {}
+        spec = dict(tools_defaults)
+        if isinstance(tools_expert, dict):
+            spec.update({k: v for k, v in tools_expert.items()
+                         if not (isinstance(v, (int, float))
+                                 and not isinstance(v, bool) and v == -1)})
         tools_name = str(spec.get("name") or DEFAULT_TOOLS_EXPERT_NAME).strip()
         if not any(e.name == tools_name for e in experts):
             src = {"kind": "synth",
@@ -475,17 +503,80 @@ def parse(data: Dict[str, Any]) -> Tuple[Recipe, List[str]]:
     return rec, warnings
 
 
-def load(path: str) -> Tuple[Recipe, List[str]]:
+def load(path: str, defaults_path: Optional[str] = None,
+         include_user_defaults: bool = True
+         ) -> Tuple[Recipe, List[str]]:
+    """Read a recipe FILE, with the box's defaults underneath it.
+
+    `parse` stays pure on purpose: a unit test that calls parse() must not
+    inherit whatever is in the running user's ~/.msmoe/defaults.yaml, or it is
+    not a unit test. Reading a path is the moment a box gets involved, so this
+    is where the layers are applied.
+    """
     text = open(path, encoding="utf-8").read()
     if path.endswith((".json",)):
-        return parse(json.loads(text))
+        data = json.loads(text)
+    else:
+        try:
+            import yaml
+        except ImportError:
+            raise SystemExit(
+                "reading a .yaml recipe needs pyyaml (pip install pyyaml), or "
+                "write the recipe as .json - the schema is identical either "
+                "way.")
+        data = yaml.safe_load(text) or {}
+
+    resolved, prov, dwarns = _defaults.resolve(
+        defaults_path, include_user=include_user_defaults)
+    merged = _defaults.apply_to(data, resolved)
+    rec, warns = parse(merged, defaults=resolved)
+    # The recipe's own id, from the recipe alone. See Recipe.recipe_id.
     try:
-        import yaml
-    except ImportError:
-        raise SystemExit(
-            "reading a .yaml recipe needs pyyaml (pip install pyyaml), or "
-            "write the recipe as .json - the schema is identical either way.")
-    return parse(yaml.safe_load(text) or {})
+        _bare, _ = parse(data)
+        rec._recipe_only_id = _bare.recipe_id()
+    except Exception:
+        pass
+    # Provenance travels WITH the recipe, so --plan and validate can print
+    # where every non-recipe value came from without re-resolving.
+    #
+    # Content-only blocks are reported only when the recipe ASKED for them. A
+    # box that defines what a tools expert should be has not put a tools expert
+    # in a recipe that never mentions one, and listing it as an applied default
+    # would be reporting more than we know - the failure this codebase keeps
+    # finding, pointed at its own output.
+    # The BOX travels with the recipe from the moment it was read off a path:
+    # config asks the recipe for its resolved defaults rather than re-resolving
+    # (and possibly re-deciding) them halfway down the stack.
+    rec.resolved_defaults = resolved
+    rec.defaults_digests = _defaults.file_digests(
+        defaults_path, include_user=include_user_defaults)
+
+    # THE BOX'S OWN TABLE, CHECKED OUT LOUD. merge_tiers refuses a malformed or
+    # incomplete tier rather than raising - adding hardware should not be a
+    # cliff - but a refusal nobody sees is the same as no check at all.
+    # THE REASONING TABLE, CHECKED OUT LOUD TOO. Same rule as the tier table:
+    # it refuses malformed entries rather than raising, so the warning is the
+    # only thing between a typo in a tag style and a run that scores think
+    # blocks as answers.
+    from . import reasoning as _rz
+    _, _, _rz_warns = _rz.load()
+    dwarns = list(dwarns) + _rz_warns
+
+    from . import hardware as _hw
+    _table, _tier_warns = _hw.merge_tiers(resolved.get("tiers"))
+    dwarns = list(dwarns) + _tier_warns
+    _named = getattr(getattr(rec, "runtime", None), "hardware_tier", "")
+    if _named and _named not in _table:
+        dwarns.append(
+            f"runtime.hardware_tier {_named!r} is not a tier on this box "
+            f"({', '.join(sorted(_table))}) - the middle tier will be used. "
+            f"Define it under `tiers:` in a defaults file if this machine "
+            f"has one.")
+    rec.defaults_provenance = {
+        k: v for k, v in prov.items()
+        if k.split(".")[0] not in _defaults.CONTENT_ONLY or data.get(k.split(".")[0])
+    }
+    return rec, list(dwarns) + list(warns)
 
 
 # ── validation ────────────────────────────────────────────────────────────────
@@ -519,6 +610,24 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
                 f"Supported today: "
                 f"{', '.join(sorted(SUPPORTED_MOE_ARCHS.values()))}. "
                 f"Leave `base` empty to get a supported default for your size.")
+        # AN EXPLICIT BASE THAT WILL BE SWAPPED, SAID OUT LOUD.
+        #
+        # _resolve_base treats a base whose id contains neither "abliterated"
+        # nor "Instruct" as "you probably meant the instruct variant" and
+        # substitutes the table's entry for your size. That may well be what
+        # you wanted - but it is a GUESS overriding an EXPLICIT statement, and
+        # it happens without a word, so `base: Qwen/Qwen2.5-Coder-0.5B` builds
+        # a different model than the one written down. Warn rather than change
+        # the behaviour: existing recipes depend on the substitution.
+        if not any(h in rec.base for h in ("abliterated", "Instruct",
+                                           "instruct")):
+            warns.append(
+                f"base {rec.base!r} names neither an instruct nor an "
+                f"abliterated model, so the build will SUBSTITUTE this size's "
+                f"instruct variant instead of using it. If you meant this "
+                f"exact checkpoint, name the variant explicitly, or set it "
+                f"under `models:` in a defaults file where an explicit answer "
+                f"is honoured as written.")
 
     # -- routing measurability ----------------------------------------------
     #

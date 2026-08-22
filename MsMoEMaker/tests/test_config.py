@@ -894,3 +894,59 @@ class TestTeacherFor:
     def test_falls_back_to_the_generic_synth_teacher(self, monkeypatch):
         rec, c = self._cfg(monkeypatch, kind="synth", teacher=None)
         assert config.teacher_for(rec, c, "a") == c.teacher_model
+
+
+class TestReasoningTypeResolution:
+    """`does the BASE reason` and `are there reasoning traces to parse` are two
+    questions, and answering the first for both is what made eval score a
+    `<think>` block as the answer."""
+
+    def _rec(self, reasoning_expert=False, base=""):
+        from ms_moe_maker.recipe import parse
+        src = {"kind": "stack", "language": "Python"}
+        if reasoning_expert:
+            src["reasoning"] = True
+        body = {"schema_version": 1, "name": "t", "size": "0.5B", "base": base,
+                "experts": [{"name": "python", "source": src},
+                            {"name": "csharp",
+                             "source": {"kind": "stack", "language": "C#"}}]}
+        rec, _ = parse(body)
+        return rec
+
+    def test_a_plain_build_has_no_reasoning_at_all(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(self._rec(), dryrun=True)
+        assert c.reasoning is False
+        assert c.reasoning_type == ""
+        assert c.reasoning_experts == []
+        assert config.reasoning_style_of_config(c) is None
+
+    def test_a_distilled_expert_makes_traces_parseable_on_a_plain_base(
+            self, monkeypatch):
+        """The R1-distill path: non-reasoning base, one reasoning expert. The
+        generator writes <think> blocks, so eval has to be able to read them.
+
+        TWO FIELDS, TWO QUESTIONS. `reasoning` is about the BASE; the base here
+        still does not reason. `reasoning_type` is about the RUN - traces exist
+        on disk, so the tags that split them must exist too.
+        """
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(self._rec(reasoning_expert=True), dryrun=True)
+        assert c.reasoning is False, "the BASE still does not reason"
+        assert c.reasoning_experts == ["python"]
+        assert c.reasoning_type == "xml"
+        style = config.reasoning_style_of_config(c)
+        assert style is not None and style.open == "<think>"
+
+    def test_the_writer_and_the_reader_agree(self, monkeypatch):
+        """data.generate_reasoning_traces and eval.run_eval read the SAME tags
+        off the same config - they used to spell the fallback separately, and
+        disagreed for exactly the builds this feature exists to produce."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        for rec in (self._rec(), self._rec(reasoning_expert=True),
+                    self._rec(reasoning_expert=True, base="Qwen/Qwen3-0.6B")):
+            c = config.build_config(rec, dryrun=True)
+            style = config.reasoning_style_of_config(c)
+            if c.reasoning_experts or c.reasoning:
+                assert style is not None, "traces exist but nothing parses them"
+                assert style.open and style.close
