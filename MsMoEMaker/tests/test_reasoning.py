@@ -183,7 +183,7 @@ class TestOneSplitterEverywhere:
 
         # the writer calls the SAME splitter, not a private copy
         src = inspect.getsource(data_mod._parse_teacher_output)
-        assert "_reasoning.split" in src, (
+        assert "from .reasoning import split" in src, (
             "the writer must split with reasoning.split, not a private copy")
 
 
