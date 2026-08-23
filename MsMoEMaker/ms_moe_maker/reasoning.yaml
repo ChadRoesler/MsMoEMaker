@@ -29,10 +29,16 @@ TagStyles:
   # widely-used re-tokenised form (R1-Distill via transformers, OpenThinker) is
   # `<|reasoning|>`. If your checkpoint emits the raw tokens, put the exact
   # bytes here or in ~/.msmoe/reasoning.yaml — that is what this file is FOR.
+  #
+  # AnswerMarker is the plain-language separator the GENERATOR prompts the
+  # teacher for, because small R1-distill checkpoints emit NO delimiter at all
+  # and ramble prose. The delimiter above is still what the finished specialist
+  # learns and what eval reads back.
   - Key: r1
     TagStyleName: DeepSeek R1 Style
     OpeningTag: "<|reasoning|>"
     ClosingTag: "<|/reasoning|>"
+    AnswerMarker: "ANSWER:"
     Interwoven: false
 
   - Key: agentic_xml

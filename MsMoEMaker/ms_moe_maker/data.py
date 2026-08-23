@@ -1074,9 +1074,21 @@ def generate_reasoning_traces(config, expert_name, callback=None,
         return out_path
 
     display = DISPLAY_LANG.get(expert_name, expert_name.replace("_", " ").title())
-    system = (
+    marker = getattr(teacher_style, "answer_marker", "") or "ANSWER:"
+    # TWO PROMPTS, ONE WINS AFTER A PROBE.
+    #
+    # A capable teacher (7B distill) emits its native tags, which separate
+    # thinking from answer cleanly. A weak one (1.5B) rambles prose and ignores
+    # the tag instruction. So we probe once with the tags; if they come back,
+    # use them, else fall back to the plain-language marker. Both are data.
+    tag_system = (
         f"You are a {display} specialist. Reason step by step inside "
         f"{teacher_style.open} … {teacher_style.close}, then give the final answer."
+    )
+    marker_system = (
+        f"You are a {display} specialist. Think through the task step by step. "
+        f"Then write the line {marker!r} followed by your final answer and "
+        f"nothing else."
     )
 
     if config.use_vllm:
@@ -1085,6 +1097,17 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     else:
         teacher = _HFTeacher(config, model=teacher_model,
                              max_new_tokens=config.reasoning_teacher_max_new)
+
+    probe_prompt = teacher.tokenizer.apply_chat_template(
+        _reasoning_msgs(tag_system, display, 0), tokenize=False,
+        add_generation_prompt=True)
+    probe_text = (teacher.complete([probe_prompt]) or [""])[0]
+    _, _, speaks_tags = _reasoning.split(probe_text, teacher_style)
+    system = tag_system if speaks_tags else marker_system
+    if not speaks_tags:
+        print(f"   teacher {teacher_model or config.teacher_model} does not "
+              f"emit {teacher_style.open}…{teacher_style.close}; "
+              f"falling back to the {marker!r} marker")
 
     partial = out_path + ".partial"
     kept = 0
@@ -1110,8 +1133,8 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 attempted += 1
                 if not sample:
                     sample = text
-                think, answer, reasoned = _reasoning.split(text, teacher_style)
-                if not reasoned or not think or not answer:
+                think, answer = _parse_teacher_output(text, teacher_style)
+                if not think or not answer:
                     rejects += 1
                     continue
                 # Re-emit in the TARGET delimiter so the specialist learns
@@ -1133,9 +1156,8 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 raise RuntimeError(
                     f"accept rate {(kept / max(attempted, 1)) * 100:.1f}% after "
                     f"{attempted} attempts — the teacher is not producing a "
-                    f"valid {teacher_style.open}…{teacher_style.close} split. "
-                    f"Check the reasoning table entry for "
-                    f"{teacher_model or config.teacher_model}.\n"
+                    f"valid {marker!r} split. Check the reasoning table entry "
+                    f"for {teacher_model or config.teacher_model}.\n"
                     f"A sample of the teacher's raw output:\n"
                     f"{sample[:400]}")
     finally:
@@ -1155,6 +1177,26 @@ def _reasoning_msgs(system: str, display: str, i: int):
         {"role": "system", "content": system},
         {"role": "user", "content": task},
     ]
+
+
+def _parse_teacher_output(text: str, style) -> tuple:
+    """(think, answer) from a teacher's raw output.
+
+    Tries the teacher's native delimiter first (a teacher that actually emits
+    its style's tags), then the prompted `AnswerMarker` (prose teachers like
+    R1-distill). Both halves must be non-empty for a trace to pass.
+    """
+    think, answer, reasoned = _reasoning.split(text, style)
+    if reasoned and think and answer:
+        return think, answer
+    marker = getattr(style, "answer_marker", "") or "ANSWER:"
+    idx = text.upper().find(marker.upper())
+    if idx != -1:
+        think = text[:idx].strip()
+        answer = text[idx + len(marker):].strip()
+        if think and answer:
+            return think, answer
+    return "", ""
 
 
 def _load_tool_surface() -> Optional[List[Dict[str, Any]]]:

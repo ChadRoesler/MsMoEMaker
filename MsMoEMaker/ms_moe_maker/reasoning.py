@@ -41,6 +41,11 @@ class ReasoningStyle:
     open: str
     close: str
     interwoven: bool = False   # reasoning interleaves with tool calls
+    # Plain-language marker for teachers that emit NO delimiter (R1-distill
+    # rambles prose). The generator prompts for it and parses on it; the
+    # delimiter `open`/`close` above is still what a finished specialist learns
+    # and what eval reads back.
+    answer_marker: str = "ANSWER:"
 
 
 @dataclass(frozen=True)
@@ -95,7 +100,8 @@ def _styles_from(doc: Dict[str, Any], into: Dict[str, ReasoningStyle],
             continue
         into[key] = ReasoningStyle(
             name=label or key, open=str(opening), close=str(closing),
-            interwoven=bool(entry.get("Interwoven", False)))
+            interwoven=bool(entry.get("Interwoven", False)),
+            answer_marker=str(entry.get("AnswerMarker") or "ANSWER:"))
         if label:
             by_name[_norm(label)] = key
     return warns
