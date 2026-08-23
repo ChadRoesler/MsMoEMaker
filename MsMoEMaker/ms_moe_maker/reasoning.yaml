@@ -25,6 +25,16 @@ TagStyles:
     ClosingTag: "</think>"
     Interwoven: false
 
+  # DeepSeek-R1's raw tokenizer emits non-ASCII ``/`` special tokens; the
+  # widely-used re-tokenised form (R1-Distill via transformers, OpenThinker) is
+  # `<|reasoning|>`. If your checkpoint emits the raw tokens, put the exact
+  # bytes here or in ~/.msmoe/reasoning.yaml — that is what this file is FOR.
+  - Key: r1
+    TagStyleName: DeepSeek R1 Style
+    OpeningTag: "<|reasoning|>"
+    ClosingTag: "<|/reasoning|>"
+    Interwoven: false
+
   - Key: agentic_xml
     TagStyleName: Interleaved Agentic XML
     OpeningTag: "<think>"
@@ -53,7 +63,7 @@ Families:
       - DeepSeek-R1
       - DeepSeek V4
       - deepseek
-    PreferredStyle: xml
+    PreferredStyle: r1
 
   - Key: kimi
     FamilyName: Kimi Family
@@ -78,7 +88,7 @@ Families:
       - OpenThink-Qwen
       - OpenThink-Llama
       - open-think
-    PreferredStyle: xml
+    PreferredStyle: r1
 
   - Key: llama
     FamilyName: Llama Base Family

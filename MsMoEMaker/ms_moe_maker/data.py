@@ -1040,24 +1040,33 @@ _REASONING_TEMPLATES = (
     "Something is broken in a {domain} context. Think it through, then fix it.",
 )
 
-
 def generate_reasoning_traces(config, expert_name, callback=None,
                               teacher_model: Optional[str] = None) -> Optional[str]:
     """Generate reasoning traces for one specialist — the R1-distill recipe.
 
-    A reasoning teacher writes `<think>…</think>` then an answer, on the
-    expert's domain, so a non-reasoning base is fine-tuned into reasoning on
-    that ONE domain. Rejection sampling keeps only traces whose think block and
-    answer are BOTH non-empty.
+    A reasoning teacher writes its NATIVE thinking delimiters then an answer,
+    on the expert's domain; the trace is re-emitted in the run's TARGET style
+    so a non-reasoning base is fine-tuned into reasoning on that ONE domain.
+    Rejection sampling keeps only traces whose think block and answer are BOTH
+    non-empty.
 
     Returns the JSONL path, or None if generation was skipped.
     """
+    from . import reasoning as _reasoning
     from .config import DISPLAY_LANG, reasoning_style_of_config
-    from .reasoning import FLOOR_STYLES
 
-    # The same tags eval reads back with, off the same config - these two
-    # spelled it separately once and disagreed.
-    style = reasoning_style_of_config(config) or FLOOR_STYLES["xml"]
+    # TWO STYLES, BOTH FROM DATA, DIFFERENT BY DESIGN.
+    #
+    # `target` is what the specialist learns and eval reads back - off the run,
+    # not the teacher. `teacher_style` is what the TEACHER natively emits, off
+    # the teacher's own id. R1-distill writes its own special tokens, not the
+    # target's `<think>`; conflating the two is what rejected a good teacher's
+    # output 288 times in a row.
+    target = reasoning_style_of_config(config) or _reasoning.FLOOR_STYLES["xml"]
+    styles, families, _ = _reasoning.load()
+    teacher_key = _reasoning.style_for_base(
+        teacher_model or config.teacher_model, "reasoning", styles, families)
+    teacher_style = styles.get(teacher_key) or target
     n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_reasoning.jsonl"
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -1067,7 +1076,7 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     display = DISPLAY_LANG.get(expert_name, expert_name.replace("_", " ").title())
     system = (
         f"You are a {display} specialist. Reason step by step inside "
-        f"{style.open} … {style.close}, then give the final answer."
+        f"{teacher_style.open} … {teacher_style.close}, then give the final answer."
     )
 
     if config.use_vllm:
@@ -1089,6 +1098,7 @@ def generate_reasoning_traces(config, expert_name, callback=None,
             return out_path
 
     attempted, rejects = 0, 0
+    sample = ""
     sink = open(partial, "a", buffering=1)
     try:
         while kept < n:
@@ -1098,14 +1108,17 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
             for msgs, text in zip(batch, teacher.complete(prompts)):
                 attempted += 1
-                think, answer = _split_reasoning(text, style)
-                if not think or not answer:
+                if not sample:
+                    sample = text
+                think, answer, reasoned = _reasoning.split(text, teacher_style)
+                if not reasoned or not think or not answer:
                     rejects += 1
                     continue
-                # store the WHOLE turn (system + user + reasoning answer),
-                # rendered — finetune/router pass it through as-is, like the
-                # tools expert's traces.
-                conv = msgs + [{"role": "assistant", "content": text}]
+                # Re-emit in the TARGET delimiter so the specialist learns
+                # <think>…</think> + answer, and eval splits on it later - even
+                # though the teacher spoke its own native delimiter.
+                canonical = f"{target.open}{think}{target.close}\n{answer}"
+                conv = msgs + [{"role": "assistant", "content": canonical}]
                 text_out = (teacher.tokenizer.apply_chat_template(
                     conv, tokenize=False) + teacher.tokenizer.eos_token)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
@@ -1115,12 +1128,16 @@ def generate_reasoning_traces(config, expert_name, callback=None,
             acc = 100.0 * kept / max(attempted, 1)
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
                   f"rejects {rejects})")
-            # Tripwire: a teacher that never produces a valid think/answer pair
+            # Tripwire: a teacher that never separates thinking from an answer
             if attempted > 200 and (kept / max(attempted, 1)) < 0.05:
                 raise RuntimeError(
                     f"accept rate {(kept / max(attempted, 1)) * 100:.1f}% after "
                     f"{attempted} attempts — the teacher is not producing a "
-                    f"valid {style.open}…{style.close} split.")
+                    f"valid {teacher_style.open}…{teacher_style.close} split. "
+                    f"Check the reasoning table entry for "
+                    f"{teacher_model or config.teacher_model}.\n"
+                    f"A sample of the teacher's raw output:\n"
+                    f"{sample[:400]}")
     finally:
         sink.close()
         teacher.close()
@@ -1138,19 +1155,6 @@ def _reasoning_msgs(system: str, display: str, i: int):
         {"role": "system", "content": system},
         {"role": "user", "content": task},
     ]
-
-
-def _split_reasoning(text: str, style) -> tuple:
-    """(think, answer); both must be non-empty for a trace to pass.
-
-    Delegates to the shared splitter so the rejection sampler validates traces
-    the exact way eval will later read them.
-    """
-    from .reasoning import split
-    think, answer, reasoned = split(text, style)
-    if not reasoned:
-        return "", ""
-    return think, answer
 
 
 def _load_tool_surface() -> Optional[List[Dict[str, Any]]]:
