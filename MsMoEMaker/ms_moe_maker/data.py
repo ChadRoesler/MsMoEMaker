@@ -1186,7 +1186,8 @@ def _parse_teacher_output(text: str, style) -> tuple:
     its style's tags), then the prompted `AnswerMarker` (prose teachers like
     R1-distill). Both halves must be non-empty for a trace to pass.
     """
-    think, answer, reasoned = _reasoning.split(text, style)
+    from .reasoning import split
+    think, answer, reasoned = split(text, style)
     if reasoned and think and answer:
         return think, answer
     marker = getattr(style, "answer_marker", "") or "ANSWER:"
