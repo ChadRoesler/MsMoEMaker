@@ -168,15 +168,23 @@ class TestSplit:
 class TestOneSplitterEverywhere:
     def test_eval_and_data_share_it(self):
         """A scorer that splits differently from the writer is measuring a
-        different artifact than the one on disk."""
+        different artifact than the one on disk. Both now call reasoning.split."""
+        import inspect
+        from ms_moe_maker import data as data_mod
         from ms_moe_maker.eval import _split_reasoning_answer
-        from ms_moe_maker.data import _split_reasoning
         s, _, _ = Rz.load(include_user=False)
         text = "<think>why</think>the answer"
+
+        # eval's wrapper delegates to the shared splitter
         answer, reasoned = _split_reasoning_answer(text, s["xml"])
-        think, d_answer = _split_reasoning(text, s["xml"])
+        think, d_answer, _ = Rz.split(text, s["xml"])
         assert answer == d_answer == "the answer"
         assert reasoned and think == "why"
+
+        # the writer calls the SAME splitter, not a private copy
+        src = inspect.getsource(data_mod.generate_reasoning_traces)
+        assert "_reasoning.split" in src, (
+            "the writer must split with reasoning.split, not a private copy")
 
 
 class TestTheTagsTravelWithTheRun:
