@@ -44,7 +44,7 @@ class TestPackagedTable:
 class TestSniffing:
     @pytest.mark.parametrize("model,expected", [
         ("meta-llama/Llama-3.1-8B-Instruct", "llama"),
-        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "xml"),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "r1"),
         ("moonshotai/Kimi-K2-Instruct", "agentic_xml"),
         ("Qwen/QwQ-32B", "xml"),
         # a plain coder model reasons about nothing
