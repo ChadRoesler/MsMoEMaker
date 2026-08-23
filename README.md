@@ -342,6 +342,32 @@ token forever.
 | `alloc_conf` | — | Passed straight to `PYTORCH_CUDA_ALLOC_CONF`. `expandable_segments:True` is the one that matters on unified memory. |
 | `llama_cpp` | (search) | Path to your llama.cpp build. **Put it here, not in an env var** — this is the one path most likely to differ per box, so a recipe that can't carry it is a recipe that exports nothing on your friend's machine. |
 
+#### `abliterate:` — decensor the base first
+
+Runs the vendored [Heretic](https://github.com/p-e-w/heretic) core (AGPL-3.0)
+on the resolved base model and points the build at the decensored result, so
+every specialist LoRA-trains from it. Off by default.
+
+```yaml
+abliterate: true   # on with defaults: 200 Optuna trials, merge export
+```
+
+| Knob | Default | What it does |
+|---|---|---|
+| `n_trials` | 200 | Optuna trials. `-1` means the default. The real lever on wall-clock — a 0.5B ablation is ~20–30 min on one card. |
+| `seed` | random | RNG seed for a reproducible study. |
+| `quantization` | none | `none` \| `bnb_4bit`. 4-bit needs bitsandbytes and shrinks VRAM. |
+| `trial_index` | first | Which Pareto-front trial to export; unset takes the first. |
+| `checkpoint_action` | continue | `continue` (resume a crashed study) \| `restart`. |
+| `export` | merge | `merge` (dense safetensors) \| `adapter` (LoRA only). |
+
+The stage is `abliterate.base`, slotted between preflight and the corpus:
+`preflight → abliterate.base → data.corpus → …`. The decensored base lands at
+`{output_root}/abliterated_base`, and the Optuna journal (resume state) at
+`{output_root}/abliterate_checkpoints/`. It is a base-level decensor, not a
+finished-model garnish — the refusal direction is removed before any
+specialist trains, so the stitched MoE inherits it too.
+
 #### `smoke:` and `roots:` — the small print
 
 | Knob | Default | What it does |
@@ -593,4 +619,4 @@ out.
 
 ## Licence
 
-GPL-3.0-only.
+AGPL-3.0-or-later.

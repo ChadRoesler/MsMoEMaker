@@ -31,6 +31,9 @@ from typing import Dict, List, Sequence, Tuple
 # -- fixed stages ------------------------------------------------------------
 
 PREFLIGHT = "preflight"
+# Decensor the base with the vendored Heretic core, before any specialist
+# trains from it. Optional; gated by recipe.abliterate.enabled.
+ABLITERATE_BASE = "abliterate.base"
 # WAS data.code / data.agent. Renamed while the only consumer was seren-theatre
 # and no stranger's recipe existed yet, because this vocabulary is a public
 # contract and the old spelling had a DOMAIN ASSUMPTION baked into it.
@@ -61,6 +64,7 @@ FINETUNE_PREFIX = "finetune."
 
 LABELS: Dict[str, str] = {
     PREFLIGHT: "Preflight - stamp the levers, check the disk",
+    ABLITERATE_BASE: "Abliterate the base model",
     DATA_CORPUS: "Collect the expert corpora",
     DATA_SYNTH: "Generate the synthetic corpora",
     GATE_EXPERTS: "Check the experts diverged and can be routed between",
@@ -88,7 +92,8 @@ def label_for(stage_id: str) -> str:
 
 def plan(experts: List[str],
          synth: Sequence[str] = (),
-         gates: bool = True) -> List[Tuple[str, str]]:
+         gates: bool = True,
+         abliterate: bool = False) -> List[Tuple[str, str]]:
     """The full ordered stage list for a build of these experts.
 
     Returns [(id, label), ...] in execution order, mirroring the orchestrator
@@ -140,8 +145,10 @@ def plan(experts: List[str],
     """
     out: List[Tuple[str, str]] = [
         (PREFLIGHT, LABELS[PREFLIGHT]),
-        (DATA_CORPUS, LABELS[DATA_CORPUS]),
     ]
+    if abliterate:
+        out.append((ABLITERATE_BASE, LABELS[ABLITERATE_BASE]))
+    out.append((DATA_CORPUS, LABELS[DATA_CORPUS]))
     if synth:
         out.append((DATA_SYNTH, LABELS[DATA_SYNTH]))
     for expert in experts:

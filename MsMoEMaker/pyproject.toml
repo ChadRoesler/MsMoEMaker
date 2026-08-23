@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "ms-moe-maker"
 dynamic = ["version"]
 description = "Build a mixture of experts from deliberately chosen specialists. Not a coding model - a coding model shaped like your stack."
-license = "GPL-3.0-only"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.10"
 authors = [{ name = "Chad Roesler" }]
 readme = "README.md"
@@ -46,6 +46,11 @@ train = [
     "trl>=0.9",
     "huggingface-hub>=0.23",
     "bitsandbytes>=0.46.1",
+    # Vendored heretic ablation core (ms_moe_maker/heretic/).
+    "optuna>=3.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "rich>=13.0",
 ]
 dev = [
     "pytest>=8.0",

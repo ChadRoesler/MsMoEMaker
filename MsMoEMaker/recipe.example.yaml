@@ -90,6 +90,17 @@ size: auto
 #   base_evals: auto
 #   main_evals: manual
 #
+# abliterate: true             # decensor the base first (vendored Heretic core)
+#
+# Or a mapping:
+# abliterate:
+#   n_trials: 200              # Optuna trials (-1 = default 200)
+#   seed: 42                   # reproducible study (null = random)
+#   quantization: none         # none | bnb_4bit
+#   trial_index: null          # null = first Pareto-front trial
+#   checkpoint_action: continue   # continue | restart
+#   export: merge              # merge | adapter
+#
 # runtime:
 #   dtype: bfloat16
 #   direct_load: true

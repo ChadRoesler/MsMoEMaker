@@ -432,6 +432,16 @@ class PipelineConfig:
     size: str
     base: str
     base_safe: str
+    # Abliteration (vendored Heretic core). abliterate_enabled gates the
+    # `abliterate.base` stage; the rest are passed through to the Heretic
+    # Settings when the stage runs.
+    abliterate_enabled: bool = False
+    abliterate_n_trials: int = 200
+    abliterate_seed: Optional[int] = None
+    abliterate_quantization: str = "none"
+    abliterate_trial_index: Optional[int] = None
+    abliterate_checkpoint_action: str = "continue"
+    abliterate_export: str = "merge"
     # Whether the base is a reasoning model (thinking trace before answers).
     # Resolved once from base_kind (see is_reasoning_base); downstream prompt /
     # eval handling keys off this rather than sniffing the id again.
@@ -939,11 +949,29 @@ def build_config(recipe, force: bool = False,
     # router's `.train` split derive from the same number as eval's.
     eval_held_out_fraction = held_out_fraction(recipe)
 
+    # Abliteration (vendored Heretic core). Resolved here so `_knob` is in
+    # scope; the core itself is imported lazily by the stage in builder.py.
+    _abl = getattr(recipe, "abliterate", None)
+    abl_enabled = bool(getattr(_abl, "enabled", False))
+    abl_n_trials = _knob(getattr(_abl, "n_trials", -1), 200)
+    abl_seed = getattr(_abl, "seed", None)
+    abl_quant = getattr(_abl, "quantization", "none") or "none"
+    abl_trial = getattr(_abl, "trial_index", None)
+    abl_ckpt = getattr(_abl, "checkpoint_action", "continue") or "continue"
+    abl_export = getattr(_abl, "export", "merge") or "merge"
+
     return PipelineConfig(
         name=name,
         size=size,
         base=base_model,
         base_safe=base_safe,
+        abliterate_enabled=abl_enabled,
+        abliterate_n_trials=abl_n_trials,
+        abliterate_seed=abl_seed,
+        abliterate_quantization=abl_quant,
+        abliterate_trial_index=abl_trial,
+        abliterate_checkpoint_action=abl_ckpt,
+        abliterate_export=abl_export,
         reasoning=is_reasoning_base(recipe),
         reasoning_type=_run_style[0],
         reasoning_open=_run_style[1].open if _run_style[1] else "",

@@ -158,6 +158,24 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     cb.stage(stages.PREFLIGHT, mf.DONE, note)
     result.stages_completed.append(stages.PREFLIGHT)
 
+    # ── Stage: abliterate the base (optional) ───────────────────────────────
+    #
+    # Runs the vendored Heretic core on the resolved base and repoints
+    # `config.base` at the result, so every specialist trains from the
+    # decensored checkpoint. Skipped unless the recipe asks for it.
+    if config.abliterate_enabled:
+        import dataclasses
+
+        from . import abliterate as abliterate_mod
+
+        cb.stage(stages.ABLITERATE_BASE, "running", "decensoring the base model")
+        ablated_dir = abliterate_mod.abliterate_base(config)
+        config = dataclasses.replace(config, base=ablated_dir)
+        print(f"[abliterate] base repointed -> {ablated_dir}")
+        cb.stage(stages.ABLITERATE_BASE, mf.DONE, f"abliterated base → {ablated_dir}")
+        result.stages_completed.append(stages.ABLITERATE_BASE)
+        result.artifacts[stages.ABLITERATE_BASE] = ablated_dir
+
     # ── Determine expert list and sources ─────────────────────────────────
     expert_names = config.expert_names
     if not expert_names:

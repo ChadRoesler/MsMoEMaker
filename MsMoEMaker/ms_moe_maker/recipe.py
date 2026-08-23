@@ -297,6 +297,23 @@ class Roots:
 
 
 @dataclass
+class Abliterate:
+    """The `abliterate:` block. Decensor the base before training specialists.
+
+    Runs the vendored Heretic core (ms_moe_maker.heretic) on the resolved base,
+    then points the build at the decensored result. `abliterate: true` is the
+    on-ramp; a mapping customises the knobs below.
+    """
+    enabled: bool = False
+    n_trials: int = -1            # -1 = Heretic default (200 Optuna trials)
+    seed: Optional[int] = None
+    quantization: str = "none"    # none | bnb_4bit
+    trial_index: Optional[int] = None     # None = first Pareto-front trial
+    checkpoint_action: str = "continue"   # continue | restart
+    export: str = "merge"         # merge | adapter
+
+
+@dataclass
 class Recipe:
     """Complete recipe.  name/base are optional — auto-filled from
     template/tier when not provided."""
@@ -318,6 +335,7 @@ class Recipe:
     router: Router = field(default_factory=Router)
     eval: EvalSpec = field(default_factory=EvalSpec)
     smoke: SmokeSpec = field(default_factory=SmokeSpec)
+    abliterate: Abliterate = field(default_factory=Abliterate)
     template: str = ""  # optional: "code" | "dnd" | "math" | "culinary"
     # bool | mapping. When truthy, a tools (MCP) expert is added to `experts`:
     # `true` uses the defaults, a mapping customises name/teacher/etc.
@@ -365,7 +383,7 @@ class Recipe:
 _KNOWN_TOP = {
     "name", "base", "base_kind", "experts", "schema_version", "size", "budget",
     "moe", "gates", "runtime", "roots", "corpus", "router", "eval", "smoke",
-    "template", "tools_expert",
+    "template", "tools_expert", "abliterate",
 }
 
 
@@ -378,6 +396,15 @@ def _build(cls, data: Dict[str, Any], path: str,
         warnings.append(f"{path}.{u} is not a known key - IGNORED "
                         f"(known: {', '.join(sorted(fields))})")
     return cls(**{k: v for k, v in data.items() if k in fields})
+
+
+def _build_abliterate(raw: Any, warnings: List[str]) -> "Abliterate":
+    """`abliterate: true` or a mapping -> an Abliterate. Anything else -> off."""
+    if raw is True:
+        return Abliterate(enabled=True)
+    if isinstance(raw, dict):
+        return _build(Abliterate, {"enabled": True, **raw}, "abliterate", warnings)
+    return Abliterate(enabled=False)
 
 
 def _apply_template(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -489,6 +516,7 @@ def parse(data: Dict[str, Any],
         router=_build(Router, data.get("router") or {}, "router", warnings),
         eval=_build(EvalSpec, data.get("eval") or {}, "eval", warnings),
         smoke=_build(SmokeSpec, data.get("smoke") or {}, "smoke", warnings),
+        abliterate=_build_abliterate(data.get("abliterate"), warnings),
         template=data.get("template", ""),
         tools_expert=tools_expert,
     )
@@ -593,6 +621,21 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     if rec.base_kind not in ("auto", "reasoning", "nonreasoning"):
         errs.append(f"base_kind must be auto | reasoning | nonreasoning, got "
                     f"{rec.base_kind!r}")
+
+    # -- abliteration ---------------------------------------------------------
+    if rec.abliterate.enabled:
+        if rec.abliterate.quantization not in ("none", "bnb_4bit"):
+            errs.append(f"abliterate.quantization must be none | bnb_4bit, got "
+                        f"{rec.abliterate.quantization!r}")
+        if rec.abliterate.export not in ("merge", "adapter"):
+            errs.append(f"abliterate.export must be merge | adapter, got "
+                        f"{rec.abliterate.export!r}")
+        if rec.abliterate.checkpoint_action not in ("continue", "restart"):
+            errs.append(f"abliterate.checkpoint_action must be continue | restart, "
+                        f"got {rec.abliterate.checkpoint_action!r}")
+        if rec.abliterate.n_trials == 0:
+            errs.append("abliterate.n_trials must be -1 (default) or a positive "
+                        "integer")
 
     # -- base model architecture --------------------------------------------
     #
