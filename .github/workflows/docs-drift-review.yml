@@ -1,0 +1,69 @@
+name: Docs / Wiki Drift Review
+
+on:
+  schedule:
+    - cron: "0 14 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  open-review-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create monthly docs/wiki drift review issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const now = new Date();
+            const yyyy = now.getUTCFullYear();
+            const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+            const title = `Docs/wiki drift review ${yyyy}-${mm}`;
+
+            const { owner, repo } = context.repo;
+
+            const existing = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100
+            });
+
+            if (existing.data.some(i => i.title === title)) {
+              core.info(`Issue already exists: ${title}`);
+              return;
+            }
+
+            const body = [
+              'Monthly documentation drift review checklist:',
+              '',
+              '- [ ] Compare README quick-start commands against current CLI behavior',
+              '- [ ] Compare `docs/CLI.md` against command/flag reality',
+              '- [ ] Compare `docs/ARCHITECTURE.md` against current stages/events/contracts',
+              '- [ ] Refresh `docs/TROUBLESHOOTING.md` with recent real failure signatures',
+              '- [ ] Validate wiki pages include `Validated against commit/tag`',
+              '- [ ] Update wiki pages that conflict with repo canonical docs',
+              '',
+              'Canonical policy: see `MsMoEMaker/docs/SOURCE_OF_TRUTH.md`.'
+            ].join('\n');
+
+            const labels = ['documentation', 'docs-drift', 'wiki-sync'];
+            let applied = [];
+
+            try {
+              const repoLabels = await github.rest.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
+              const known = new Set(repoLabels.data.map(l => l.name));
+              applied = labels.filter(l => known.has(l));
+            } catch (e) {
+              core.info('Could not enumerate labels; proceeding without optional labels.');
+            }
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+              labels: applied
+            });

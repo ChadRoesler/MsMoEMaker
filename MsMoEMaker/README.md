@@ -16,7 +16,7 @@ the others.
 > Not a coding model. A coding model shaped like *your* stack.
 
 The real product is the factory, not the model. Swap the expert list and
-someone else gets their own Ms.MoE.
+someone else gets their own Ms.MoE build.
 
 ---
 
@@ -29,9 +29,9 @@ pip install ms-moe-maker[train]     # on the box that actually builds
 
 The base install depends only on `pyyaml`, and that is the point:
 `ms-moe-maker validate` and `build --plan` run on a laptop with no GPU, so you
-can check a recipe and read what it will cost before going near a machine that
-can run it. Every torch import in the package is inside a function, so the base
-install imports cleanly.
+can check a recipe and estimate cost before going near a machine that can run
+it. Every torch import in the package is inside a function, so the base install
+imports cleanly.
 
 `[train]` adds torch, transformers, datasets, safetensors, accelerate, peft and
 trl — everything the build stages actually touch. The stitcher is vendored, so
@@ -46,23 +46,23 @@ still works:
 | You have | Install | What runs |
 |---|---|---|
 | A recipe | `ms-moe-maker` | `init`, `validate`, `describe`, `build --plan` |
-| A finished MoE or GGUF | `ms-moe-maker` | ...and **`export`** and **`smoke`** |
+| A finished MoE or GGUF | `ms-moe-maker` | ...and **`smoke`** |
 | Specialists someone trained | `ms-moe-maker[train]` | ...and `stitch`, `router`, `eval` |
 | A box with a GPU | `ms-moe-maker[train]` | the whole build |
 
-The second row is the one worth knowing about. `export` and `smoke` shell out to
-llama.cpp and import nothing but the standard library — so a person handed a
-finished MoE can convert it to GGUF and **prove it generates**, with no ML stack
-installed at all. Release CI asserts that, so it stays true.
+The second row is the one worth knowing about. `smoke` shells out to llama.cpp
+and imports nothing but the standard library, so a person handed a finished MoE
+or GGUF can still **prove it generates** with no ML stack installed. Release CI
+asserts that, so it stays true.
 
-## Use
+## Quick start
 
 ```bash
 # Start from nothing
 ms-moe-maker init > recipe.yaml
 ms-moe-maker init --template dnd > recipe.yaml
 
-# Discover what's available (zero side-effects, returns JSON)
+# Discover what's available (zero side effects, returns JSON)
 ms-moe-maker describe
 
 # Validate recipe structure — no pipeline, no GPU, no network
@@ -94,10 +94,19 @@ ms-moe-maker eval recipe.yaml --mode quality
 nothing, so it works on a laptop. `--dryrun` is a *real* build on the smallest
 rung — cheap, but it needs torch like any other build.
 
+## Documentation map
+
+- Start here: `README.md` (install, quick start, core concepts)
+- Command reference: [`docs/CLI.md`](docs/CLI.md)
+- Architecture + contracts: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Common failures and fixes: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+- Ownership and anti-drift policy: [`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md)
+- Wiki rollout guide: [`docs/WIKI_BOOTSTRAP.md`](docs/WIKI_BOOTSTRAP.md)
+
 ## The recipe
 
-A build, as a document. You can hand it to someone who doesn't have your box
-and they get your run.
+A build as a document. You can hand it to someone who doesn't have your box,
+and they can reproduce your run.
 
 ### Minimal recipe
 
@@ -142,10 +151,10 @@ budget:
   max_seq_length: 1024
 ```
 
-One thing to know before it surprises you: `min_samples` is a floor, not a
-target, and it **rises to meet `router_mix_total`** — the router's mix is drawn
-from the training split, so each expert needs enough collected documents to
-fill its share of the mix. The run says so when it happens. See
+One thing to know up front: `min_samples` is a floor, not a target, and it
+**rises to meet `router_mix_total`** — the router's mix is drawn from the
+training split, so each expert needs enough collected documents to fill its
+share of the mix. The run tells you when this happens. See
 [`corpus:`](#corpus--how-much-text-and-how-varied) below.
 
 `--dryrun` is a different thing: it also relabels the run and writes to a
@@ -257,7 +266,7 @@ DEFAULTS (5 from outside the recipe):
   tools_expert.teacher     <- ~/.msmoe/defaults.yaml
 ```
 
-#### Two ids, because there are two questions
+#### Two IDs, because there are two questions
 
 Because defaults live on the box, a recipe on its own no longer fully determines
 a build. So there are two ids and they mean different things:
@@ -293,8 +302,8 @@ specialists were trained differently from each other — silently, because
 finished stages skip themselves. It only refuses when something is already
 finished and would be inherited; a fresh directory just gets restamped.
 
-Pass `--defaults` when you need two machines to agree, and read the provenance
-block when they don't.
+Pass `--defaults` when you need two machines to agree, and read the
+provenance block when they do not.
 
 `ms-moe-maker --describe` reports what a box presets — the layers, whether each
 is present, its hash, and which key came from which file — so a front-end can
@@ -302,13 +311,17 @@ show a machine's configuration without re-implementing the merge. Under
 `--json`, `validate` and `build` emit a `defaults` event carrying the same
 provenance.
 
-The full design and roadmap live in [`docs/DEFAULTS.md`](docs/DEFAULTS.md).
+For deeper defaults and governance detail, use:
+
+- [`docs/CLI.md`](docs/CLI.md) for command-level behavior
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for contracts and stage model
+- [`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md) for repo vs wiki ownership
 
 ### Every knob, and what actually moves
 
 Everything below is optional. A recipe with nothing but `experts:` builds.
-This section is for when you want to turn something and would like to know
-what it does before you spend four hours finding out.
+This section is for when you want to adjust a knob and understand what it does
+before spending four hours finding out.
 
 Where a number here is called **measured**, it came off a real run on a DGX
 Spark at 0.5B with three code experts, top-2 of 3 — not off a napkin. Where
@@ -528,7 +541,7 @@ experts:
   - name: monster_manual
     source: { kind: hf, repo: PleiaSys/DnD-MonsterManual, text_field: text }
   - name: players_handbook
-    source: { kind: hf, repo: PleiaSys/DnD-PlayersHandbook, text_field: text }
+    source: { kind: hf, repo: PleiaSys/DnD-PlayerHandbook, text_field: text }
   - name: dm_guide
     source: { kind: hf, repo: PleiaSys/DnD-DMG, text_field: text }
 ```
@@ -545,7 +558,7 @@ Available templates: `code`, `dnd`, `math`, `culinary`.
 | `local` | Directory of .txt/.jsonl/.md files | Custom corpora |
 | `synth` | Generate traces from a teacher model | Agentcore / reasoning |
 
-Kinds are a **registry**, not a fixed list — another package can publish its own
+Kinds are a **registry**, not a fixed list. Another package can publish its own
 via the `ms_moe_maker.corpus_kinds` entry point without sending a PR here.
 
 `gh` fetches one tarball from codeload rather than cloning, so there is no git
@@ -569,7 +582,7 @@ See `recipe.example.yaml` for the fully annotated version.
 
 A tool-calling specialist is the largest domain contrast a Ms.MoE can have —
 chat-formatted JSON-RPC against raw source — and it is the one expert whose
-corpus has to be *generated* rather than scraped. So it gets a dedicated knob
+corpus must be *generated* rather than scraped. So it gets a dedicated knob
 instead of a pile of synth plumbing:
 
 ```yaml

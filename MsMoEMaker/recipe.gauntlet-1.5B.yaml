@@ -1,0 +1,40 @@
+schema_version: 1
+name: gauntlet-0.5B
+size: 0.5B
+base_kind: nonreasoning       # the base does NOT reason; one expert will anyway
+
+experts:
+  - name: python
+    source: { kind: stack, language: Python }
+  - name: csharp
+    source: { kind: stack, language: C# }
+  # R1-distill into ONE specialist, on a base that cannot reason.
+  - name: powershell
+    source: { kind: hf, repo: SaeedRahmani/codeparrot_github_code_powershell, text_field: code }
+  - name: shell
+    source:
+      kind: synth
+      reasoning: true
+      teacher: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      
+abliterate: true
+tools_expert: true            # injects `agentcore`; the box supplies its teacher
+runtime:
+  hardware_tier: spark
+budget:
+  target_steps: 600           # a shakedown, not a result
+corpus:
+  min_samples: 300            # will be derived UP; watch it say so
+  max_samples: 32000
+  router_mix_total: 32000
+moe:
+  experts_per_tok: 2
+  router_init: random
+  norm_topk_prob: true
+gates:
+  experts: auto               # divergence + the cross-domain loss matrix
+  main_evals: skip           # the refusal above says to run `eval` yourself; do that
+eval:
+  mode: all
+  num_samples: 16
+  dead_threshold: 1.2

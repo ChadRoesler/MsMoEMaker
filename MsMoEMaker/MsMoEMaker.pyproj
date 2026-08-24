@@ -94,18 +94,40 @@
     <Compile Include="tests\test_validators.py" />
   </ItemGroup>
   <ItemGroup>
+    <Folder Include="docs\" />
     <Folder Include="ms_moe_maker\" />
     <Folder Include="ms_moe_maker\heretic\" />
     <Folder Include="ms_moe_maker\heretic\scorers\" />
     <Folder Include="tests\" />
+    <Folder Include="wiki-starter\" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="CONTRIBUTING.md" />
+    <Content Include="docs\ARCHITECTURE.md" />
+    <Content Include="docs\CLI.md" />
+    <Content Include="docs\DOC_BACKLOG.md" />
+    <Content Include="docs\DOC_GAPS.md" />
+    <Content Include="docs\MAINTENANCE_CADENCE.md" />
+    <Content Include="docs\README.md" />
+    <Content Include="docs\SOURCE_OF_TRUTH.md" />
+    <Content Include="docs\TROUBLESHOOTING.md" />
+    <Content Include="docs\WIKI_BOOTSTRAP.md" />
     <Content Include="pyproject.toml" />
     <Content Include="README.md" />
     <Content Include="reasoning.yaml" />
     <Content Include="recipe.example.yaml" />
     <Content Include="recipe.flow-0.5B.yaml" />
     <Content Include="recipe.rung-0.5B.yaml" />
+    <Content Include="SECURITY.md" />
+    <Content Include="wiki-starter\Glossary.md" />
+    <Content Include="wiki-starter\Home.md" />
+    <Content Include="wiki-starter\How-To-First-Dryrun.md" />
+    <Content Include="wiki-starter\How-To-First-Full-Build.md" />
+    <Content Include="wiki-starter\Recipe-Deep-Dive-Corpus-Strategy.md" />
+    <Content Include="wiki-starter\Recipe-Deep-Dive-Defaults-and-Reproducibility.md" />
+    <Content Include="wiki-starter\Troubleshooting-FAQ.md" />
+    <Content Include="wiki-starter\Tuning-Playbook-Router.md" />
+    <Content Include="wiki-starter\_Sidebar.md" />
   </ItemGroup>
   <ItemGroup>
     <InterpreterReference Include="Global|PythonCore|3.11" />

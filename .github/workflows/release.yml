@@ -41,6 +41,49 @@ jobs:
         run: python -m pytest tests/ -v
         working-directory: MsMoEMaker
 
+  docs-check:
+    runs-on: ubuntu-latest
+    name: "Docs lint + local links"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Markdown lint
+        uses: DavidAnson/markdownlint-cli2-action@v17
+        with:
+          globs: |
+            README.md
+            MsMoEMaker/**/*.md
+
+      - name: Check local markdown links
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          roots = [Path('README.md'), *Path('MsMoEMaker').rglob('*.md')]
+          link = re.compile(r'\[[^\]]+\]\(([^)]+)\)')
+          bad = []
+
+          for md in roots:
+              text = md.read_text(encoding='utf-8')
+              for target in link.findall(text):
+                  t = target.strip()
+                  if not t or t.startswith('#') or '://' in t or t.startswith('mailto:'):
+                      continue
+                  t = t.split('#', 1)[0].strip()
+                  if not t:
+                      continue
+                  candidate = (md.parent / t).resolve()
+                  if not candidate.exists():
+                      bad.append(f"{md}: missing link target -> {target}")
+
+          if bad:
+              print('\n'.join(bad))
+              raise SystemExit(1)
+          print('Local markdown links: OK')
+          PY
+
 # ── Build + GitHub Release (tags only) ────────────────────────────────────
   # ── Install shapes ──────────────────────────────────────────────────────
   #
@@ -292,7 +335,7 @@ jobs:
           PY
 
   build-and-release:
-    needs: [test, install-shapes]
+    needs: [test, docs-check, install-shapes]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 

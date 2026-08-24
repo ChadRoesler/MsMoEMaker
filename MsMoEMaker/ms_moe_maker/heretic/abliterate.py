@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 #
-# Headless in-process entry point for the vendored Heretic ablation core.
+# Headless entry point for the vendored Heretic ablation core. `run_abliteration`
+# is the function; `main()` is the subprocess boundary that `ms_moe_maker.abliterate`
+# spawns, so Heretic's process-global state dies with the child process.
 # Extracted and adapted from heretic's `main.py` `run()`: the interactive TUI,
 # Hugging Face upload, benchmark, chat and reproducibility paths were removed.
 # Everything the Optuna optimization loop needs to run unattended is here.
@@ -335,3 +337,35 @@ def run_abliteration(settings: Settings) -> str:
 
     print(f"Model saved to {save_directory}.")
     return save_directory
+
+
+def main(argv=None) -> int:
+    """CLI entry for the SUBPROCESS boundary.
+
+    `ms_moe_maker.abliterate` spawns this as
+    `python -m ms_moe_maker.heretic.abliterate --settings <path>`, so Heretic's
+    process-global state (torch grad mode, seeds, logging verbosity, and its
+    CUDA context) dies with the child instead of leaking into the finetune
+    stages that run afterwards in the parent.
+    """
+    import argparse
+    import json
+
+    from .config import Settings
+
+    parser = argparse.ArgumentParser(
+        prog="ms_moe_maker.heretic.abliterate",
+        description="Run one headless abliteration to completion.")
+    parser.add_argument("--settings", required=True,
+                        help="path to a JSON file of Heretic Settings fields")
+    args = parser.parse_args(argv)
+
+    with open(args.settings, encoding="utf-8") as fh:
+        data = json.load(fh)
+    settings = Settings(**data)
+    run_abliteration(settings)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

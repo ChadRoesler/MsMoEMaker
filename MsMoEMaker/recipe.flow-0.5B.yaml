@@ -118,7 +118,7 @@ router:
   # mean the right thing, so these two move together.
   batch: 8
   accum: 1
-  aux_loss_coef: 0.005       # was 0.02; collapse is prevented structurally now
+  aux_loss_coef: 0.02       # was 0.02; collapse is prevented structurally now
   lr: 3e-4                   # was 1e-4 — 43k params on a short schedule
 
 runtime:
