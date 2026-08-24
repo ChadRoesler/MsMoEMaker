@@ -29,6 +29,18 @@
     <Compile Include="ms_moe_maker\corpushealth.py" />
     <Compile Include="ms_moe_maker\defaults.py" />
     <Compile Include="ms_moe_maker\experts.py" />
+    <Compile Include="ms_moe_maker\heretic\abliterate.py" />
+    <Compile Include="ms_moe_maker\heretic\config.py" />
+    <Compile Include="ms_moe_maker\heretic\evaluator.py" />
+    <Compile Include="ms_moe_maker\heretic\model.py" />
+    <Compile Include="ms_moe_maker\heretic\plugin.py" />
+    <Compile Include="ms_moe_maker\heretic\scorer.py" />
+    <Compile Include="ms_moe_maker\heretic\scorers\keyword_rate.py" />
+    <Compile Include="ms_moe_maker\heretic\scorers\kl_divergence.py" />
+    <Compile Include="ms_moe_maker\heretic\scorers\__init__.py" />
+    <Compile Include="ms_moe_maker\heretic\system.py" />
+    <Compile Include="ms_moe_maker\heretic\utils.py" />
+    <Compile Include="ms_moe_maker\heretic\__init__.py" />
     <Compile Include="ms_moe_maker\reasoning.py" />
     <Compile Include="ms_moe_maker\__init__.py" />
     <Compile Include="ms_moe_maker\__main__.py" />
@@ -54,6 +66,7 @@
     <Compile Include="ms_moe_maker\template.py" />
     <Compile Include="ms_moe_maker\validators.py" />
     <Compile Include="ms_moe_maker\_moe_stitch.py" />
+    <Compile Include="tests\test_abliterate.py" />
     <Compile Include="tests\test_builder.py" />
     <Compile Include="tests\test_builder_wiring.py" />
     <Compile Include="tests\test_cli.py" />
@@ -82,6 +95,8 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="ms_moe_maker\" />
+    <Folder Include="ms_moe_maker\heretic\" />
+    <Folder Include="ms_moe_maker\heretic\scorers\" />
     <Folder Include="tests\" />
   </ItemGroup>
   <ItemGroup>
