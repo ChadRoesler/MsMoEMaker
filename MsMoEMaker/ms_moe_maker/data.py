@@ -154,7 +154,13 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
             stack_languages.append(lang)
 
     # ── 3. Fall-through languages (not covered by sources) ────────────────
-    remaining_languages = list(safe_map.keys())  # expert names from recipe
+    # ONLY expert names that have NO source. The old line was
+    # `list(safe_map.keys())` — every expert name — so a `kind: hf` expert
+    # that is also a CODE_LANGUAGE ("powershell", "shell") had its HF corpus
+    # silently overwritten by the shard scan, and a `kind: synth` expert was
+    # scanned as if it were a code language. Filter to what the recipe
+    # actually left unsourced.
+    remaining_languages = [n for n in (languages or []) if n not in sources]
     if stack_languages:
         # Stack: scan shards filtered by the specified language(s)
         print(f"\nShard scan for stack sources: {stack_languages}")

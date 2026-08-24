@@ -140,3 +140,59 @@ def test_the_stage_vocabulary_carries_no_domain_assumption():
         assert "code" not in stage_id, (
             f"stage id {stage_id!r} names a domain. Everything between the "
             f"corpus and the GGUF is domain-blind; the ids must be too.")
+
+
+# ── the source KIND decides the collector, not the expert NAME ──────────────
+
+def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
+    """THE FIX, as an executable claim.
+
+    A `kind: hf` expert whose NAME is also a CODE_LANGUAGE must go to the HF
+    collector, not the stack scan. `remaining_languages` used to be every
+    expert name, so "powershell" (kind=hf) had its HF corpus overwritten by a
+    shard scan keyed on the code-language "PowerShell", and "shell"
+    (kind=synth) was scanned as if it were the Shell language.
+
+    The source kind is the contract; the name is a label.
+    """
+    import types
+
+    from ms_moe_maker import data as d
+    from ms_moe_maker.recipe import Source
+
+    calls = {"hf": [], "shards": []}
+
+    def fake_hf(repo, text_field, split, out_path, config,
+                callback=None, lang=""):
+        calls["hf"].append(repo)
+        return out_path
+
+    def fake_shards(languages, config, callback=None):
+        calls["shards"].append(list(languages))
+        from ms_moe_maker import config as cfg_mod
+        return {cfg_mod.safe_name(l): f"stack:{l}" for l in languages}
+
+    monkeypatch.setattr(d, "_collect_hf", fake_hf)
+    monkeypatch.setattr(d, "_collect_from_shards", fake_shards)
+
+    config = types.SimpleNamespace(data_root="test_data", force=False)
+    sources = {
+        "python": Source(kind="stack", language="Python"),
+        "csharp": Source(kind="stack", language="C#"),
+        "powershell": Source(
+            kind="hf", repo="SaeedRahmani/codeparrot_github_code_powershell",
+            text_field="code"),
+        "shell": Source(kind="synth", reasoning=True, teacher="x/y"),
+    }
+
+    results = d.collect_corpus(
+        config, languages=["python", "csharp", "powershell", "shell"],
+        sources=sources)
+
+    # The hf expert went to the HF collector, once, with its repo.
+    assert calls["hf"] == ["SaeedRahmani/codeparrot_github_code_powershell"]
+    # The stack scan was asked for ONLY the two stack languages — never
+    # "PowerShell" (an hf expert) or "Shell" (a synth expert).
+    assert calls["shards"] == [["Python", "C#"]]
+    # And the hf result survived — it was not overwritten by a stack path.
+    assert results["powershell"] == "test_data/powershell_code.jsonl"
