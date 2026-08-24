@@ -593,12 +593,15 @@ def _cmd_build(args):
         synth = [e.name for e in rec.experts
                  if getattr(getattr(e, "source", None), "kind", "") == "synth"]
         say("")
-        for i, (sid, label) in enumerate(_st.plan(config.expert_names, synth), 1):
+        for i, (sid, label) in enumerate(
+                _st.plan(config.expert_names, synth,
+                         abliterate=config.abliterate_enabled), 1):
             say(f"  {i:>2}. {sid:<28} {label}")
         say(f"\n  {len(translation.agreed)} field(s) honoured, "
             f"{len(translation.refusals)} refused. Nothing was run.")
         events.done(ok=True, run_dir=config.output_root, stages_done=0,
-                    stages_total=len(_st.plan(config.expert_names, synth)),
+                    stages_total=len(_st.plan(config.expert_names, synth,
+                                              abliterate=config.abliterate_enabled)),
                     refusals=len(translation.refusals), planned_only=True)
         return 0
 

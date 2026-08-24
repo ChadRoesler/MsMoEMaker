@@ -183,7 +183,10 @@ class Runner:
             experts=experts,
             refusals=list(translation.refusals),
             stages=[mf.Stage(id=sid, label=label)
-                    for sid, label in st.plan(experts, synth, gates=False)],
+                    for sid, label in st.plan(
+                        experts, synth, gates=False,
+                        abliterate=bool(getattr(
+                            getattr(recipe, "abliterate", None), "enabled", False)))],
         )
         # WHAT THIS RUN IS BUILDING, stamped before a single stage runs.
         # Best-effort: a fingerprint that cannot be computed must not take a
