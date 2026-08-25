@@ -7,22 +7,80 @@ Canonical references:
 - `MsMoEMaker/docs/CLI.md`
 - `MsMoEMaker/docs/TROUBLESHOOTING.md`
 
-## Core ideas
+## Objective
+
+Build corpora that are both large enough for router training and diverse enough
+to avoid expert collapse into single-source style learning.
+
+## Core dynamics
 
 - `min_samples` is a floor, not a target.
-- `router_mix_total` affects router step budget and can raise practical corpus needs.
-- `per_repo_cap` protects against single-repo dominance.
+- `router_mix_total` drives router feed requirements and step budget.
+- `per_repo_cap` limits single-source dominance.
+- `max_samples` caps cost but can starve diversity if set too low.
 
-## Practical checklist
+## Planning framework
 
-- Start with realistic `max_samples` for your run budget.
-- Keep `per_repo_cap` conservative for diversity.
-- Use `corpus` command to inspect quality and propose pruning when needed.
+### Step 1: define run intent
 
-## Failure pattern to watch
+- exploratory run: smaller caps, faster iteration
+- quality run: larger corpora, stronger diversity controls
+- release run: explicit corpus strategy and recorded diagnostics
 
-- Corpus passes, specialists train, router underperforms due to insufficient mix feed.
+### Step 2: set corpus envelope
 
-Mitigation:
+- choose `max_samples` by time/storage budget
+- set conservative `per_repo_cap`
+- ensure practical room for router mix goals
 
-- Revisit corpus volume and router mix sizing together, not in isolation.
+### Step 3: validate and inspect
+
+- run `ms-moe-maker build recipe.yaml --plan`
+- run `ms-moe-maker corpus recipe.yaml`
+
+### Step 4: prune or adjust
+
+- if dominance appears, use prune mode and lower per-repo cap
+- if router underfeeds, increase corpus envelope or reduce mix ambition
+
+## Iteration loop
+
+1. Run baseline build/eval.
+2. Inspect corpus and routing outcomes.
+3. Change one corpus lever at a time.
+4. Rebuild and compare deltas.
+
+Keep notes per iteration to avoid repeating ineffective settings.
+
+## Failure patterns and responses
+
+### Pattern: corpus looks healthy, router remains weak
+
+Likely cause: corpus quantity/diversity not aligned with router mix needs.
+
+Response:
+
+- adjust corpus and router parameters together
+- avoid isolated router-only tuning when inputs are weak
+
+### Pattern: experts overfit one repository style
+
+Likely cause: `per_repo_cap` too high.
+
+Response:
+
+- lower `per_repo_cap`
+- increase source variety and rerun corpus checks
+
+## Anti-patterns
+
+- maximizing samples without checking diversity
+- tuning router before validating corpus quality
+- treating one successful build as corpus-proof for all future runs
+
+## Operator checklist
+
+- [ ] corpus constraints align with run intent
+- [ ] per-repo dominance reviewed
+- [ ] router mix feasibility checked
+- [ ] corpus diagnostics archived with run metadata

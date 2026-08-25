@@ -5,32 +5,84 @@ Validated against commit/tag: `<fill-me>`
 Canonical references:
 
 - `MsMoEMaker/docs/CLI.md`
+- `MsMoEMaker/docs/TROUBLESHOOTING.md`
 - `MsMoEMaker/README.md`
 
 ## Goal
 
-Run a real smallest-rung build path quickly to validate setup.
+Run the smallest-rung real build path to verify your environment, defaults, and
+stage flow before spending time on full-size runs.
 
-## Steps
+## When to use dryrun
 
-1. Install base + train deps on the build machine:
+Use dryrun when you want to prove pipeline integrity:
+
+- command wiring works
+- dependencies are usable
+- roots and artifacts are writable
+- stage flow reaches terminal completion
+
+Dryrun is not a no-op planner. It executes a real reduced build path.
+
+## Preflight checklist (before commands)
+
+- You are in the intended virtual environment.
+- Build machine has training deps available.
+- You know where outputs should land.
+- You have enough free disk for temporary artifacts.
+
+## Runbook
+
+1. Install build dependencies:
    - `pip install "ms-moe-maker[train]"`
 2. Generate starter recipe:
    - `ms-moe-maker init > recipe.yaml`
-3. Validate:
+3. Validate structural and environment constraints:
    - `ms-moe-maker validate recipe.yaml`
-4. Plan-only preview:
+4. Inspect plan and resolved defaults:
    - `ms-moe-maker build recipe.yaml --plan`
-5. Dryrun:
-   - `ms-moe-maker build recipe.yaml --dryrun`
+5. Execute dryrun:
+   - `ms-moe-maker build recipe.yaml --dryrun --json`
+6. Verify generated artifact behavior:
+   - `ms-moe-maker smoke recipe.yaml`
+
+## What to record from this run
+
+Capture these items for repeatability:
+
+- commit/tag used
+- recipe path and hash
+- defaults path (if explicit)
+- final `done` outcome and any warnings
+- output root containing artifacts
 
 ## Success criteria
 
-- Build enters staged pipeline and emits stage progress.
-- Output artifacts are produced in output root for dryrun path.
+A dryrun is considered successful when all are true:
 
-## Common failures
+- stage flow starts and advances through expected stages
+- terminal completion is reached (`done` event)
+- output artifacts are present in the output root
+- smoke confirms generation
 
-- Missing `torch`/train deps -> install `[train]`
-- Path/write failures -> verify roots + disk
-- See canonical troubleshooting: `MsMoEMaker/docs/TROUBLESHOOTING.md`
+## Failure triage map
+
+If validate fails:
+
+- fix recipe/schema or dependency issues before retrying
+
+If plan succeeds but dryrun fails:
+
+- environment/runtime issue is likely
+- inspect roots, disk, and dependency availability
+
+If dryrun completes but smoke fails:
+
+- focus on export/smoke runtime path and timeout conditions
+
+Canonical failure signatures live in `MsMoEMaker/docs/TROUBLESHOOTING.md`.
+
+## Next step
+
+After this run is stable, continue with
+[How-To: First Full Build](How-To-First-Full-Build).

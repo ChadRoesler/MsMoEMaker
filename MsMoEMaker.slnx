@@ -21,6 +21,7 @@
     <File Path="README.md" />
   </Folder>
   <Folder Name="/wiki/">
+    <File Path="MsMoEMaker/wiki/Recipe-Options-Reference.md" />
     <File Path="wiki/Glossary.md" />
     <File Path="wiki/Home.md" />
     <File Path="wiki/How-To-First-Dryrun.md" />
