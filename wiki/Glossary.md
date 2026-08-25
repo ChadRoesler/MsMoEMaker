@@ -1,6 +1,6 @@
 # Glossary
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 ## Core config terms
 
@@ -23,6 +23,8 @@ Validated against commit/tag: `<fill-me>`
 
 - **Stage**: Contracted unit of pipeline work (for example `data.corpus`).
 - **Stage vocabulary**: Stable stage IDs consumed by downstream tooling.
+- **`abliterate.base`**: Optional stage that decensors the base model (vendored
+  Heretic core) before any specialist trains from it. Runs in its own process.
 - **Event stream**: JSON Lines events emitted under `--json`.
 - **Manifest**: Run-state metadata used for tracking and compatibility checks.
 

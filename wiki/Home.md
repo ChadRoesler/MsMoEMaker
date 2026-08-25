@@ -1,16 +1,15 @@
 # MsMoEMaker Wiki
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 This wiki is the operational handbook layer for MsMoEMaker.
 Use it for deep how-to guidance, tuning playbooks, and runbook practices.
 
-For contract-sensitive behavior, defer to canonical repo docs:
+For contract-sensitive behavior, defer to the canonical reference pages:
 
-- CLI contract: `MsMoEMaker/docs/CLI.md`
-- Architecture/contracts: `MsMoEMaker/docs/ARCHITECTURE.md`
-- Troubleshooting canon: `MsMoEMaker/docs/TROUBLESHOOTING.md`
-- Source-of-truth policy: `MsMoEMaker/docs/SOURCE_OF_TRUTH.md`
+- CLI contract: [CLI Reference](CLI-Reference)
+- Architecture/contracts + ownership: [Architecture](Architecture)
+- Failure signatures: [Troubleshooting Signatures](Troubleshooting-Signatures)
 
 ## How to use this wiki
 
@@ -38,6 +37,12 @@ If you need shared terminology:
 - [How-To: First Dryrun](How-To-First-Dryrun)
 - [How-To: First Full Build](How-To-First-Full-Build)
 
+### Reference
+
+- [CLI Reference](CLI-Reference)
+- [Architecture](Architecture)
+- [Troubleshooting Signatures](Troubleshooting-Signatures)
+
 ### Deep dives
 
 - [Recipe Options Reference](Recipe-Options-Reference)
@@ -55,9 +60,9 @@ If you need shared terminology:
 
 ## Operating model
 
-- Repo docs define behavior; wiki explains implementation practice.
+- The reference pages define behavior; the rest of the wiki explains practice.
 - Prefer runbooks/checklists over prose when documenting operations.
-- Update this wiki after behavior changes are documented in repo docs.
+- Update this wiki in the same PR that changes behavior.
 - Keep `Validated against commit/tag` current during release cycles.
 
 ## Suggested maintenance cadence

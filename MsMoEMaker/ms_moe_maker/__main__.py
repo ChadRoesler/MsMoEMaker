@@ -1114,6 +1114,12 @@ def main(argv=None):
     if "--describe" in (argv or sys.argv):
         print(json.dumps(DESCRIBE))
         return 0
+
+    # Load `.env` (HF_TOKEN, HF_HOME, MSMOE_*) before anything touches the
+    # network or the config. The shell still wins over the file, so an
+    # explicit export or `huggingface-cli login` always takes precedence.
+    from .dotenv import load_dotenv
+    load_dotenv()
     
     ap = argparse.ArgumentParser(
         prog="ms-moe-maker",

@@ -1,11 +1,11 @@
 # Recipe Options Reference
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical references:
 
-- `MsMoEMaker/docs/CLI.md`
-- `MsMoEMaker/docs/ARCHITECTURE.md`
+- [CLI Reference](CLI-Reference)
+- [Architecture](Architecture)
 - `MsMoEMaker/README.md`
 
 This page is a deep explanation of what each recipe block controls,
@@ -174,7 +174,8 @@ Primary options include:
 
 Purpose:
 
-- determines where pipeline blocks for safety signals.
+- advisory stop/continue controls. They warn and auto-skip, never refuse; only
+  `preflight` hard-stops a build.
 
 Guidance:
 
@@ -230,6 +231,28 @@ Guidance:
 
 - longer timeouts for slower boxes
 - keep prompts stable for repeatability checks
+
+## `abliterate` block (base decensoring)
+
+- Purpose: decensor the base model (vendored Heretic core) before any specialist
+  trains from it.
+- Forms: `abliterate: true` for defaults, or a mapping for explicit control.
+
+Options include:
+
+- `n_trials` — Optuna trials; `-1` means the default (200).
+- `seed` — reproducible study seed (unset = random).
+- `quantization` — `none` or `bnb_4bit`.
+- `trial_index` — which Pareto-front trial to export (unset = first).
+- `checkpoint_action` — `continue` (resume a crashed study) or `restart`.
+- `export` — `merge` (dense safetensors) or `adapter` (LoRA only).
+
+Notes:
+
+- The stage is `abliterate.base`, between `preflight` and `data.corpus`.
+- It runs in its own process, so its global state and VRAM never leak into the
+  finetune stages.
+- It is a base-level decensor: every specialist inherits it through the stitch.
 
 ## Source kinds (`experts[].source.kind`)
 

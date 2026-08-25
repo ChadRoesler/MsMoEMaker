@@ -1,12 +1,12 @@
 # Recipe Deep Dive: Defaults + Reproducibility
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical references:
 
-- `MsMoEMaker/docs/CLI.md`
-- `MsMoEMaker/docs/ARCHITECTURE.md`
-- `MsMoEMaker/docs/SOURCE_OF_TRUTH.md`
+- [CLI Reference](CLI-Reference)
+- [Architecture](Architecture)
+- [Architecture](Architecture)
 
 ## Why this matters
 

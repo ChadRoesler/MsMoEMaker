@@ -1,11 +1,11 @@
 # How-To: First Dryrun
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical references:
 
-- `MsMoEMaker/docs/CLI.md`
-- `MsMoEMaker/docs/TROUBLESHOOTING.md`
+- [CLI Reference](CLI-Reference)
+- [Troubleshooting Signatures](Troubleshooting-Signatures)
 - `MsMoEMaker/README.md`
 
 ## Goal
@@ -80,7 +80,7 @@ If dryrun completes but smoke fails:
 
 - focus on export/smoke runtime path and timeout conditions
 
-Canonical failure signatures live in `MsMoEMaker/docs/TROUBLESHOOTING.md`.
+Canonical failure signatures live in [Troubleshooting Signatures](Troubleshooting-Signatures).
 
 ## Next step
 

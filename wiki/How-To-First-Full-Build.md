@@ -1,12 +1,12 @@
 # How-To: First Full Build
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical references:
 
-- `MsMoEMaker/docs/CLI.md`
-- `MsMoEMaker/docs/ARCHITECTURE.md`
-- `MsMoEMaker/docs/TROUBLESHOOTING.md`
+- [CLI Reference](CLI-Reference)
+- [Architecture](Architecture)
+- [Troubleshooting Signatures](Troubleshooting-Signatures)
 
 ## Goal
 
@@ -29,7 +29,7 @@ Before starting a full build, ensure:
 2. Create or prepare recipe:
    - `ms-moe-maker init --template code > recipe.yaml`
 3. Validate and inspect resolved plan:
-   - `ms-moe-maker validate recipe.yaml --json`
+   - `ms-moe-maker validate recipe.yaml`
    - `ms-moe-maker build recipe.yaml --plan`
 4. Execute full build:
    - `ms-moe-maker build recipe.yaml --json`

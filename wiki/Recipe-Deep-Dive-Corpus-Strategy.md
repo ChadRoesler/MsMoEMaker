@@ -1,11 +1,11 @@
 # Recipe Deep Dive: Corpus Strategy
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical references:
 
-- `MsMoEMaker/docs/CLI.md`
-- `MsMoEMaker/docs/TROUBLESHOOTING.md`
+- [CLI Reference](CLI-Reference)
+- [Troubleshooting Signatures](Troubleshooting-Signatures)
 
 ## Objective
 
@@ -14,7 +14,8 @@ to avoid expert collapse into single-source style learning.
 
 ## Core dynamics
 
-- `min_samples` is a floor, not a target.
+- `min_samples` is a floor, not a target — it rises to meet `router_mix_total`,
+  and `--plan` prints the raised floor before the run starts.
 - `router_mix_total` drives router feed requirements and step budget.
 - `per_repo_cap` limits single-source dominance.
 - `max_samples` caps cost but can starve diversity if set too low.

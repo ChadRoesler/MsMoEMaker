@@ -1,10 +1,10 @@
 # Troubleshooting FAQ
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical source of signatures and exact remediation:
 
-- `MsMoEMaker/docs/TROUBLESHOOTING.md`
+- [Troubleshooting Signatures](Troubleshooting-Signatures)
 
 Use this page as an operator decision index.
 
@@ -31,6 +31,20 @@ Action:
 
 - install `ms-moe-maker[train]`
 - rerun validate, then build
+
+### Gated model or private dataset 404/401
+
+Likely cause:
+
+- the model or dataset is gated/private and no Hugging Face token is present
+
+Action:
+
+- put `HF_TOKEN=...` in a `.env` file next to the recipe (auto-loaded), or
+- run `huggingface-cli login` once, or
+- `export HF_TOKEN=...` for the current shell
+
+The shell always wins over `.env`.
 
 ### Resume refused due to build mismatch
 
@@ -87,4 +101,4 @@ Before filing an issue or asking for review, capture:
 - whether failure reproduces on rerun
 
 Then cross-check canonical signatures in
-`MsMoEMaker/docs/TROUBLESHOOTING.md`.
+[Troubleshooting Signatures](Troubleshooting-Signatures).

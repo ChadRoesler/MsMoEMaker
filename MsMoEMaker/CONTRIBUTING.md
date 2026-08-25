@@ -22,14 +22,15 @@ pip install -e ".[train]"
 
 ## Documentation policy
 
-When a PR changes user-visible behavior, update docs in the same PR:
+When a PR changes user-visible behavior, update the wiki in the same PR:
 
-- command or flag changes -> `docs/CLI.md`
-- stage/event/manifest behavior changes -> `docs/ARCHITECTURE.md`
-- failure mode/remediation changes -> `docs/TROUBLESHOOTING.md`
+- command or flag changes -> `wiki/CLI-Reference.md`
+- stage/event/manifest behavior changes -> `wiki/Architecture.md`
+- failure mode/remediation changes -> `wiki/Troubleshooting-Signatures.md`
 - README only for quick-start and high-level usage path
 
-Refer to `docs/SOURCE_OF_TRUTH.md` for ownership boundaries.
+The wiki reference pages are the source of truth for behavior; the README is
+quick-start only.
 
 ## Commit/PR expectations
 

@@ -1,12 +1,12 @@
 # Tuning Playbook: Router
 
-Validated against commit/tag: `<fill-me>`
+Validated against commit/tag: main (unreleased)
 
 Canonical references:
 
-- `MsMoEMaker/docs/ARCHITECTURE.md`
-- `MsMoEMaker/docs/CLI.md`
-- `MsMoEMaker/docs/TROUBLESHOOTING.md`
+- [Architecture](Architecture)
+- [CLI Reference](CLI-Reference)
+- [Troubleshooting Signatures](Troubleshooting-Signatures)
 
 ## Goal
 
@@ -36,8 +36,8 @@ Primary levers:
 
 Recommended order:
 
-1. `router_mix_total`
-2. `router.epochs`
+1. `router.epochs` — cheapest way to buy router steps (no corpus cost)
+2. `router_mix_total` — more steps, but costs corpus volume
 3. `router.lr`
 4. `router.aux_loss_coef`
 
