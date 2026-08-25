@@ -94,15 +94,6 @@ ms-moe-maker eval recipe.yaml --mode quality
 nothing, so it works on a laptop. `--dryrun` is a *real* build on the smallest
 rung — cheap, but it needs torch like any other build.
 
-## Documentation map
-
-- Start here: `README.md` (install, quick start, core concepts)
-- Command reference: [`docs/CLI.md`](docs/CLI.md)
-- Architecture + contracts: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Common failures and fixes: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
-- Ownership and anti-drift policy: [`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md)
-- Wiki rollout guide: [`docs/WIKI_BOOTSTRAP.md`](docs/WIKI_BOOTSTRAP.md)
-
 ## The recipe
 
 A build as a document. You can hand it to someone who doesn't have your box,
