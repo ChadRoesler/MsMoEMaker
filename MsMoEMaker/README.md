@@ -302,11 +302,6 @@ show a machine's configuration without re-implementing the merge. Under
 `--json`, `validate` and `build` emit a `defaults` event carrying the same
 provenance.
 
-For deeper defaults and governance detail, use:
-
-- [`docs/CLI.md`](docs/CLI.md) for command-level behavior
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for contracts and stage model
-- [`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md) for repo vs wiki ownership
 
 ### Every knob, and what actually moves
 
