@@ -6,7 +6,7 @@ Use this to initialize the GitHub Wiki without duplicating canonical repo docs.
 
 A standard starter set now lives in:
 
-- `MsMoEMaker/wiki-starter/`
+- `MsMoEMaker/wiki/`
 
 Included pages:
 
@@ -26,7 +26,7 @@ Automatic publish is wired through `.github/workflows/wiki-publish.yml`.
 
 1. Enable Wiki in repository settings (one-time).
 2. Ensure the wiki exists (open Wiki tab once if needed).
-3. Push changes under `MsMoEMaker/wiki-starter/**`.
+3. Push changes under `MsMoEMaker/wiki/**`.
 4. Workflow syncs starter files into `${repo}.wiki.git`.
 5. Fill `Validated against commit/tag` on each page after major updates.
 

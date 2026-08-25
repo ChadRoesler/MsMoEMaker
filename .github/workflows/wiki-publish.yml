@@ -4,7 +4,7 @@ on:
   push:
     branches: ["master"]
     paths:
-      - "MsMoEMaker/wiki-starter/**"
+      - "MsMoEMaker/wiki/**"
       - ".github/workflows/wiki-publish.yml"
   workflow_dispatch:
 
@@ -18,16 +18,32 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Checkout wiki repo
+      - name: Checkout wiki repo (PAT)
+        if: ${{ secrets.WIKI_TOKEN != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ secrets.WIKI_TOKEN }}
+          fetch-depth: 0
+
+      - name: Checkout wiki repo (GITHUB_TOKEN fallback)
+        if: ${{ secrets.WIKI_TOKEN == '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}.wiki
           path: wiki
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Sync wiki content
         run: |
-          rsync -av --delete MsMoEMaker/wiki-starter/ wiki/
+          test -d MsMoEMaker/wiki
+          rsync -av --delete MsMoEMaker/wiki/ wiki/
+
+      - name: Show synced wiki files
+        run: |
+          ls -la wiki
 
       - name: Commit and push if changed
         run: |
