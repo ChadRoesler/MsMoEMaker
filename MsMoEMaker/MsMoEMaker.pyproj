@@ -99,7 +99,7 @@
     <Folder Include="ms_moe_maker\heretic\" />
     <Folder Include="ms_moe_maker\heretic\scorers\" />
     <Folder Include="tests\" />
-    <Folder Include="wiki-starter\" />
+    <Folder Include="wiki\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="CONTRIBUTING.md" />
@@ -118,15 +118,15 @@
     <Content Include="recipe.flow-0.5B.yaml" />
     <Content Include="recipe.rung-0.5B.yaml" />
     <Content Include="SECURITY.md" />
-    <Content Include="wiki-starter\Glossary.md" />
-    <Content Include="wiki-starter\Home.md" />
-    <Content Include="wiki-starter\How-To-First-Dryrun.md" />
-    <Content Include="wiki-starter\How-To-First-Full-Build.md" />
-    <Content Include="wiki-starter\Recipe-Deep-Dive-Corpus-Strategy.md" />
-    <Content Include="wiki-starter\Recipe-Deep-Dive-Defaults-and-Reproducibility.md" />
-    <Content Include="wiki-starter\Troubleshooting-FAQ.md" />
-    <Content Include="wiki-starter\Tuning-Playbook-Router.md" />
-    <Content Include="wiki-starter\_Sidebar.md" />
+    <Content Include="wiki\Glossary.md" />
+    <Content Include="wiki\Home.md" />
+    <Content Include="wiki\How-To-First-Dryrun.md" />
+    <Content Include="wiki\How-To-First-Full-Build.md" />
+    <Content Include="wiki\Recipe-Deep-Dive-Corpus-Strategy.md" />
+    <Content Include="wiki\Recipe-Deep-Dive-Defaults-and-Reproducibility.md" />
+    <Content Include="wiki\Troubleshooting-FAQ.md" />
+    <Content Include="wiki\Tuning-Playbook-Router.md" />
+    <Content Include="wiki\_Sidebar.md" />
   </ItemGroup>
   <ItemGroup>
     <InterpreterReference Include="Global|PythonCore|3.11" />
