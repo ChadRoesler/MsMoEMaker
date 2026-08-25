@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/.github/">
+    <File Path=".github/CODEOWNERS" />
     <File Path=".github/dependabot.yml" />
     <File Path=".github/pull_request_template.md" />
   </Folder>
@@ -8,7 +9,9 @@
     <File Path=".github/ISSUE_TEMPLATE/config.yml" />
   </Folder>
   <Folder Name="/.github/workflows/">
+    <File Path=".github/workflows/docs-drift-review.yml" />
     <File Path=".github/workflows/release.yml" />
+    <File Path=".github/workflows/sync-wiki.yml" />
   </Folder>
   <Folder Name="/Solution Items/">
     <File Path=".editorconfig" />
