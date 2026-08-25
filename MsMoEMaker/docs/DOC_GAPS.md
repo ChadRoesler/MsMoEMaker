@@ -56,3 +56,4 @@ Current remaining debt:
 - Keep troubleshooting examples tied to real, recent failure signatures.
 - Add architecture sequence diagrams for stage + event flow.
 - Publish initial wiki pages from `docs/WIKI_BOOTSTRAP.md`.
+
