@@ -1,0 +1,8 @@
+# Default code owners
+* @ChadRoesler
+
+# Documentation owners
+/MsMoEMaker/README.md @ChadRoesler
+/MsMoEMaker/docs/ @ChadRoesler
+/MsMoEMaker/CONTRIBUTING.md @ChadRoesler
+/MsMoEMaker/SECURITY.md @ChadRoesler

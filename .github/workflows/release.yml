@@ -75,8 +75,17 @@ jobs:
                   if not t:
                       continue
                   candidate = (md.parent / t).resolve()
-                  if not candidate.exists():
-                      bad.append(f"{md}: missing link target -> {target}")
+                  if candidate.exists():
+                      continue
+
+                  # Wiki-style links often omit .md. Allow that form when a
+                  # same-directory markdown file exists.
+                  if candidate.suffix == "":
+                      md_candidate = candidate.with_suffix(".md")
+                      if md_candidate.exists():
+                          continue
+
+                  bad.append(f"{md}: missing link target -> {target}")
 
           if bad:
               print('\n'.join(bad))

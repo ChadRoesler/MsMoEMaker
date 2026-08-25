@@ -22,10 +22,13 @@ Included pages:
 
 ## Publish flow
 
-1. Open repo Wiki and create pages matching starter filenames.
-2. Paste page contents from `wiki-starter` files.
-3. Set `Home` as landing page and `_Sidebar` for navigation.
-4. Fill `Validated against commit/tag` on each page.
+Automatic publish is wired through `.github/workflows/wiki-publish.yml`.
+
+1. Enable Wiki in repository settings (one-time).
+2. Ensure the wiki exists (open Wiki tab once if needed).
+3. Push changes under `MsMoEMaker/wiki-starter/**`.
+4. Workflow syncs starter files into `${repo}.wiki.git`.
+5. Fill `Validated against commit/tag` on each page after major updates.
 
 ## Required page banner
 
