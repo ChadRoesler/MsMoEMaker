@@ -302,7 +302,6 @@ show a machine's configuration without re-implementing the merge. Under
 `--json`, `validate` and `build` emit a `defaults` event carrying the same
 provenance.
 
-
 ### Every knob, and what actually moves
 
 Everything below is optional. A recipe with nothing but `experts:` builds.
