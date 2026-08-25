@@ -106,7 +106,6 @@
     <Content Include="docs\ARCHITECTURE.md" />
     <Content Include="docs\CLI.md" />
     <Content Include="docs\DOC_BACKLOG.md" />
-    <Content Include="docs\DOC_GAPS.md" />
     <Content Include="docs\MAINTENANCE_CADENCE.md" />
     <Content Include="docs\README.md" />
     <Content Include="docs\SOURCE_OF_TRUTH.md" />
