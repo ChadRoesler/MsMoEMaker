@@ -1,4 +1,4 @@
-## Wiki
+# Wiki
 
 - [Home](Home)
 - [How-To: First Dryrun](How-To-First-Dryrun)
