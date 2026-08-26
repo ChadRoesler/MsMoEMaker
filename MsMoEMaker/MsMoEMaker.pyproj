@@ -94,7 +94,6 @@
     <Compile Include="tests\test_validators.py" />
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="docs\" />
     <Folder Include="ms_moe_maker\" />
     <Folder Include="ms_moe_maker\heretic\" />
     <Folder Include="ms_moe_maker\heretic\scorers\" />
@@ -102,7 +101,6 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="CONTRIBUTING.md" />
-    <Content Include="docs\WIKI_BOOTSTRAP.md" />
     <Content Include="pyproject.toml" />
     <Content Include="README.md" />
     <Content Include="recipe.example.yaml" />
