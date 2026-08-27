@@ -27,8 +27,13 @@ from ms_moe_maker.recipe import parse
 
 
 @pytest.fixture
-def wired(tmp_path, monkeypatch):
-    """Run run_pipeline with every stage replaced by a recorder."""
+def wired(tmp_path, monkeypatch, request):
+    """Run run_pipeline with every stage replaced by a recorder.
+
+    Indirect-parametrise with a recipe dict to run a different shape
+    through the same plumbing; without a param it is the two-stack-expert
+    recipe every test below has always used.
+    """
     monkeypatch.chdir(tmp_path)
     seen = {}
 
@@ -48,7 +53,23 @@ def wired(tmp_path, monkeypatch):
     # ---- fake stage modules -------------------------------------------------
     data_mod = types.ModuleType("data")
     data_mod.collect_corpus = lambda config, languages, sources, callback: dict(corpora)
-    data_mod.generate_agent_traces = lambda config, callback=None: None
+    # RECORDS, and takes **kw for the same reason verify_stitch's fake
+    # does: a stub that mirrors today's signature exactly is a stub that
+    # turns tomorrow's new argument into a TypeError in a fixture.
+    def _fake_agent(config, callback=None, expert_name='agentcore', **kw):
+        seen.setdefault('agent_calls', []).append(expert_name)
+        p = data_root / f'{expert_name}_traces.jsonl'
+        p.write_text('{"text": "trace"}\n', encoding='utf-8')
+        return str(p)
+
+    def _fake_reasoning(config, expert_name, callback=None, **kw):
+        seen.setdefault('reasoning_calls', []).append(expert_name)
+        p = data_root / f'{expert_name}_reasoning.jsonl'
+        p.write_text('{"text": "think"}\n', encoding='utf-8')
+        return str(p)
+
+    data_mod.generate_agent_traces = _fake_agent
+    data_mod.generate_reasoning_traces = _fake_reasoning
 
     ft = types.ModuleType("finetune")
     ft.specialist_is_done = lambda config, name: False
@@ -110,7 +131,7 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "ms_moe_maker.preflight", pf)
     monkeypatch.setattr(ms_moe_maker, "preflight", pf, raising=False)
 
-    rec, _ = parse({
+    rec, _ = parse(getattr(request, "param", None) or {
         "schema_version": 1, "name": "t", "size": "0.5B",
         "corpus": {"min_samples": 1, "max_samples": 50},
         "experts": [
@@ -181,3 +202,78 @@ class TestRouterRefusesTheWrongShape:
         assert "specialist_dirs" in msg or "corpus" in msg.lower(), msg
         assert "IsADirectory" not in exc.typename, (
             "the wrong shape must be named, not discovered at open()")
+
+
+# ── a GENERATED expert that is not the tools expert ─────────────────────────
+#
+# THE BUG THIS SECTION EXISTS FOR. builder computed `has_synth` across every
+# expert and then called generate_agent_traces exactly once, always with
+# expert_name=config.tools_expert_name. data.py deliberately skips kind=synth
+# during corpus collection ("handled by generate_agent_traces"), so an expert
+# named anything else got NOTHING — and the build died in the fine-tune loop
+# with "No data path for expert X", hours in, after preflight and abliteration
+# had already run and `build --plan` had reported `[ok] source/<name>
+# kind=synth` on the way past.
+#
+# It survived because no test had a synth expert under a name other than the
+# tools one. A path every real run goes around is untested by construction,
+# and the missing test is the tell.
+
+SYNTH_RECIPE = {
+    "schema_version": 1, "name": "t", "size": "0.5B",
+    "corpus": {"min_samples": 1, "max_samples": 50},
+    "experts": [
+        {"name": "python", "source": {"kind": "stack", "language": "Python"}},
+        {"name": "csharp", "source": {"kind": "stack", "language": "C#"}},
+        {"name": "shell", "source": {"kind": "synth"}},
+    ],
+}
+
+REASONING_SYNTH_RECIPE = {
+    "schema_version": 1, "name": "t", "size": "0.5B",
+    "corpus": {"min_samples": 1, "max_samples": 50},
+    "experts": [
+        {"name": "python", "source": {"kind": "stack", "language": "Python"}},
+        {"name": "csharp", "source": {"kind": "stack", "language": "C#"}},
+        {"name": "shell", "source": {"kind": "synth", "reasoning": True}},
+    ],
+}
+
+
+@pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
+def test_a_named_synth_expert_gets_its_corpus_generated(wired):
+    """THE regression. Without the fix the pipeline never completes."""
+    result, seen, _, _ = wired
+    assert result.ok, result.message
+    assert "shell" in seen.get("agent_calls", []), (
+        f"generate_agent_traces ran for {seen.get('agent_calls')}, "
+        f"never for the synth expert 'shell'")
+
+
+@pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
+def test_the_synth_expert_finetunes_on_what_was_generated_for_it(wired):
+    _, seen, _, _ = wired
+    path = seen["finetune"].get("shell")
+    assert path and path.endswith("shell_traces.jsonl"), (
+        f"shell fine-tuned on {path!r}; it must be its own generated corpus")
+
+
+@pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
+def test_the_router_is_mixed_from_the_synth_corpus_too(wired):
+    _, seen, _, _ = wired
+    assert seen["router_arg"] == seen["finetune"], (
+        "the router must be mixed from exactly what the experts trained on")
+
+
+@pytest.mark.parametrize("wired", [REASONING_SYNTH_RECIPE], indirect=True)
+def test_a_reasoning_synth_expert_is_not_also_given_tool_traces(wired):
+    """Both generators can claim the same expert, but only one output is ever
+    read: reasoning_paths wins in the fine-tune loop, so generating tool traces
+    as well would be teacher hours spent on a file nothing opens."""
+    result, seen, _, _ = wired
+    assert result.ok, result.message
+    assert "shell" in seen.get("reasoning_calls", [])
+    assert "shell" not in seen.get("agent_calls", []), (
+        "tool traces were generated for an expert whose corpus comes from "
+        "the reasoning path — that output is discarded")
+    assert seen["finetune"]["shell"].endswith("shell_reasoning.jsonl")

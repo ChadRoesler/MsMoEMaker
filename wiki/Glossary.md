@@ -37,6 +37,28 @@ Validated against commit/tag: main (unreleased)
 - **Per-repo cap**: Corpus diversity control limiting contribution from a
   single repository.
 
+## Reasoning terms
+
+- **`base_kind`**: Whether the *base model* already reasons (`auto` |
+  `reasoning` | `nonreasoning`). `auto` sniffs the model id against the known
+  families. It changes how prompts are formatted and how eval reads output; it
+  does **not** make a non-reasoning base reason.
+- **`reasoning: true`** (on a source): Bake reasoning into a specialist that
+  lacks it - a reasoning teacher writes trace-plus-answer pairs on that
+  expert's domain and the specialist is fine-tuned on them. Works on any base.
+- **Reasoning teacher**: The model that writes those traces. Defaults to
+  `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` (the `-1.5B` on a dryrun);
+  override with `teacher:` on the source.
+- **Tag style**: The convention separating a thinking trace from an answer -
+  opening tag, closing tag, and whether blocks interleave with tool calls.
+  Shipped styles: standard XML, DeepSeek R1, interleaved agentic XML, markdown
+  fence, Llama system-header.
+- **Reasoning table**: The layered `reasoning.yaml` mapping model families to
+  tag styles. A file rather than a dict on purpose: a wrong tag style is a
+  silent wrong answer, so a new family must be addable without a release.
+- **Interwoven**: A tag style whose reasoning blocks appear many times per turn
+  (reasoning interleaved with tool calls). The splitter strips them all.
+
 ## Validation and quality terms
 
 - **Dryrun**: Real smallest-rung build path for quick structural validation.

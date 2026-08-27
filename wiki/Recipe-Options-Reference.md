@@ -64,6 +64,7 @@ Treat the recipe as a build intent document, not just a settings dump.
 - `size`: requested model rung or auto/defaulted size behavior.
 - `base`: concrete base model id/path override.
 - `base_kind`: reasoning/nonreasoning hint when auto-detection is ambiguous.
+  Full treatment in the `reasoning` section below.
 
 Guidance:
 
@@ -253,6 +254,78 @@ Notes:
 - It runs in its own process, so its global state and VRAM never leak into the
   finetune stages.
 - It is a base-level decensor: every specialist inherits it through the stitch.
+
+## `reasoning` (two knobs, two different questions)
+
+These get confused constantly, so: one asks whether the base **already**
+reasons, the other **puts reasoning in**. They are independent and you can use
+either, both, or neither.
+
+### `base_kind` - is the base already a reasoner?
+
+```yaml
+base_kind: auto            # auto | reasoning | nonreasoning
+```
+
+- `auto` sniffs the model id against the known families.
+- Set it explicitly when the id is not a recognisable reasoning name.
+- It changes how the pipeline formats prompts and how eval reads the output. It
+  does **not** make a non-reasoning base reason.
+
+### `reasoning: true` on a source - bake reasoning in
+
+```yaml
+experts:
+  - name: python
+    source: { kind: stack, language: Python, reasoning: true }
+```
+
+The R1-distill recipe: a reasoning teacher writes trace-plus-answer pairs on
+that expert's domain and the specialist is fine-tuned on them. Works on **any**
+base, including a small non-reasoning Qwen.
+
+- Default teacher: `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`, or the `-1.5B` on
+  a dryrun.
+- Override per source with `teacher:`.
+- Because a `reasoning: true` expert puts think blocks into a build whose base
+  does not reason, the run resolves a tag style anyway, falling back to plain
+  XML exactly the way the generator does.
+
+### The tag table is a file, on purpose
+
+Model families map to tag styles through a layered `reasoning.yaml` rather than
+a table baked into a release. The reason is the failure mode: **a wrong tag
+style is a silent wrong answer, not a crash.** The splitter finds no
+delimiters, reports "did not reason", and scores the whole think block as if it
+were the answer.
+
+So the day a family ships a new delimiter, you drop a file instead of waiting
+for a version:
+
+```yaml
+# ~/.msmoe/reasoning.yaml  (or point $MSMOE_REASONING at one)
+Families:
+  - Key: acme
+    FamilyName: Acme Thinkers
+    Models: [Acme-R2, acme-thinker]     # write what is on the model card
+    PreferredStyle: xml
+```
+
+Layers merge by name; model names match loosely (case, spaces, dots and hyphens
+ignored on both sides) and the longest match wins, so the answer never depends
+on file order.
+
+See the layering rules and the reproducibility consequences in
+[Recipe Deep Dive: Defaults + Reproducibility](Recipe-Deep-Dive-Defaults-and-Reproducibility),
+and the operator-side symptom in
+[Troubleshooting Signatures](Troubleshooting-Signatures).
+
+Notes:
+
+- The resolved delimiters are stamped into the run's config, so eval splits on
+  exactly what the generator wrote - and editing your table changes `build_id`.
+- `ms-moe-maker describe` reports the merged table under `.reasoning`, warnings
+  included. That is the install answering, not the source shipping.
 
 ## Source kinds (`experts[].source.kind`)
 

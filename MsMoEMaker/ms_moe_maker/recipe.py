@@ -96,7 +96,6 @@ class Budget:
     warmup_ratio: float = 0.05
     warmup_floor: int = 10
     collect_headroom: float = 1.5
-    doc_ceiling: int = 2000
 
     # THE ADAPTER'S SHAPE, which was reachable only from an env var.
     #
@@ -204,6 +203,18 @@ class Corpus:
     """
     min_samples: int = -1        # floor per expert before the stage fails
     max_samples: int = -1        # cap per expert
+    # Traces to GENERATE per generated expert. Distinct from max_samples
+    # because that one is a CEILING on documents collected and this is a
+    # TARGET for documents written - a teacher runs until it hits this
+    # number, so it is time, not disk. Unset means the run default,
+    # capped by max_samples when the recipe stated one.
+    #
+    # NOT `agent_samples`. It governs BOTH generated corpora - the tools
+    # expert's traces AND generate_reasoning_traces, which reads the same
+    # number (`n = config.num_agent_samples`). Naming a knob after one of
+    # the two things it controls is how `data.code` happened; this one is
+    # still free to name, so it gets named for the whole job.
+    synth_samples: int = -1
     router_mix_total: int = -1   # rows in the router's stratified mix
     # Max files taken from ONE repository, per language. The token quota can
     # otherwise be satisfied entirely from a single large codebase - measured
@@ -755,10 +766,6 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             f"effective batch is {b.per_device_batch * b.grad_accum}, not 8. "
             f"Fine - but the PRODUCT is the thing that must stay constant if "
             f"you are comparing against earlier rungs.")
-    if b.doc_ceiling < 1000:
-        warns.append(f"budget.doc_ceiling {b.doc_ceiling} is low; it is a "
-                     f"CEILING, not a target - the token budget is what "
-                     f"decides how much each expert actually gets")
 
     # -- moe ----------------------------------------------------------------
     m = rec.moe

@@ -3,7 +3,18 @@ name: Sync Wiki
 on:
   push:
     branches:
+      # BOTH SPELLINGS ON PURPOSE. This repo's default branch is master,
+      # and this trigger said `main` only - so the push path never fired
+      # once and every sync you ever got was a manual dispatch. It did not
+      # fail, it just never ran, which is the worst shape for it.
+      #
+      # Listing both means a future rename cannot silently stop the sync
+      # again. The literal here only decides what WAKES the workflow; the
+      # job-level guard below decides whether it SYNCS, and that guard
+      # reads the repo's own declared default branch instead of trusting a
+      # branch name written down in this file.
       - main
+      - master
     paths:
       - 'wiki/**'
   workflow_dispatch:
@@ -16,6 +27,17 @@ on:
 jobs:
   sync-wiki:
     runs-on: ubuntu-latest
+
+    # Only the default branch publishes the wiki. Derived from the repo's
+    # own `default_branch` rather than a hardcoded name, so renaming the
+    # branch moves the finder and the guard together.
+    #
+    # workflow_dispatch is deliberately exempt: a manual run from any
+    # branch is a person asking on purpose, and refusing that would just
+    # recreate the silent no-op this whole edit exists to delete.
+    if: >-
+      github.event_name != 'push' ||
+      github.ref_name == github.event.repository.default_branch
     
     steps:
       - name: Checkout main repo

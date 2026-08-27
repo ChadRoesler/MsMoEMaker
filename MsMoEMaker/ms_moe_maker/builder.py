@@ -218,6 +218,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     )
 
     agent_path = None
+    synth_paths: Dict[str, str] = {}
     reasoning_paths: Dict[str, str] = {}
     if has_synth or config.tools_expert_name in expert_names or config.reasoning_experts:
         cb.stage(stages.DATA_SYNTH, "running", "generating synthetic corpora")
@@ -225,12 +226,48 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         print(f"Stage 2: Generating synthetic corpora")
         print(f"{'=' * 60}")
 
-        if has_synth or config.tools_expert_name in expert_names:
-            tools_name = config.tools_expert_name or "agentcore"
-            agent_path = data_mod.generate_agent_traces(
+        # EVERY GENERATED EXPERT, NOT JUST THE TOOLS ONE.
+        #
+        # This called generate_agent_traces exactly ONCE, always with
+        # expert_name=tools_name, while `has_synth` above was computed across
+        # ALL experts. So an expert with `source.kind: synth` under any other
+        # name lit the stage up and had nothing generated for it: data.py's
+        # collector skips kind=synth on purpose ("handled by
+        # generate_agent_traces, not corpus"), so code_paths had no entry
+        # either, and the build died hours later in the fine-tune loop at
+        # "No data path for expert X" - after preflight, after abliterate.base,
+        # after the entire corpus stage. Loud, but late, and `build --plan`
+        # had reported `[ok] source/<name> kind=synth` on the way in.
+        #
+        # THIS IS THE SECOND HALF OF THE data.code -> data.corpus FIX. That one
+        # taught stages.plan() that a generated expert can be called anything.
+        # The worker behind the stage still assumed it was called "agentcore".
+        # When you kill a hardcoded-name assumption, grep for every other place
+        # that name is a default - the one you noticed is rarely the only one.
+        #
+        # A synth expert carrying `reasoning: true` is deliberately EXCLUDED
+        # here: generate_reasoning_traces below writes its corpus and
+        # reasoning_paths wins in the fine-tune loop, so generating tool traces
+        # for it would be teacher hours spent on a file nothing ever reads.
+        tools_name = config.tools_expert_name or "agentcore"
+        synth_names = [
+            e.name for e in recipe.experts
+            if e.name in expert_names
+            and getattr(getattr(e, "source", None), "kind", "") == "synth"
+            and e.name not in (config.reasoning_experts or ())
+        ]
+        if config.tools_expert_name in expert_names and tools_name not in synth_names:
+            synth_names.insert(0, tools_name)
+
+        for sname in synth_names:
+            spath = data_mod.generate_agent_traces(
                 config, callback=cb.stage,
-                expert_name=tools_name,
-                teacher_model=cfg_module.teacher_for(recipe, config, tools_name))
+                expert_name=sname,
+                teacher_model=cfg_module.teacher_for(recipe, config, sname))
+            if sname == tools_name:
+                agent_path = spath
+            elif spath:
+                synth_paths[sname] = spath
 
         for rname in config.reasoning_experts:
             rpath = data_mod.generate_reasoning_traces(
@@ -239,7 +276,9 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
             if rpath:
                 reasoning_paths[rname] = rpath
 
-        produced = ([agent_path] if agent_path else []) + list(reasoning_paths.values())
+        produced = (([agent_path] if agent_path else [])
+                    + list(synth_paths.values())
+                    + list(reasoning_paths.values()))
         if produced:
             cb.stage(stages.DATA_SYNTH, "done",
                      f"synthetic corpora → {', '.join(produced)}")
@@ -269,6 +308,11 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         data_path = code_paths.get(safe_name)
         if safe_name == config.tools_expert_name and agent_path:
             data_path = agent_path
+        # A non-tools synth expert. Ordered before the reasoning check on
+        # purpose: an expert can be both, and the reasoning corpus is the one
+        # its specialist must actually learn from.
+        if safe_name in synth_paths:
+            data_path = synth_paths[safe_name]
         if safe_name in reasoning_paths:
             data_path = reasoning_paths[safe_name]
         if not data_path:

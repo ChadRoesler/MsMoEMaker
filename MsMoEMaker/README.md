@@ -332,7 +332,6 @@ your file.
 | `warmup_ratio` | 0.05 | Fraction of steps spent ramping the LR. |
 | `warmup_floor` | 10 | Never warm up for fewer steps than this, however short the run. |
 | `collect_headroom` | 1.5 | How much more text to gather than the step budget strictly needs, so packing doesn't starve. |
-| `doc_ceiling` | 2000 | Upper bound on documents pulled per expert when deriving the token target. |
 
 Reach for `target_steps` and `corpus.max_samples` before you reach for
 `lora_r`. Measured: at 0.5B the rank was already 128 while each expert saw

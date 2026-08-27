@@ -13,6 +13,13 @@ jobs:
   open-review-issue:
     runs-on: ubuntu-latest
     steps:
+      # The review script checks that the docs it names still EXIST, so it
+      # needs the tree. Without this it can only print a list and hope.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Create monthly docs/wiki drift review issue
         uses: actions/github-script@v7
         with:
@@ -36,17 +43,83 @@ jobs:
               return;
             }
 
+            // THE CHECKLIST NAMES REAL FILES, AND SAYS SO WHEN IT DOESN'T.
+            //
+            // This list used to point at docs/CLI.md, docs/ARCHITECTURE.md,
+            // docs/TROUBLESHOOTING.md and docs/SOURCE_OF_TRUTH.md - four paths
+            // that came over with this workflow from a sibling repo and have
+            // never existed here. The docs live in wiki/ and the two READMEs.
+            // So the monthly issue handed a reader a checklist that was mostly
+            // fiction, and nothing anywhere said so.
+            //
+            // A guard against staleness must not be able to go stale in
+            // silence. Each path below is stat'd before it is printed: a doc
+            // that moves comes back as MISSING in the issue body instead of
+            // sitting there as an unnoticed dead checkbox. Fixing the drift
+            // guard is then itself one of the checkboxes.
+            const fs = require('fs');
+
+            const checks = [
+              ['README.md',
+               'quick-start commands still match real CLI behavior'],
+              ['MsMoEMaker/README.md',
+               'package README still matches real CLI behavior + recipe options'],
+              ['wiki/CLI-Reference.md',
+               'commands, flags and env vars match `ms-moe-maker --help` / `describe`'],
+              ['wiki/Architecture.md',
+               'stage list, module table and contracts match `stages.py`'],
+              ['wiki/Troubleshooting-Signatures.md',
+               'refreshed with real failure signatures seen since last review'],
+              ['wiki/Recipe-Options-Reference.md',
+               'every recipe block that exists in `recipe.py` is documented'],
+              ['wiki/Glossary.md',
+               'terms introduced by new stages/registries have entries'],
+              ['wiki/Home.md',
+               'handbook map + sidebar list every page actually in wiki/'],
+            ];
+
+            const lines = [];
+            const missing = [];
+
+            for (const [path, what] of checks) {
+              if (fs.existsSync(path)) {
+                lines.push(`- [ ] \`${path}\` - ${what}`);
+              } else {
+                missing.push(path);
+                lines.push(`- [ ] **MISSING: \`${path}\`** - path moved or was renamed; fix this workflow's \`checks\` list`);
+              }
+            }
+
+            // Pages present on disk but absent from the sidebar are the other
+            // direction of the same drift: written, synced, and unreachable.
+            let orphanNote = [];
+            try {
+              const sidebar = fs.readFileSync('wiki/_Sidebar.md', 'utf8');
+              const orphans = fs.readdirSync('wiki')
+                .filter(f => f.endsWith('.md'))
+                .map(f => f.slice(0, -3))
+                .filter(n => n !== '_Sidebar' && !sidebar.includes(`(${n})`));
+              if (orphans.length) {
+                orphanNote = [
+                  '',
+                  `Pages not linked from \`_Sidebar.md\`: ${orphans.map(o => '`' + o + '`').join(', ')}`
+                ];
+              }
+            } catch (e) {
+              orphanNote = ['', '_Could not read `wiki/_Sidebar.md` to check for orphan pages._'];
+            }
+
             const body = [
               'Monthly documentation drift review checklist:',
               '',
-              '- [ ] Compare README quick-start commands against current CLI behavior',
-              '- [ ] Compare `docs/CLI.md` against command/flag reality',
-              '- [ ] Compare `docs/ARCHITECTURE.md` against current stages/events/contracts',
-              '- [ ] Refresh `docs/TROUBLESHOOTING.md` with recent real failure signatures',
-              '- [ ] Validate wiki pages include `Validated against commit/tag`',
-              '- [ ] Update wiki pages that conflict with repo canonical docs',
+              ...lines,
+              '- [ ] Every wiki page carries a current `Validated against commit/tag`',
+              '- [ ] Anything the READMEs document at depth has at least a wiki entry point',
+              ...orphanNote,
               '',
-              'Canonical policy: see `MsMoEMaker/docs/SOURCE_OF_TRUTH.md`.'
+              missing.length
+                ? `WARNING: ${missing.length} canonical path(s) in this workflow no longer exist. Fix the \`checks\` list in \`.github/workflows/docs-drift-review.yml\` as part of this review.`
+                : 'Canonical policy: the wiki reference pages define behavior (see `wiki/Home.md`); the READMEs are the deep narrative.'
             ].join('\n');
 
             const labels = ['documentation', 'docs-drift', 'wiki-sync'];

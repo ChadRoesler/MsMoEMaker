@@ -514,6 +514,44 @@ def _cmd_build(args):
     say(f"  corpus   {config.min_samples_per_expert:,}-{config.num_code_samples:,}"
         f" samples/expert, {config.collect_token_target/1e6:.1f}M tokens target,"
         f" router mix {config.router_mix_total:,}")
+
+    # THE GENERATED VOLUME, SAID OUT LOUD TOO — and it is the half that costs.
+    #
+    # The line above is documents COLLECTED. Every generated corpus is a
+    # teacher running under rejection sampling, i.e. the most expensive text in
+    # the build, and it was the only volume this header never mentioned. On the
+    # first gauntlet-0.5B run the header read "2,976-12,000 samples/expert"
+    # while the generator went for 15,000, and nothing on screen disagreed with
+    # it. A header whose whole job is "which run am I about to start" must not
+    # be silent about the priciest number in the answer.
+    _gen = {}
+    if config.tools_expert_name and config.tools_expert_name in config.expert_names:
+        _gen[config.tools_expert_name] = "tools"
+    for _e in getattr(rec, "experts", None) or []:
+        if _e.name not in config.expert_names:
+            continue
+        if _e.name in (config.reasoning_experts or ()):
+            _gen[_e.name] = "reasoning"
+        elif getattr(getattr(_e, "source", None), "kind", "") == "synth":
+            _gen.setdefault(_e.name, "synth")
+    if _gen:
+        say(f"  synth    {config.num_agent_samples:,} traces each for "
+            + ", ".join(f"{n} ({k})" for n, k in _gen.items()))
+
+    # WHICH DELIMITERS THIS RUN WILL SPLIT ON.
+    #
+    # A wrong tag style is a silent wrong ANSWER, not a crash: the splitter
+    # finds no delimiters, reports "did not reason", and the whole think block
+    # gets scored as if it were the answer. Every quality number in the run is
+    # then wrong and the build looks fine. That is the one thing here nobody
+    # can check afterwards, so it is the one most worth printing beforehand.
+    if config.reasoning_type or config.reasoning_experts:
+        _tags = (f"{config.reasoning_open}…{config.reasoning_close}"
+                 if config.reasoning_open else "(no delimiters resolved)")
+        _baked = (f", baked into {', '.join(config.reasoning_experts)}"
+                  if config.reasoning_experts else "")
+        say(f"  reasoning base={'yes' if config.reasoning else 'no'}, "
+            f"style={config.reasoning_type or '(none)'}  {_tags}{_baked}")
     prov = getattr(rec, "defaults_provenance", None) or {}
     if prov:
         # LAYERED CONFIG WITHOUT PROVENANCE IS A SEANCE. A value that came from

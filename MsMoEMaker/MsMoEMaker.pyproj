@@ -75,6 +75,7 @@
     <Compile Include="tests\test_corpus_diversity.py" />
     <Compile Include="tests\test_corpus_health.py" />
     <Compile Include="tests\test_defaults.py" />
+    <Compile Include="tests\test_dotenv.py" />
     <Compile Include="tests\test_eval.py" />
     <Compile Include="tests\test_eval_memory.py" />
     <Compile Include="tests\test_experts.py" />
@@ -89,6 +90,7 @@
     <Compile Include="tests\test_reproducibility.py" />
     <Compile Include="tests\test_router_init.py" />
     <Compile Include="tests\test_runner.py" />
+    <Compile Include="tests\test_schema_reachability.py" />
     <Compile Include="tests\test_stitch.py" />
     <Compile Include="tests\test_template.py" />
     <Compile Include="tests\test_validators.py" />

@@ -820,17 +820,15 @@ def build_config(recipe, force: bool = False,
     tokens_per_step = b.max_seq_length * b.per_device_batch * b.grad_accum
     target_steps = recipe.budget.target_steps
     expert_token_budget = target_steps * tokens_per_step
-    warmup_steps = max(10, round(b.warmup_ratio * target_steps))
+    # `b.warmup_floor`, not a literal 10. The field has existed on Budget
+    # the whole time with a default of exactly 10, so a recipe setting it
+    # parsed clean and did nothing - the same shape as max_shards being
+    # hardcoded at 80, and worse than rejecting it, because the run then
+    # misbehaves for the reason the setting was there to prevent.
+    warmup_steps = max(b.warmup_floor, round(b.warmup_ratio * target_steps))
     collect_token_target = expert_token_budget * recipe.budget.collect_headroom
 
-    # Agent samples
-    agent_override = os.environ.get("MSMOE_AGENT_SAMPLES", "")
-    if agent_override:
-        num_agent_samples = int(agent_override)
-    elif dryrun:
-        num_agent_samples = 2_000
-    else:
-        num_agent_samples = 15_000
+    # (agent sample count is resolved below, once _corpus_knob exists)
 
     # RECIPE FIRST, THEN THE RUN'S DEFAULT. -1 means "you decide", so a
     # recipe that says nothing behaves exactly as before and a recipe that
@@ -860,6 +858,46 @@ def build_config(recipe, force: bool = False,
 
     num_code_samples = _corpus_knob("max_samples", 10_000, 100_000)
     per_repo_cap = _corpus_knob("per_repo_cap", 20, 20)
+
+    # THE ONE CORPUS QUANTITY A RECIPE COULD NOT EXPRESS.
+    #
+    # This was `15_000`, hardcoded, reachable only through MSMOE_AGENT_SAMPLES
+    # and sitting ABOVE _corpus_knob so it could not have read the recipe even
+    # if it wanted to. So `corpus.max_samples: 12000` capped four experts at
+    # 12,000 documents and then generated 15,000 for the fifth - 25% over the
+    # stated cap, on the ONE corpus that is not a download but a teacher
+    # generation with rejection sampling. The most expensive documents in the
+    # build were the only ones nobody could ask for fewer of.
+    #
+    # Same disease as the inert `--dryrun`: a knob that never reaches the value
+    # it names, wrong in the expensive direction.
+    #
+    # max_samples CAPS, it does not become the target. Everywhere else it is a
+    # ceiling ("hit the N-document ceiling", `buckets[lang][:num_code_samples]`)
+    # and a ceiling of 32,000 must never be read as an instruction to generate
+    # 32,000 traces - that would turn a fix into a much larger bill on
+    # gauntlet-1.5B. Hence min(), not assignment.
+    #
+    #   corpus.synth_samples  -> an explicit target for generated corpora
+    #   corpus.max_samples    -> caps the run default, never raises it
+    #   run default           -> 2,000 on a dryrun, 15,000 otherwise
+    #
+    # MSMOE_AGENT_SAMPLES still wins over all of it, unchanged. Whether env
+    # should outrank a recipe at all is a real question and a separate one;
+    # smuggling that answer into a bug fix is how precedence rules become
+    # folklore.
+    _agent_asked = getattr(_corpus, "synth_samples", -1) if _corpus is not None else -1
+    _agent_cap = getattr(_corpus, "max_samples", -1) if _corpus is not None else -1
+    agent_override = os.environ.get("MSMOE_AGENT_SAMPLES", "")
+    if agent_override:
+        num_agent_samples = int(agent_override)
+    elif _agent_asked is not None and _agent_asked >= 0:
+        num_agent_samples = int(_agent_asked)
+    else:
+        _agent_default = 2_000 if dryrun else 15_000
+        num_agent_samples = (min(_agent_default, int(_agent_cap))
+                             if _agent_cap is not None and _agent_cap >= 0
+                             else _agent_default)
 
     # THE COLLECTOR NOW KNOWS WHAT THE ROUTER WILL ASK FOR. See router_doc_need
     # at the top of this module for why these two numbers had to stop being

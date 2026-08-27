@@ -77,7 +77,6 @@ size: auto
 #   per_device_batch: 4
 #   grad_accum: 2
 #   warmup_ratio: 0.05
-#   doc_ceiling: 5000
 #
 # moe:
 #   experts_per_tok: 2
