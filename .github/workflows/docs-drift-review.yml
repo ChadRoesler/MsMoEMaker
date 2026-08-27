@@ -16,7 +16,7 @@ jobs:
       # The review script checks that the docs it names still EXIST, so it
       # needs the tree. Without this it can only print a list and hope.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
