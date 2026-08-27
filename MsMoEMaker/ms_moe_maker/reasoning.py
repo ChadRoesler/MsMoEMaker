@@ -162,6 +162,46 @@ def load(explicit: Optional[str] = None, include_user: bool = True):
     return styles, families, warns
 
 
+def describe():
+    """The reasoning registry as data - for `--describe` and Backstage's form.
+
+    Same contract as corpus.describe() and validators.describe(), and here for
+    the same reason their docstrings give: a consumer builds its picker from
+    THIS rather than from a hardcoded list, so a family somebody added on their
+    own box shows up without the viewer having heard of it.
+
+    That argument is stronger here than for either of the others. The corpus
+    kinds and the validators are extensible in principle; this table is the one
+    users are actively TOLD to extend - "drop a yaml on the box and carry on" -
+    because a model family shipping a new delimiter must not have to wait for a
+    release. A picker that cannot see the user layer is showing the packaged
+    table to someone who has already moved past it.
+
+    Reports what the BOX has, user layer included (`load()` defaults to
+    include_user=True), not what the source ships. Warnings are not folded in:
+    they belong to load_errors(), matching the other two registries.
+    """
+    styles, families, _ = load()
+    return {
+        "styles": [{"key": k, "name": v.name, "open": v.open,
+                    "close": v.close, "interwoven": v.interwoven}
+                   for k, v in sorted(styles.items())],
+        "families": [{"key": k, "name": v.name, "style": v.style}
+                     for k, v in sorted(families.items())],
+    }
+
+
+def load_errors():
+    """Problems reading the layered table. Empty is the healthy answer.
+
+    Not an exception path: a malformed user file degrades to the packaged
+    table (and, in the worst case, to the one-style FLOOR) rather than taking a
+    build down - so the only way anyone finds out is if somebody asks.
+    """
+    _, _, warns = load()
+    return list(warns)
+
+
 def style_for_base(base: str, kind: str = "auto",
                    styles: Optional[Dict[str, ReasoningStyle]] = None,
                    families: Optional[Dict[str, ReasoningFamily]] = None) -> str:

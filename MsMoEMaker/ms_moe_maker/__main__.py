@@ -54,18 +54,17 @@ def _box_defaults():
 
 
 def _box_reasoning():
-    """Tag styles and model families this install knows about."""
+    """Tag styles and model families this install knows about.
+
+    The shaping moved into reasoning.describe(), so this is now a caller like
+    any other. It used to be hand-rolled here, which made --describe and
+    Backstage's craft form two independent renderings of one registry - the
+    same two-implementations-of-one-format bargain seren-theatre's manifest
+    contract test exists to police, except nothing was policing this one.
+    """
     try:
         from . import reasoning as _rz
-        styles, families, warns = _rz.load()
-        return {
-            "styles": [{"key": k, "name": v.name, "open": v.open,
-                        "close": v.close, "interwoven": v.interwoven}
-                       for k, v in sorted(styles.items())],
-            "families": [{"key": k, "name": v.name, "style": v.style}
-                         for k, v in sorted(families.items())],
-            "warnings": list(warns),
-        }
+        return {**_rz.describe(), "warnings": _rz.load_errors()}
     except Exception:
         return {"styles": [], "families": [], "warnings": []}
 

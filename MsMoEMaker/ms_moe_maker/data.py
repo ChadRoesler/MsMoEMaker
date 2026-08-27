@@ -1079,6 +1079,15 @@ def generate_reasoning_traces(config, expert_name, callback=None,
         print(f"[skip] reasoning traces already present at {out_path}")
         return out_path
 
+    # THE TRACE IS TRAINED ON BY THE SPECIALIST, SO IT MUST SPEAK THE BASE'S
+    # TOKENIZER, NOT THE TEACHER'S. generate_agent_traces loads the base
+    # tokenizer for exactly this; this path was stamping the teacher's special
+    # tokens (<｜begin▁of▁sentence｜> etc.) into the corpus, which the Qwen base
+    # then tokenized as garbage.
+    from transformers import AutoTokenizer
+    base_model = config.base if config.base else config.base_safe
+    base_tokenizer = AutoTokenizer.from_pretrained(base_model, cache_dir=config.hf_home)
+
     display = DISPLAY_LANG.get(expert_name, expert_name.replace("_", " ").title())
     marker = getattr(teacher_style, "answer_marker", "") or "ANSWER:"
     # TWO PROMPTS, ONE WINS AFTER A PROBE.
@@ -1126,6 +1135,9 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} reasoning traces")
             return out_path
 
+    # The accept rate is THIS RUN's yield: measure against the fresh attempts,
+    # not against `kept`, which already includes any resumed traces.
+    resumed = kept
     attempted, rejects = 0, 0
     sample = ""
     sink = open(partial, "a", buffering=1)
@@ -1148,19 +1160,19 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 # though the teacher spoke its own native delimiter.
                 canonical = f"{target.open}{think}{target.close}\n{answer}"
                 conv = msgs + [{"role": "assistant", "content": canonical}]
-                text_out = (teacher.tokenizer.apply_chat_template(
-                    conv, tokenize=False) + teacher.tokenizer.eos_token)
+                text_out = (base_tokenizer.apply_chat_template(
+                    conv, tokenize=False) + base_tokenizer.eos_token)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
                 kept += 1
                 if kept >= n:
                     break
-            acc = 100.0 * kept / max(attempted, 1)
+            acc = 100.0 * (kept - resumed) / max(attempted, 1)
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
                   f"rejects {rejects})")
             # Tripwire: a teacher that never separates thinking from an answer
-            if attempted > 200 and (kept / max(attempted, 1)) < 0.05:
+            if attempted > 200 and ((kept - resumed) / max(attempted, 1)) < 0.05:
                 raise RuntimeError(
-                    f"accept rate {(kept / max(attempted, 1)) * 100:.1f}% after "
+                    f"accept rate {((kept - resumed) / max(attempted, 1)) * 100:.1f}% after "
                     f"{attempted} attempts — the teacher is not producing a "
                     f"valid {marker!r} split. Check the reasoning table entry "
                     f"for {teacher_model or config.teacher_model}.\n"
