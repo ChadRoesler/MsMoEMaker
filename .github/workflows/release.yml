@@ -297,7 +297,7 @@ jobs:
                       f"{_blk}.{_k}: floor and packaged defaults.yaml disagree")
 
           # THE TAG TABLE HAS TO SHIP, FOR A WORSE REASON THAN THE DEFAULTS DO.
-          # ms_moe_maker/reasoning.yaml is the real family->style table and the
+          # ms_moe_maker/assets/reasoning.yaml is the real family->style table and the
           # Python FLOOR is ONE style (xml). A wheel without it does not fail:
           # it silently resolves every DeepSeek, Kimi and Llama base to <think>
           # tags those models never emit, the splitter finds no delimiters,
@@ -306,7 +306,7 @@ jobs:
           # a build BEHAVE differently; this going missing makes the NUMBERS
           # wrong while everything still looks fine. Same guard, plus a
           # functional one.
-          _r = pathlib.Path(ms_moe_maker.__file__).parent / "reasoning.yaml"
+          _r = pathlib.Path(ms_moe_maker.__file__).parent / "assets" / "reasoning.yaml"
           assert _r.is_file(), (
               f"reasoning.yaml missing from the installed package ({_r}). "
               f"Check [tool.setuptools.package-data] in pyproject.toml.")

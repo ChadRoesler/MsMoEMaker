@@ -114,9 +114,11 @@
   <ItemGroup>
     <Content Include="CONTRIBUTING.md" />
     <Content Include="ms_moe_maker\assets\code_templates.yaml" />
+    <Content Include="ms_moe_maker\assets\culinary_templates.yaml" />
     <Content Include="ms_moe_maker\assets\defaults.yaml" />
     <Content Include="ms_moe_maker\assets\dnd_templates.yaml" />
     <Content Include="ms_moe_maker\assets\generic_templates.yaml" />
+    <Content Include="ms_moe_maker\assets\math_templates.yaml" />
     <Content Include="ms_moe_maker\assets\reasoning.yaml" />
     <Content Include="pyproject.toml" />
     <Content Include="README.md" />
