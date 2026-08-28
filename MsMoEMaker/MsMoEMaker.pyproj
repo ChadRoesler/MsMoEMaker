@@ -26,6 +26,14 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="ms_moe_maker\cli\build.py" />
+    <Compile Include="ms_moe_maker\cli\corpus.py" />
+    <Compile Include="ms_moe_maker\cli\eval.py" />
+    <Compile Include="ms_moe_maker\cli\init.py" />
+    <Compile Include="ms_moe_maker\cli\smoke.py" />
+    <Compile Include="ms_moe_maker\cli\validate.py" />
+    <Compile Include="ms_moe_maker\cli\_common.py" />
+    <Compile Include="ms_moe_maker\cli\__init__.py" />
     <Compile Include="ms_moe_maker\corpushealth.py" />
     <Compile Include="ms_moe_maker\defaults.py" />
     <Compile Include="ms_moe_maker\experts.py" />
@@ -98,6 +106,7 @@
   <ItemGroup>
     <Folder Include="ms_moe_maker\" />
     <Folder Include="ms_moe_maker\assets\" />
+    <Folder Include="ms_moe_maker\cli\" />
     <Folder Include="ms_moe_maker\heretic\" />
     <Folder Include="ms_moe_maker\heretic\scorers\" />
     <Folder Include="tests\" />
