@@ -1,0 +1,7 @@
+# D&D-flavored prompts for a lore / dungeon-master domain. {domain} is
+# substituted with the expert's display name (e.g. "Monster Manual").
+Prompts:
+  - "Design a {domain} encounter for a party of four level-5 adventurers."
+  - "Describe a {domain} NPC with a secret that ties into the main plot."
+  - "Create a {domain} magic item with a drawback that makes it interesting."
+  - "Write a {domain} rumor table with six entries for a town notice board."

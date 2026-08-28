@@ -1,0 +1,10 @@
+# Concrete math prompts. {domain} is substituted with the expert's display
+# name (e.g. "Algebra", "Word Problems"). These demand worked solutions and
+# derivations, so the specialist learns to DO {domain}, not to define it.
+Prompts:
+  - "Solve a {domain} problem and show every step of the working."
+  - "Derive a {domain} formula from first principles and explain each step."
+  - "Explain two {domain} approaches to the same problem, then compare them with worked examples."
+  - "Describe a common {domain} mistake, then show the correct worked solution."
+  - "Design a {domain} exercise that tests one specific concept, then solve it."
+  - "Give a real-world situation where {domain} applies, set up the problem, and work the numbers."

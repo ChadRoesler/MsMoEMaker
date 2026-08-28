@@ -82,12 +82,21 @@ Primary options usually include:
 - `grad_accum`
 - LoRA controls (`lora_r`, `lora_alpha`, `lora_dropout`)
 - warmup controls
+- `teacher_max_new` — max tokens the generic synth/domain teacher emits per
+  trace. Default `512`. `-1` (or absent) = use the default.
+- `reasoning_teacher_max_new` — max tokens the reasoning teacher emits per
+  trace. Default `1024`, because a think block + answer needs more headroom than
+  a tool call or plain domain text. `-1` (or absent) = use the default.
 
 What it changes:
 
 - wall-clock runtime
 - memory pressure
 - specialist adaptation strength
+
+The two `*_teacher_max_new` knobs shape the SYNTHETIC data, not the adapter:
+raise `reasoning_teacher_max_new` if the teacher's think/answer is truncated
+mid-script, and `teacher_max_new` if plain domain traces are cut short.
 
 Decision order:
 
@@ -290,6 +299,41 @@ base, including a small non-reasoning Qwen.
 - Because a `reasoning: true` expert puts think blocks into a build whose base
   does not reason, the run resolves a tag style anyway, falling back to plain
   XML exactly the way the generator does.
+
+### `templates:` on a source - choose the questions the teacher answers
+
+Every generated expert that is **not** the tools expert is seeded from question
+templates: the `reasoning: true` path asks them of the reasoning teacher, and a
+plain `kind: synth` expert asks them of the generic teacher for plain domain
+text (no think block, no tool calls).
+
+```yaml
+experts:
+  - name: shell
+    source:
+      kind: synth
+      templates: dnd        # packaged dnd_templates.yaml
+```
+
+`templates:` accepts:
+
+- a bare name (`code` | `dnd` | `math` | `culinary` | `generic`) → the packaged
+  `{name}_templates.yaml`
+- a filesystem path, or any name ending in `.yaml`/`.yml` → used as-is
+- absent/empty → `generic_templates.yaml`
+
+The file is a `Prompts:` list; `{domain}` is substituted with the expert's
+display name:
+
+```yaml
+Prompts:
+  - "Explain the idiomatic way to handle a {domain} task."
+  - "Compare two {domain} approaches and pick one."
+```
+
+A missing or empty file falls back to the built-in code tasks with a warning.
+`templates:` shapes the reasoning and plain-domain generators; the tools expert
+(MCP tool-call traces) does not use it.
 
 ### The tag table is a file, on purpose
 

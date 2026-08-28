@@ -233,7 +233,9 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
 
     # Format function
     def format_fn(ex):
-        if safe_name == config.tools_expert_name or safe_name in config.reasoning_experts:
+        if (safe_name == config.tools_expert_name
+                or safe_name in config.reasoning_experts
+                or safe_name in config.synth_experts):
             return ex["text"]
         lang = expert_display or safe_name
         from .config import DISPLAY_LANG
@@ -248,7 +250,11 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
     dataset = load_dataset("json", data_files=data_path, split="train")
 
     # Cap at the collection ceiling
-    cap = config.num_agent_samples if safe_name == config.tools_expert_name else config.num_code_samples
+    cap = (config.num_agent_samples
+           if (safe_name == config.tools_expert_name
+               or safe_name in config.reasoning_experts
+               or safe_name in config.synth_experts)
+           else config.num_code_samples)
     if len(dataset) > cap:
         print(f"   dataset has {len(dataset)} rows, capping to {cap}")
         dataset = dataset.select(range(cap))

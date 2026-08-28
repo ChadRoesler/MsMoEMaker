@@ -249,30 +249,38 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         # here: generate_reasoning_traces below writes its corpus and
         # reasoning_paths wins in the fine-tune loop, so generating tool traces
         # for it would be teacher hours spent on a file nothing ever reads.
-        tools_name = config.tools_expert_name or "agentcore"
-        synth_names = [
+        # The tools expert (agentcore) keeps the MCP tool-call path. Every OTHER
+        # synth expert that is not reasoning gets PLAIN DOMAIN TEXT - answers to
+        # the templates questions, no think block, no tool calls.
+        tools_name = config.tools_expert_name  # '' when there is no tools expert
+        domain_names = [
             e.name for e in recipe.experts
             if e.name in expert_names
             and getattr(getattr(e, "source", None), "kind", "") == "synth"
             and e.name not in (config.reasoning_experts or ())
+            and e.name != tools_name
         ]
-        if config.tools_expert_name in expert_names and tools_name not in synth_names:
-            synth_names.insert(0, tools_name)
 
-        for sname in synth_names:
-            spath = data_mod.generate_agent_traces(
+        if tools_name and tools_name in expert_names:
+            agent_path = data_mod.generate_agent_traces(
+                config, callback=cb.stage,
+                expert_name=tools_name,
+                teacher_model=cfg_module.teacher_for(recipe, config, tools_name))
+
+        for sname in domain_names:
+            spath = data_mod.generate_domain_traces(
                 config, callback=cb.stage,
                 expert_name=sname,
-                teacher_model=cfg_module.teacher_for(recipe, config, sname))
-            if sname == tools_name:
-                agent_path = spath
-            elif spath:
+                teacher_model=cfg_module.teacher_for(recipe, config, sname),
+                templates_path=cfg_module.templates_for(recipe, sname))
+            if spath:
                 synth_paths[sname] = spath
 
         for rname in config.reasoning_experts:
             rpath = data_mod.generate_reasoning_traces(
                 config, rname, callback=cb.stage,
-                teacher_model=cfg_module.teacher_for(recipe, config, rname))
+                teacher_model=cfg_module.teacher_for(recipe, config, rname),
+                templates_path=cfg_module.templates_for(recipe, rname))
             if rpath:
                 reasoning_paths[rname] = rpath
 

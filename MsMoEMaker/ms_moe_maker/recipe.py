@@ -66,6 +66,12 @@ class Source:
     teacher: Optional[str] = None
     generator: Optional[str] = None
     examples: int = 15_000
+    # Question templates for synth: a path to a YAML of prompts, or a bare
+    # name (code | dnd | math | culinary | generic) resolving to the packaged
+    # *_templates.yaml. Empty = generic_templates.yaml. The prompts are DOMAIN
+    # questions; the reasoning instruction is the system prompt, injected by
+    # `reasoning: true`.
+    templates: str = ""
     # Force reasoning into this expert: generate reasoning traces
     # (<think>…answer) with a reasoning teacher instead of scraping a corpus.
     # The R1-distill recipe, applied to ONE specialist. Works on any base.
@@ -96,6 +102,14 @@ class Budget:
     warmup_ratio: float = 0.05
     warmup_floor: int = 10
     collect_headroom: float = 1.5
+    # Max new tokens the REASONING teacher may emit per trace. -1 = default
+    # (1024): reasoning traces need headroom for think + answer, unlike a tool
+    # call. Raise it if the teacher's answers are truncated mid-script.
+    reasoning_teacher_max_new: int = -1
+    # Max new tokens the generic synth/domain teacher may emit. -1 = default
+    # (512): plain domain text (no think block) needs less headroom than a
+    # reasoning trace, but more than a tool call.
+    teacher_max_new: int = -1
 
     # THE ADAPTER'S SHAPE, which was reachable only from an env var.
     #

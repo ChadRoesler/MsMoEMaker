@@ -97,12 +97,18 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="ms_moe_maker\" />
+    <Folder Include="ms_moe_maker\assets\" />
     <Folder Include="ms_moe_maker\heretic\" />
     <Folder Include="ms_moe_maker\heretic\scorers\" />
     <Folder Include="tests\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="CONTRIBUTING.md" />
+    <Content Include="ms_moe_maker\assets\code_templates.yaml" />
+    <Content Include="ms_moe_maker\assets\defaults.yaml" />
+    <Content Include="ms_moe_maker\assets\dnd_templates.yaml" />
+    <Content Include="ms_moe_maker\assets\generic_templates.yaml" />
+    <Content Include="ms_moe_maker\assets\reasoning.yaml" />
     <Content Include="pyproject.toml" />
     <Content Include="README.md" />
     <Content Include="recipe.example.yaml" />

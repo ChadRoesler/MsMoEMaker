@@ -1,0 +1,10 @@
+# Concrete culinary prompts. {domain} is substituted with the expert's display
+# name (e.g. "Techniques", "Cuisines"). These demand actual recipes and
+# technique, so the specialist learns to COOK {domain}, not to describe it.
+Prompts:
+  - "Write a {domain} recipe a home cook can follow from one pan."
+  - "Explain a core {domain} technique, step by step, including the why behind each step."
+  - "Suggest three substitutions for a common {domain} ingredient and when each one works."
+  - "Describe a {domain} dish's flavor balance and how to fix it when it comes out wrong."
+  - "Plan a three-course {domain} menu for a weeknight dinner, with timings."
+  - "Explain how altitude changes a {domain} preparation and how to adjust for it."

@@ -49,6 +49,10 @@ Validated against commit/tag: main (unreleased)
 - **Reasoning teacher**: The model that writes those traces. Defaults to
   `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` (the `-1.5B` on a dryrun);
   override with `teacher:` on the source.
+- **`templates:`** (on a source): A YAML `Prompts:` list of questions the teacher
+  answers for generated experts (reasoning + plain synth). `{domain}` is swapped
+  for the expert's display name. A bare `code`/`dnd`/`math`/`culinary`/`generic`
+  resolves to the packaged file; empty means `generic_templates.yaml`.
 - **Tag style**: The convention separating a thinking trace from an answer -
   opening tag, closing tag, and whether blocks interleave with tool calls.
   Shipped styles: standard XML, DeepSeek R1, interleaved agentic XML, markdown

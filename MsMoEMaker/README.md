@@ -197,7 +197,7 @@ Layers, later wins — and **the recipe always wins**:
 | | where | |
 |---|---|---|
 | 1 | built in | a floor that can never be missing, so the tool always runs |
-| 2 | `<package>/defaults.yaml` | what ships |
+| 2 | `<package>/assets/defaults.yaml` | what ships |
 | 3 | `~/.msmoe/defaults.yaml` | **the file you edit for someone else** (or `$MSMOE_DEFAULTS`) |
 | 4 | `--defaults PATH` | explicit, for CI and for reproducing someone else's run |
 | 5 | the recipe | always |

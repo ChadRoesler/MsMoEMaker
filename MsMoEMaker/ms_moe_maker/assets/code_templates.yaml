@@ -1,0 +1,10 @@
+# Concrete code-writing prompts. {domain} is substituted with the expert's
+# display name (e.g. "Bash"). These demand actual code, so the specialist
+# learns to PRODUCE {domain}, not to ramble about it in the abstract.
+Prompts:
+  - "Write a {domain} script that takes a directory path as an argument and lists the 10 largest files in it, sorted by size."
+  - "Write a {domain} one-liner that counts how many unique lines are in a file."
+  - "Write a {domain} function that retries a command up to 3 times, sleeping between attempts, and exits with the last error."
+  - "Write a {domain} script that reads lines from stdin and prints only the ones containing a given pattern."
+  - "Write a {domain} loop that renames every file in a directory to lowercase."
+  - "Write a {domain} script that sums the numbers in a file, one number per line."

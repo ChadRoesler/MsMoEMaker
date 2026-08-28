@@ -13,7 +13,7 @@ So defaults are a FILE. Layers, later wins:
     1. FLOOR              in this module. Cannot be missing, so the tool
                           always runs even with no data files at all. It is a
                           PANIC MINIMUM, not the real table.
-    2. packaged           ms_moe_maker/defaults.yaml — what we ship. THE table.
+    2. packaged           ms_moe_maker/assets/defaults.yaml — what we ship. THE table.
     3. user               ~/.msmoe/defaults.yaml (or $MSMOE_DEFAULTS) — the
                           box. This is the file you edit for someone else.
     4. explicit           --defaults <path>, for CI and for reproducing a run
@@ -124,8 +124,9 @@ def _user_path() -> str:
 
 
 def packaged_path(name: str) -> str:
-    """A data file that ships inside the package."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    """A data file that ships inside the package (ms_moe_maker/assets/)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "assets", name)
 
 
 def user_path(env_var: str, rel: str) -> str:

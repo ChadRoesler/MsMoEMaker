@@ -1039,15 +1039,52 @@ def generate_agent_traces(config, callback=None,
     return out_path
 
 
+# CONCRETE CODE TASKS, NOT META-QUESTIONS. "Explain the idiomatic way to handle
+# {domain}" makes the teacher ramble about the domain in the abstract; "write a
+# script that lists the 10 largest files" makes it WRITE {domain}. The
+# specialist has to learn to PRODUCE {domain} code, so the prompts demand it.
 _REASONING_TEMPLATES = (
-    "Explain the idiomatic way to handle a {domain} task.",
-    "A junior asks how to approach a {domain} problem. Reason it out.",
-    "Compare two {domain} approaches and pick one.",
-    "Something is broken in a {domain} context. Think it through, then fix it.",
+    "Write a {domain} script that takes a directory path as an argument and "
+    "lists the 10 largest files in it, sorted by size.",
+    "Write a {domain} one-liner that counts how many unique lines are in a file.",
+    "Write a {domain} function that retries a command up to 3 times, sleeping "
+    "between attempts, and exits with the last error.",
+    "Write a {domain} script that reads lines from stdin and prints only the "
+    "ones containing a given pattern.",
+    "Write a {domain} loop that renames every file in a directory to lowercase.",
+    "Write a {domain} script that sums the numbers in a file, one number per line.",
 )
 
+def _load_templates(path: Optional[str] = None) -> List[str]:
+    """Question templates from a YAML file, defaulting to generic_templates.yaml.
+
+    `path` may be a filesystem path, or a bare name ("code", "dnd", "math",
+    "culinary", "generic") that resolves to the packaged `{name}_templates.yaml`.
+    Empty/None = generic. Falls back to the built-in code tasks if the file is
+    missing or empty.
+    """
+    import yaml
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    if not path:
+        resolved = os.path.join(here, "generic_templates.yaml")
+    elif os.path.sep in path or path.endswith((".yaml", ".yml")):
+        resolved = path
+    else:
+        resolved = os.path.join(here, f"{path}_templates.yaml")
+    try:
+        with open(resolved, encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+        prompts = [str(p) for p in (doc.get("Prompts") or []) if str(p).strip()]
+        if prompts:
+            return prompts
+    except Exception as exc:
+        print(f"   WARNING: could not load question templates from {resolved}: {exc}")
+    return list(_REASONING_TEMPLATES)
+
+
 def generate_reasoning_traces(config, expert_name, callback=None,
-                              teacher_model: Optional[str] = None) -> Optional[str]:
+                              teacher_model: Optional[str] = None,
+                              templates_path: Optional[str] = None) -> Optional[str]:
     """Generate reasoning traces for one specialist — the R1-distill recipe.
 
     A reasoning teacher writes its NATIVE thinking delimiters then an answer,
@@ -1075,6 +1112,7 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     teacher_style = styles.get(teacher_key) or target
     n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_reasoning.jsonl"
+    templates = _load_templates(templates_path)
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         print(f"[skip] reasoning traces already present at {out_path}")
         return out_path
@@ -1114,7 +1152,7 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                              max_new_tokens=config.reasoning_teacher_max_new)
 
     probe_prompt = teacher.tokenizer.apply_chat_template(
-        _reasoning_msgs(tag_system, display, 0), tokenize=False,
+        _reasoning_msgs(tag_system, display, 0, templates), tokenize=False,
         add_generation_prompt=True)
     probe_text = (teacher.complete([probe_prompt]) or [""])[0]
     _, _, speaks_tags = _reasoning.split(probe_text, teacher_style)
@@ -1139,12 +1177,17 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     # not against `kept`, which already includes any resumed traces.
     resumed = kept
     attempted, rejects = 0, 0
+    # The trace teaches the specialist: identity + task -> reasoning + answer.
+    # The verbose tag/marker prompt is the TEACHER's crutch; the specialist
+    # should learn from a clean identity prompt instead of "think step by step
+    # then write ANSWER:" baked into every example.
+    clean_system = f"You are a {display} specialist."
     sample = ""
     sink = open(partial, "a", buffering=1)
     try:
         while kept < n:
             batch_n = min(teacher.batch_size, (n - kept) * 2)
-            batch = [_reasoning_msgs(system, display, i) for i in range(batch_n)]
+            batch = [_reasoning_msgs(system, display, i, templates) for i in range(batch_n)]
             prompts = [teacher.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
             for msgs, text in zip(batch, teacher.complete(prompts)):
@@ -1159,7 +1202,11 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 # <think>…</think> + answer, and eval splits on it later - even
                 # though the teacher spoke its own native delimiter.
                 canonical = f"{target.open}{think}{target.close}\n{answer}"
-                conv = msgs + [{"role": "assistant", "content": canonical}]
+                conv = [
+                    {"role": "system", "content": clean_system},
+                    msgs[1],  # the user task (msgs[0] is the teacher's system)
+                    {"role": "assistant", "content": canonical},
+                ]
                 text_out = (base_tokenizer.apply_chat_template(
                     conv, tokenize=False) + base_tokenizer.eos_token)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
@@ -1189,8 +1236,89 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     return out_path
 
 
-def _reasoning_msgs(system: str, display: str, i: int):
-    task = _REASONING_TEMPLATES[i % len(_REASONING_TEMPLATES)].format(domain=display)
+def generate_domain_traces(config, expert_name, callback=None,
+                           teacher_model=None, templates_path=None) -> Optional[str]:
+    """Generate plain domain text for a synth expert (no reasoning, no tools).
+
+    The third synth shape: `kind: synth` that is neither the tools expert nor
+    `reasoning: true`. The teacher answers the templates questions directly -
+    no think block, no tool calls. Rejection sampling keeps non-empty answers.
+    """
+    from .config import DISPLAY_LANG
+
+    n = config.num_agent_samples
+    out_path = f"{config.data_root}/{expert_name}_code.jsonl"
+    if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        print(f"[skip] domain traces already present at {out_path}")
+        return out_path
+
+    templates = _load_templates(templates_path)
+    display = DISPLAY_LANG.get(expert_name, expert_name.replace("_", " ").title())
+    system = f"You are a {display} specialist."
+
+    if config.use_vllm:
+        teacher = _VLLMTeacher(config, model=teacher_model,
+                               max_new_tokens=config.teacher_max_new)
+    else:
+        teacher = _HFTeacher(config, model=teacher_model,
+                             max_new_tokens=config.teacher_max_new)
+
+    # Same rule as the reasoning path: the trace is trained on by the
+    # specialist, so it must speak the BASE's tokenizer, not the teacher's.
+    from transformers import AutoTokenizer
+    base_model = config.base if config.base else config.base_safe
+    base_tokenizer = AutoTokenizer.from_pretrained(base_model, cache_dir=config.hf_home)
+
+    partial = out_path + ".partial"
+    kept = 0
+    if os.path.exists(partial):
+        with open(partial) as fh:
+            kept = sum(1 for line in fh if line.strip())
+        if kept >= n:
+            os.replace(partial, out_path)
+            if callback:
+                callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} traces")
+            return out_path
+
+    resumed = kept
+    attempted, rejects = 0, 0
+    sink = open(partial, "a", buffering=1)
+    try:
+        while kept < n:
+            batch_n = min(teacher.batch_size, (n - kept) * 2)
+            batch = [_reasoning_msgs(system, display, i, templates)
+                     for i in range(batch_n)]
+            prompts = [teacher.tokenizer.apply_chat_template(
+                m, tokenize=False, add_generation_prompt=True) for m in batch]
+            for msgs, text in zip(batch, teacher.complete(prompts)):
+                attempted += 1
+                answer = (text or "").strip()
+                if not answer:
+                    rejects += 1
+                    continue
+                conv = [msgs[0], msgs[1],
+                        {"role": "assistant", "content": answer}]
+                text_out = (base_tokenizer.apply_chat_template(
+                    conv, tokenize=False) + base_tokenizer.eos_token)
+                sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
+                kept += 1
+                if kept >= n:
+                    break
+            acc = 100.0 * (kept - resumed) / max(attempted, 1)
+            print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, rejects {rejects})")
+    finally:
+        sink.close()
+        teacher.close()
+
+    os.replace(partial, out_path)
+    print(f"Generated {kept} domain traces → {out_path}")
+    if callback:
+        callback(st.DATA_SYNTH, "running", f"{expert_name}: {kept} traces")
+    return out_path
+
+
+def _reasoning_msgs(system: str, display: str, i: int, templates):
+    task = templates[i % len(templates)].format(domain=display)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": task},

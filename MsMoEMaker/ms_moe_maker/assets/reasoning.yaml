@@ -71,6 +71,15 @@ Families:
       - deepseek
     PreferredStyle: r1
 
+  # R1-Distill-Qwen is a QWEN model fine-tuned on R1 traces - it emits <think>,
+  # not the DeepSeek-native <|reasoning|>. Its id contains BOTH "deepseek" and
+  # "r1distillqwen", so this longer hint must win over the DeepSeek family.
+  - Key: r1_distill_qwen
+    FamilyName: R1-Distill-Qwen
+    Models:
+      - R1-Distill-Qwen
+    PreferredStyle: xml
+
   - Key: kimi
     FamilyName: Kimi Family
     Models:

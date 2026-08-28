@@ -47,6 +47,23 @@ def test_describe_templates_match_registry():
     assert set(tpl_names) == set(template.TEMPLATES.keys())
 
 
+def test_every_advertised_template_has_question_templates():
+    """`source.templates: <name>` must resolve to a PACKAGED question-template
+    file for every advertised name. A recipe that says `templates: math` must
+    not silently fall back to the built-in code tasks because the file was
+    never written."""
+    import os
+
+    from ms_moe_maker import defaults as D
+
+    for name in DESCRIBE.get("templates", []):
+        path = D.packaged_path(f"{name}_templates.yaml")
+        assert os.path.isfile(path), (
+            f"advertised template {name!r} has no packaged question file at "
+            f"{path} - a `templates: {name}` source would silently fall back "
+            f"to the built-in code tasks")
+
+
 def test_describe_commands_are_current():
     """The verbs we advertise, the verbs argparse accepts, and the verbs we can
     actually dispatch are all the same list.
@@ -359,7 +376,10 @@ class TestDescribeIsAContract:
 
     def test_kinds_come_from_the_registry(self):
         from ms_moe_maker import corpus
-        assert DESCRIBE["kinds"] == corpus.names()
+        # The rich shape now, matching `validators` and recipe.DESCRIBE.
+        # Names stay derivable, which is what this ever asserted.
+        assert [k["name"] for k in DESCRIBE["kinds"]] == corpus.names()
+        assert DESCRIBE["kinds"] == corpus.describe()
 
 
 class TestJsonIsAWireFormatEverywhere:

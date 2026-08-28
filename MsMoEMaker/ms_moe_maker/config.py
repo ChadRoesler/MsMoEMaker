@@ -111,6 +111,14 @@ def reasoning_style_of_config(config) -> Optional[ReasoningStyle]:
         interwoven=bool(getattr(config, "reasoning_interwoven", False)))
 
 
+def templates_for(recipe, expert_name: str) -> str:
+    """The question-templates path for one synth expert ('' = generic default)."""
+    for e in getattr(recipe, "experts", None) or []:
+        if getattr(e, "name", "") == expert_name:
+            return getattr(getattr(e, "source", None), "templates", "") or ""
+    return ""
+
+
 def teacher_for(recipe, config, expert_name: str) -> str:
     """The teacher model for one GENERATED expert (synth / tools / reasoning).
 
@@ -462,6 +470,10 @@ class PipelineConfig:
     # traces GENERATED for them (force reasoning into a non-reasoning base)
     # instead of a scraped corpus.
     reasoning_experts: List[str] = field(default_factory=list)
+    # Every generated (kind: synth) expert, whatever its shape - tools,
+    # reasoning, or plain domain text. finetune keys off this to keep the full
+    # chat transcript as-is instead of wrapping it in a code prompt.
+    synth_experts: List[str] = field(default_factory=list)
     dryrun: bool = False
     force: bool = False
 
@@ -491,7 +503,7 @@ class PipelineConfig:
     vllm_gpu_util: float = 0.88
     vllm_max_len: int = 4096
     vllm_quantization: Optional[str] = None
-    teacher_max_new: int = 224
+    teacher_max_new: int = 512
     # Reasoning traces need headroom for think + answer, not just a tool call.
     reasoning_teacher_max_new: int = 1024
 
@@ -813,6 +825,11 @@ def build_config(recipe, force: bool = False,
         e.name for e in recipe.experts
         if getattr(getattr(e, "source", None), "reasoning", False)
     ]
+    # Every generated expert (kind: synth), whatever its shape.
+    synth_experts = [
+        e.name for e in recipe.experts
+        if getattr(getattr(e, "source", None), "kind", "") == "synth"
+    ]
     _run_style = _resolve_run_style(recipe, reasoning_experts)
 
     # Compute budgets from steps
@@ -998,6 +1015,13 @@ def build_config(recipe, force: bool = False,
     abl_ckpt = getattr(_abl, "checkpoint_action", "continue") or "continue"
     abl_export = getattr(_abl, "export", "merge") or "merge"
 
+    # Teacher generation ceilings, pulled from the recipe (-1 = default).
+    teacher_max_new = _knob(getattr(recipe.budget, "teacher_max_new", -1), 512)
+    # Reasoning needs headroom for think + answer, unlike a tool call or plain
+    # domain text; raise it if the teacher's answers are truncated mid-script.
+    reasoning_teacher_max_new = _knob(
+        getattr(recipe.budget, "reasoning_teacher_max_new", -1), 1024)
+
     return PipelineConfig(
         name=name,
         size=size,
@@ -1016,6 +1040,7 @@ def build_config(recipe, force: bool = False,
         reasoning_close=_run_style[1].close if _run_style[1] else "",
         reasoning_interwoven=bool(_run_style[1].interwoven if _run_style[1] else False),
         reasoning_experts=reasoning_experts,
+        synth_experts=synth_experts,
         dryrun=dryrun,
         force=force,
         data_root=roots["data"],
@@ -1044,7 +1069,8 @@ def build_config(recipe, force: bool = False,
         vllm_gpu_util=0.88,
         vllm_max_len=4096,
         vllm_quantization=None,
-        teacher_max_new=224,
+        teacher_max_new=teacher_max_new,
+        reasoning_teacher_max_new=reasoning_teacher_max_new,
         # LoRA
         max_seq_length=b.max_seq_length,
         lora_r=lora_r,

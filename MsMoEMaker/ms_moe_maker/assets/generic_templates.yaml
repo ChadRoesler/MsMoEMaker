@@ -1,0 +1,7 @@
+# Generic, domain-agnostic prompts. {domain} is substituted with the expert's
+# display name. The default when a synth expert names no `templates:` file.
+Prompts:
+  - "Explain the idiomatic way to handle a {domain} task."
+  - "A junior asks how to approach a {domain} problem. Reason it out."
+  - "Compare two {domain} approaches and pick one."
+  - "Something is broken in a {domain} context. Think it through, then fix it."

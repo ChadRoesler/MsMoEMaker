@@ -53,6 +53,43 @@ def _box_defaults():
         return {"layers": [], "keys": {}, "blocks": [], "warnings": []}
 
 
+def _box_registry_errors():
+    """Entry-point load failures from the pluggable registries.
+
+    A third-party corpus kind or validator that fails to import is exactly the
+    thing a person needs told, and it is invisible in the lists above: a kind
+    that did not load simply is not there, which looks identical to one that
+    was never installed. Carried in --describe so a consumer forking the
+    documented command learns about it too, instead of only the callers that
+    reach into the package.
+
+    (The reasoning table reports its own problems under `reasoning.warnings`,
+    which predates this key and stays where it is.)
+    """
+    errs = []
+    for mod, label in (("corpus", "corpus kind"), ("validators", "validator")):
+        try:
+            m = __import__(f"ms_moe_maker.{mod}", fromlist=[mod])
+            errs.extend(f"{label} registry: {e}" for e in m.load_errors())
+        except Exception as exc:  # noqa: BLE001
+            errs.append(f"{label} registry unavailable: {exc}")
+    return errs
+
+
+def _box_validators():
+    """The validator registry this install offers.
+
+    Same defensiveness as _box_tiers and _box_reasoning: --describe promises
+    exit 0 and one line of JSON, so a broken third-party validator entry point
+    degrades to an empty list rather than taking the contract down.
+    """
+    try:
+        from . import validators as _v
+        return _v.describe()
+    except Exception:
+        return []
+
+
 def _box_reasoning():
     """Tag styles and model families this install knows about.
 
@@ -152,10 +189,35 @@ class _Tee:
 
 
 def _corpus_kinds():
-    """The registered corpus kinds. Read from the registry, not a literal, so a
-    kind published by a plugin shows up in `describe` without an edit here."""
+    """The registered corpus KIND NAMES, for prose.
+
+    `init` joins these into a comment line at the top of a starter recipe, so
+    this one stays a list of words. The rich rows that a form is built from are
+    _box_corpus_kinds() below - two callers, two shapes, and the split is here
+    rather than at the call sites because a `.join()` over dicts is a TypeError
+    at the worst possible moment: while somebody is generating their first
+    recipe.
+    """
     from . import corpus
     return corpus.names()
+
+
+def _box_corpus_kinds():
+    """The corpus registry as ROWS, for --describe and Backstage's craft form.
+
+    Matches `validators` beside it in the payload and `recipe.DESCRIBE`'s key
+    of the same name, which was already the rich shape. This key used to be
+    bare names, so one package shipped two payloads that both called something
+    `kinds` and meant different things - and a consumer building a form off the
+    CLI's copy got words with no summary and no `requires` to render.
+
+    Names stay one comprehension away: [k["name"] for k in kinds].
+    """
+    try:
+        from . import corpus
+        return corpus.describe()
+    except Exception:
+        return []
 
 
 # ONE SOURCE OF TRUTH, AND MERGED RATHER THAN RETYPED.
@@ -176,7 +238,7 @@ def _corpus_kinds():
 DESCRIBE = {
     **_d.DESCRIBE,
     "version": _version(),
-    "kinds": _corpus_kinds(),
+    "kinds": _box_corpus_kinds(),
     "gates": ["auto", "manual", "skip"],
     "templates": ["code", "dnd", "math", "culinary"],
     # THE TIERS THIS INSTALL ACTUALLY HAS, not the ones the source ships. A box
@@ -190,6 +252,15 @@ DESCRIBE = {
     # broken file degrades to "nothing configured", never to a broken contract.
     "defaults": _box_defaults(),
     "reasoning": _box_reasoning(),
+    # THE VALIDATOR REGISTRY, WHICH SAID IT WAS HERE AND WAS NOT.
+    # validators.describe()'s own docstring reads "for --describe and
+    # Backstage's craft form", and it reached the craft form only because
+    # seren-theatre imported the module directly rather than asking this
+    # command. A consumer that has to reach into the package to learn what the
+    # box offers is a consumer that breaks every time the package moves - and
+    # `--describe` exists precisely so nobody has to.
+    "validators": _box_validators(),
+    "registry_errors": _box_registry_errors(),
     "modes": list(_d.EVAL_MODES),
 }
 

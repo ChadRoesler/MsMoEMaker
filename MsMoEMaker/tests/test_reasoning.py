@@ -44,7 +44,10 @@ class TestPackagedTable:
 class TestSniffing:
     @pytest.mark.parametrize("model,expected", [
         ("meta-llama/Llama-3.1-8B-Instruct", "llama"),
-        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "r1"),
+        # R1-Distill-Qwen is Qwen fine-tuned on R1 traces: it emits <think>,
+        # NOT the DeepSeek-native <|reasoning|>. The table's longer
+        # "R1-Distill-Qwen" hint must win over the DeepSeek family's "r1".
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "xml"),
         ("moonshotai/Kimi-K2-Instruct", "agentic_xml"),
         ("Qwen/QwQ-32B", "xml"),
         # a plain coder model reasons about nothing

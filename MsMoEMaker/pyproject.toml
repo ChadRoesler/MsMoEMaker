@@ -71,8 +71,11 @@ include = ["ms_moe_maker*"]
 # DATA THAT SHIPS. defaults.yaml is the real defaults table (the Python FLOOR
 # is only a panic minimum), so a wheel without it is a wheel that quietly
 # behaves differently. CI asserts it is present in the built artifact.
+# The data files live under ms_moe_maker/assets/ - code and lookup-table data
+# are different things, and keeping them separate means the glob below ships
+# exactly the tables we intend and nothing that happens to be a stray yaml.
 [tool.setuptools.package-data]
-ms_moe_maker = ["*.yaml"]
+ms_moe_maker = ["assets/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

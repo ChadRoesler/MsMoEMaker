@@ -13,7 +13,7 @@ that layer differently is two things to explain and two things to get wrong:
     1. FLOOR             below. ONE style. Not a copy of the shipped table -
                          a panic minimum, so a missing or broken file can
                          never take a build down.
-    2. packaged          ms_moe_maker/reasoning.yaml. THE table.
+    2. packaged          ms_moe_maker/assets/reasoning.yaml. THE table.
     3. user              ~/.msmoe/reasoning.yaml (or $MSMOE_REASONING).
     4. explicit          a path, for CI and for reproducing someone's run.
 

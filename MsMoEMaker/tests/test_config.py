@@ -994,3 +994,41 @@ class TestReasoningTypeResolution:
             if c.reasoning_experts or c.reasoning:
                 assert style is not None, "traces exist but nothing parses them"
                 assert style.open and style.close
+
+
+class TestTeacherMaxNewKnobs:
+    """`teacher_max_new` and `reasoning_teacher_max_new` are recipe knobs with
+    DIFFERENT defaults: 512 for plain synth/domain text, 1024 for think+answer.
+    -1 (the Budget sentinel) means "you decide" - i.e. use the default."""
+
+    @staticmethod
+    def _rec(budget=None):
+        from ms_moe_maker.recipe import parse
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "python",
+                             "source": {"kind": "stack", "language": "Python"}}]}
+        if budget:
+            body["budget"] = budget
+        rec, _ = parse(body)
+        return rec
+
+    def test_a_silent_recipe_gets_the_defaults(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(self._rec(), dryrun=True)
+        assert c.teacher_max_new == 512
+        assert c.reasoning_teacher_max_new == 1024
+
+    def test_the_recipe_can_override_each_independently(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(
+            self._rec(budget={"teacher_max_new": 700,
+                              "reasoning_teacher_max_new": 4096}),
+            dryrun=True)
+        assert c.teacher_max_new == 700
+        assert c.reasoning_teacher_max_new == 4096
+
+    def test_minus_one_still_means_you_decide(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(
+            self._rec(budget={"teacher_max_new": -1}), dryrun=True)
+        assert c.teacher_max_new == 512

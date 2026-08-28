@@ -37,7 +37,7 @@ is two things to explain and two things to get wrong:
 
 1. floor - one style, in code. A panic minimum, so a missing or broken file can
    never take a build down.
-2. packaged - `ms_moe_maker/reasoning.yaml`, the real table.
+2. packaged - `ms_moe_maker/assets/reasoning.yaml`, the real table.
 3. user - `~/.msmoe/reasoning.yaml`, or `$MSMOE_REASONING`.
 4. explicit - a path, for CI and for reproducing someone else's run.
 
