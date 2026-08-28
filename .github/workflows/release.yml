@@ -280,11 +280,11 @@ jobs:
           assert any("torch" in r for r in train_reqs), (
               f"[train] does not declare torch: {train_reqs}")
 
-          # THE TABLE HAS TO SHIP. ms_moe_maker/defaults.yaml is the real
+          # THE TABLE HAS TO SHIP. ms_moe_maker/assets/defaults.yaml is the real
           # defaults table — the Python FLOOR is only a panic minimum — so a
           # wheel without it behaves differently from a checkout, quietly.
           import pathlib, ms_moe_maker
-          _d = pathlib.Path(ms_moe_maker.__file__).parent / "defaults.yaml"
+          _d = pathlib.Path(ms_moe_maker.__file__).parent / "assets" / "defaults.yaml"
           assert _d.is_file(), (
               f"defaults.yaml missing from the installed package ({_d}). "
               f"Check [tool.setuptools.package-data] in pyproject.toml.")
