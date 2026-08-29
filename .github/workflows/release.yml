@@ -235,7 +235,7 @@ jobs:
           python - <<'PY'
           from importlib.metadata import distribution
           import ms_moe_maker
-          from ms_moe_maker import manifest, stages, levers, runner, recipe  # noqa: F401
+          from ms_moe_maker import run.manifest, run.stages, config.levers, run.runner, run.recipe  # noqa: F401
 
           # Assert what ms-moe-maker DECLARES, not what happens to be importable.
           # Ambient importability is a correlation - a runner image, or another
@@ -341,10 +341,10 @@ jobs:
           import subprocess, sys as _sys
           probe = subprocess.run(
               [_sys.executable, "-c",
-               "import ms_moe_maker.export as e; assert e.smoke_gguf and e.export_gguf"],
+               "import ms_moe_maker.moe.export as e; assert e.smoke_gguf and e.export_gguf"],
               capture_output=True, text=True)
           assert probe.returncode == 0, (
-              "ms_moe_maker.export no longer imports on a base install:\n"
+              "ms_moe_maker.moe.export no longer imports on a base install:\n"
               + probe.stderr[-2000:])
 
           print(f"deps declared: {reqs}")
