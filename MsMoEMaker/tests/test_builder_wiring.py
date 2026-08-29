@@ -26,6 +26,18 @@ from ms_moe_maker.run import builder
 from ms_moe_maker.config.recipe import parse
 
 
+def _base(path):
+    """Strip the held-out-excluded suffix builder appends before fine-tuning.
+
+    Specialists train on `<corpus>.train` so they never see the rows eval
+    scores them against; `expert_corpus_paths` (and therefore train_router)
+    keeps the BASE path, because train_router appends `.train` itself. That
+    asymmetry is deliberate and is asserted below rather than papered over -
+    if it ever drifts, `<corpus>.train.train` is the symptom.
+    """
+    return path[:-len(".train")] if path.endswith(".train") else path
+
+
 @pytest.fixture
 def wired(tmp_path, monkeypatch, request):
     """Run run_pipeline with every stage replaced by a recorder.
@@ -185,14 +197,51 @@ def test_no_argument_to_router_is_a_directory(wired):
 
 def test_finetune_gets_the_corpus_for_its_own_expert(wired):
     _, seen, corpora, _ = wired
-    assert seen["finetune"] == corpora
+    assert {k: _base(v) for k, v in seen["finetune"].items()} == corpora
+    # ...and it is the SPLIT that arrives, not the whole corpus.
+    for name, path in seen["finetune"].items():
+        assert path.endswith(".train"), (
+            f"{name} fine-tuned on {path!r} - the full corpus, including the "
+            f"rows eval will score it against")
+
+
+def test_specialists_never_see_the_held_out_rows(wired):
+    """The regression test 0.4 did not have.
+
+    train_router has had a fourteen-line comment about preferring `.train` so
+    the router mix cannot eat the evaluation set. The specialists were handed
+    the whole corpus and the split was not created until eval ran - so every
+    expert trained on the rows it would later be scored against, and --mode
+    quality read as "the MoE answers worse than one expert alone" when the gap
+    was contamination.
+    """
+    import os
+    _, seen, corpora, _ = wired
+    for name, corpus in corpora.items():
+        trained_on = seen["finetune"][name]
+        assert trained_on != corpus, (
+            f"{name} fine-tuned on the full corpus; eval holds out a slice of "
+            f"this same file and would be scoring memorisation")
+        held = corpus + ".heldout"
+        assert os.path.exists(held), f"no held-out file written for {name}"
+        with open(held, encoding="utf-8") as fh:
+            held_rows = {ln.strip() for ln in fh if ln.strip()}
+        with open(trained_on, encoding="utf-8") as fh:
+            train_rows = {ln.strip() for ln in fh if ln.strip()}
+        assert held_rows, f"held-out split for {name} is empty"
+        assert not (held_rows & train_rows), (
+            f"{len(held_rows & train_rows)} rows appear in BOTH {name}'s "
+            f"training split and its held-out set")
 
 
 def test_router_corpora_are_the_ones_the_experts_trained_on(wired):
     """The router must be mixed from what the experts actually saw. For a
     synth expert that is the generated trace file, not code_paths[name]."""
     _, seen, _, _ = wired
-    assert seen["router_arg"] == seen["finetune"]
+    # train_router resolves `.train` itself (same seed, same fraction), so it
+    # is handed the base path and lands on the same rows the experts saw.
+    assert seen["router_arg"] == {k: _base(v)
+                                  for k, v in seen["finetune"].items()}
 
 
 def test_stages_are_reported_done_not_skipped_on_a_fresh_run(wired):
@@ -273,7 +322,7 @@ def test_a_named_synth_expert_gets_its_corpus_generated(wired):
 @pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
 def test_the_synth_expert_finetunes_on_what_was_generated_for_it(wired):
     _, seen, _, _ = wired
-    path = seen["finetune"].get("shell")
+    path = _base(seen["finetune"].get("shell") or "")
     assert path and path.endswith("shell_code.jsonl"), (
         f"shell fine-tuned on {path!r}; it must be its own generated corpus")
 
@@ -281,7 +330,8 @@ def test_the_synth_expert_finetunes_on_what_was_generated_for_it(wired):
 @pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
 def test_the_router_is_mixed_from_the_synth_corpus_too(wired):
     _, seen, _, _ = wired
-    assert seen["router_arg"] == seen["finetune"], (
+    assert seen["router_arg"] == {k: _base(v)
+                                  for k, v in seen["finetune"].items()}, (
         "the router must be mixed from exactly what the experts trained on")
 
 
@@ -296,4 +346,4 @@ def test_a_reasoning_synth_expert_is_not_also_given_tool_traces(wired):
     assert "shell" not in seen.get("agent_calls", []), (
         "tool traces were generated for an expert whose corpus comes from "
         "the reasoning path — that output is discarded")
-    assert seen["finetune"]["shell"].endswith("shell_reasoning.jsonl")
+    assert _base(seen["finetune"]["shell"]).endswith("shell_reasoning.jsonl")

@@ -171,9 +171,25 @@ def inspect(path: str, sample: int = 0, generated: bool = False) -> Health:
         return h
 
     h.line_reuse = 1.0 - (len(line_counts) / max(total_lines, 1))
-    if repos:
+    if len(repos) > 1:
         name, n = repos.most_common(1)[0]
         h.repos, h.top_repo, h.top_repo_share = len(repos), name, n / h.docs
+    elif repos:
+        # ONE DISTINCT LABEL CARRIES EXACTLY AS MUCH INFORMATION AS NO LABEL:
+        # none. _collect_hf stamps the dataset id, _collect_gh the tarball's
+        # top directory and _collect_local the source path - one constant
+        # string on every row - so a 5,000-document corpus reported
+        # top_repo_share 1.0 and the permanent, unfixable finding "100% of this
+        # corpus is one repo, lower corpus.per_repo_cap and re-collect". Then
+        # `corpus --prune` believed it and wrote a 20-document corpus. Nothing
+        # about repo dominance was measured here; say so instead of 100%.
+        h.has_provenance = False
+        h.unmeasured.append(
+            f"every row carries the same `repo` label "
+            f"({repos.most_common(1)[0][0]!r}) - that is what the hf/gh/local "
+            f"collectors stamp for a whole source, and it says nothing about "
+            f"how many projects are in here. Repo dominance is UNMEASURED, "
+            f"not 100%.")
     else:
         h.unmeasured.append(
             "no `repo` field on these rows, so repo dominance cannot be "
@@ -231,6 +247,24 @@ class Prune:
     unmeasured: List[str] = field(default_factory=list)
 
 
+def _distinct_repo_labels(path: str, cap: int = 2) -> int:
+    """How many DIFFERENT `repo` values this corpus carries, counted to `cap`.
+
+    One is the same as none - see inspect(). A corpus with real provenance and
+    a corpus wearing one constant label look identical to a Counter and are
+    completely different claims, and the per-repo cap is only meaningful on the
+    first. Stops at `cap`, so the healthy case costs two rows.
+    """
+    seen: set = set()
+    for row in _rows(path):
+        r = row.get("repo")
+        if r:
+            seen.add(str(r))
+            if len(seen) >= cap:
+                break
+    return len(seen)
+
+
 def propose_prune(path: str, per_repo_cap: int = 20,
                   per_header_cap: int = 20) -> Prune:
     """What WOULD be dropped, and why. Writes nothing.
@@ -250,6 +284,12 @@ def propose_prune(path: str, per_repo_cap: int = 20,
     repos: Counter = Counter()
     headers: Counter = Counter()
     saw_repo = False
+    # A CAP ON A LABEL THAT DOES NOT VARY IS NOT A CAP, IT IS A TRUNCATION.
+    # Every hf/gh/local corpus carries one constant `repo`, so this rule would
+    # keep the first per_repo_cap documents and drop the rest - 20 kept out of
+    # 5,000, below every min_samples floor - on a measurement that never
+    # happened. Withhold the rule and report it as unmeasured.
+    n_repo_labels = _distinct_repo_labels(path)
 
     for row in _rows(path):
         text = _text(row)
@@ -262,7 +302,7 @@ def propose_prune(path: str, per_repo_cap: int = 20,
             p.drop += 1
             p.reasons["exact duplicate"] += 1
             continue
-        repo = row.get("repo")
+        repo = row.get("repo") if n_repo_labels > 1 else None
         if repo:
             saw_repo = True
             if repos[str(repo)] >= per_repo_cap:
@@ -285,7 +325,11 @@ def propose_prune(path: str, per_repo_cap: int = 20,
         p.unmeasured.append(
             "no `repo` field on these rows - the per-repo rule could not run, "
             "so repo dominance is NOT addressed by this proposal. Re-collect "
-            "with a current build to get provenance stamped.")
+            "with a current build to get provenance stamped."
+            if not n_repo_labels else
+            "every row carries the same `repo` label - the per-repo rule was "
+            "NOT applied, because capping a constant label only truncates the "
+            "corpus. Repo dominance is unmeasured here, not fixed.")
     return p
 
 
@@ -302,6 +346,12 @@ def write_pruned(path: str, out_path: str, per_repo_cap: int = 20,
     repos: Counter = Counter()
     headers: Counter = Counter()
     saw_repo = False
+    # A CAP ON A LABEL THAT DOES NOT VARY IS NOT A CAP, IT IS A TRUNCATION.
+    # Every hf/gh/local corpus carries one constant `repo`, so this rule would
+    # keep the first per_repo_cap documents and drop the rest - 20 kept out of
+    # 5,000, below every min_samples floor - on a measurement that never
+    # happened. Withhold the rule and report it as unmeasured.
+    n_repo_labels = _distinct_repo_labels(path)
 
     with open(out_path, "w", encoding="utf-8") as fh:
         for row in _rows(path):
@@ -315,7 +365,7 @@ def write_pruned(path: str, out_path: str, per_repo_cap: int = 20,
                 p.drop += 1
                 p.reasons["exact duplicate"] += 1
                 continue
-            repo = row.get("repo")
+            repo = row.get("repo") if n_repo_labels > 1 else None
             if repo:
                 saw_repo = True
                 if repos[str(repo)] >= per_repo_cap:
@@ -335,7 +385,12 @@ def write_pruned(path: str, out_path: str, per_repo_cap: int = 20,
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     if not saw_repo:
-        p.unmeasured.append("no `repo` field - the per-repo rule did not run")
+        p.unmeasured.append(
+            "no `repo` field - the per-repo rule did not run"
+            if not n_repo_labels else
+            "every row carries the same `repo` label - the per-repo rule did "
+            "NOT run, because capping a constant label only truncates the "
+            "corpus")
     return p
 
 

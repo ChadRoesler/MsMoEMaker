@@ -90,9 +90,15 @@ def export_is_done(config) -> bool:
     if config.force:
         return False
     gguf_path = gguf_path_for(config)
+    # ".smokepass.txt", NOT ".smoketest.txt". The latter is the LOG, and it is
+    # written unconditionally so a failed run still leaves its evidence - which
+    # meant a build that failed the NaN check was nonetheless "done", and every
+    # subsequent run printed "[skip] GGUF export already done" and reported
+    # OK - 8/8 stages for a model that emits one token forever. The proof is
+    # now a separate artifact written only after every check passes.
     return (os.path.exists(gguf_path)
             and os.path.getsize(gguf_path) > 0
-            and os.path.exists(gguf_path + ".smoketest.txt"))
+            and os.path.exists(gguf_path + ".smokepass.txt"))
 
 
 def export_gguf(config, final_dir: str) -> Optional[str]:
@@ -184,6 +190,7 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
     all_extra = [["-st"], ["--single-turn"], ["-no-cnv"], []]
 
     out = ""
+    gen = ""
     proc_info = None
     for extra in all_extra:
         try:
@@ -194,6 +201,16 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
                 start_new_session=True,
                 timeout=config.gguf_smoke_timeout,
             )
+            # STDOUT IS THE GENERATION. STDERR IS THE BANNER.
+            # llama.cpp writes generated tokens to stdout and `build:`,
+            # `llama_model_loader:`, `print_info:`,
+            # `llama_perf_context_print:` to stderr. These were concatenated
+            # BEFORE the "did it emit anything" check, so the load banner
+            # alone satisfied it and the proof could not fail for any model
+            # that loads - including one that emits zero tokens. `out` stays
+            # combined for the log, because the banner is exactly the evidence
+            # you want when something breaks. `gen` is what gets judged.
+            gen = p.stdout or ""
             out = (p.stdout or "") + (p.stderr or "")
             low = out.lower()
             bad_flag = any(s in low for s in (
@@ -243,15 +260,31 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
     print("   " + "-" * 74)
     print(f"   full output → {smoke_log}")
 
-    # Must produce at least one alphanumeric character
-    if not any(c.isalnum() for c in out):
+    # THE EXIT CODE IS PART OF THE PROOF.
+    # This function's own docstring has always listed "the process exits
+    # cleanly" as check #1, and nothing checked it: returncode was captured
+    # and only ever interpolated into a log line. GGML_ASSERT, CUDA OOM and an
+    # unsupported quant all exit non-zero with a banner-rich stderr, which the
+    # old combined-stream check accepted without complaint.
+    if proc_info is None:
         raise RuntimeError(
-            f"GGUF smoke test produced no alphanumeric output "
-            f"(rc={proc_info['returncode'] if proc_info else '?'}). "
+            f"GGUF smoke test: llama-cli rejected every argument form tried "
+            f"({len(all_extra)} of them). See {smoke_log}.")
+    if proc_info["returncode"] != 0:
+        raise RuntimeError(
+            f"GGUF smoke test FAILED: llama-cli exited "
+            f"{proc_info['returncode']} without generating. See {smoke_log}.")
+
+    # Must produce at least one alphanumeric character ON STDOUT
+    if not any(c.isalnum() for c in gen):
+        raise RuntimeError(
+            f"GGUF smoke test produced no generated output on stdout "
+            f"(rc={proc_info['returncode']}). The model loaded and emitted "
+            f"nothing - stderr had {len(out) - len(gen)} bytes of banner. "
             f"See {smoke_log}.")
 
     # Check for degenerate run (NaN signature)
-    best, ch = _longest_char_run(out)
+    best, ch = _longest_char_run(gen)
     print(f"   longest repeated-character run: {best}" +
           (f" ({ch!r})" if best else ""))
 
@@ -264,6 +297,15 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
             f"divides by it (see SHARED_EXPERT_GATE_FILL).")
 
     print("   smoke test PASSED — the GGUF generates real tokens")
+
+    # WRITTEN LAST, AND ONLY HERE. Every check above can raise; none of them
+    # can leave this file behind. export_is_done() reads THIS, not the log.
+    with open(gguf_path + ".smokepass.txt", "w", encoding="utf-8") as fh:
+        fh.write(f"returncode={proc_info['returncode']}\n"
+                 f"generated_stdout_chars={len(gen)}\n"
+                 f"longest_repeated_run={best}\n"
+                 f"log={smoke_log}\n")
+
     print(f"\n   try it:  {cli} -m {gguf_path} -ngl 99")
     return gguf_path
 
@@ -310,6 +352,8 @@ def smoke_gguf(gguf_path: str,
     all_extra = [["-st"], ["--single-turn"], ["-no-cnv"], []]
 
     out = ""
+    gen = ""
+    rc = None
     for extra in all_extra:
         try:
             cmd = stdbuf_cmd + base_cmd + extra
@@ -319,6 +363,9 @@ def smoke_gguf(gguf_path: str,
                 start_new_session=True,
                 timeout=timeout,
             )
+            # See export_gguf: stdout is the generation, stderr is the
+            # banner, and judging the concatenation makes this unfailable.
+            gen = p.stdout or ""
             out = (p.stdout or "") + (p.stderr or "")
             low = out.lower()
             bad_flag = any(s in low for s in (
@@ -326,6 +373,7 @@ def smoke_gguf(gguf_path: str,
                 "error while handling argument",
             ))
             if p.returncode == 0 or not bad_flag:
+                rc = p.returncode
                 break
             print(f"   (llama-cli rejected {extra or '<no flag>'}; trying next)")
         except subprocess.TimeoutExpired as e:
@@ -346,13 +394,22 @@ def smoke_gguf(gguf_path: str,
         print("   | " + ln[:108])
     print("   " + "-" * 74)
 
-    # Must produce at least one alphanumeric character
-    if not any(c.isalnum() for c in out):
-        print("   ✗ No alphanumeric output — smoke test FAILED")
+    if rc is None:
+        print(f"   ✗ llama-cli rejected every argument form tried "
+              f"({len(all_extra)} of them) — smoke test FAILED")
+        return False
+    if rc != 0:
+        print(f"   ✗ llama-cli exited {rc} — smoke test FAILED")
+        return False
+
+    # Must produce at least one alphanumeric character ON STDOUT
+    if not any(c.isalnum() for c in gen):
+        print("   ✗ No generated output on stdout (the model loaded and "
+              "emitted nothing) — smoke test FAILED")
         return False
 
     # Check for degenerate run (NaN signature)
-    best, ch = _longest_char_run(out)
+    best, ch = _longest_char_run(gen)
     print(f"   longest repeated-character run: {best}"
           + (f" ({ch!r})" if best else ""))
 

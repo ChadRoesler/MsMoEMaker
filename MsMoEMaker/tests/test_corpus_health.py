@@ -121,7 +121,11 @@ class TestGeneratedCorpora:
 class TestProposeNeverCommits:
 
     def test_propose_writes_nothing(self, tmp_path):
-        path = _write(tmp_path, _one_repo())
+        # Two labels, because the per-repo rule is withheld on a corpus whose
+        # `repo` never varies - see TestAConstantLabelIsNotProvenance. The
+        # claim here is that propose_prune touches nothing, and it needs a
+        # corpus the rule can actually run on to make that claim about.
+        path = _write(tmp_path, _one_repo() + _one_repo(60, repo="other/x"))
         before = open(path, encoding="utf-8").read()
         p = ch.propose_prune(path, per_repo_cap=20)
         assert p.drop > 300
@@ -159,6 +163,50 @@ class TestProposeNeverCommits:
                              per_repo_cap=10)
         assert p.reasons, "a drop with no stated reason is not a proposal"
         assert sum(p.reasons.values()) == p.drop
+
+
+class TestAConstantLabelIsNotProvenance:
+    """`hf`, `gh` and `local` stamp ONE label on every row they write.
+
+    _collect_hf writes the dataset id, _collect_gh the tarball's top directory,
+    _collect_local the source path. Counted naively that is "100% of this
+    corpus is one repo" on every corpus any of them ever produced - a finding
+    that can never be cleared, on a measurement that never happened. And
+    `corpus --prune` believed it: a 5,000-document corpus came out at 20.
+    """
+
+    def _constant(self, tmp_path):
+        rows = [{"text": f"def f{i}():\n    return {i}\n    # {i}\n",
+                 "repo": "bigcode/the-stack-smol"} for i in range(300)]
+        return _write(tmp_path, rows)
+
+    def test_one_label_is_unmeasured_not_total_dominance(self, tmp_path):
+        h = ch.inspect(self._constant(tmp_path))
+        assert h.top_repo_share == 0.0
+        assert not h.has_provenance
+        assert not any("one repo" in f for f in h.findings)
+        assert any("same `repo` label" in u for u in h.unmeasured)
+
+    def test_the_cap_is_withheld_rather_than_applied(self, tmp_path):
+        path = self._constant(tmp_path)
+        p = ch.propose_prune(path, per_repo_cap=20)
+        assert p.keep == 300, (
+            "capping a label that does not vary just truncates the corpus - "
+            "20 documents kept out of 300, under every min_samples floor")
+        assert any("same `repo` label" in u for u in p.unmeasured)
+
+    def test_write_pruned_writes_the_whole_corpus(self, tmp_path):
+        path = self._constant(tmp_path)
+        out = str(tmp_path / "c.pruned.jsonl")
+        p = ch.write_pruned(path, out, per_repo_cap=20)
+        assert sum(1 for _ in open(out, encoding="utf-8")) == 300 == p.keep
+        assert any("same `repo` label" in u for u in p.unmeasured)
+
+    def test_two_labels_are_still_measured(self, tmp_path):
+        """The withholding is about ONE label, not about small corpora."""
+        rows = _one_repo(100) + _one_repo(10, repo="other/x")
+        p = ch.propose_prune(_write(tmp_path, rows), per_repo_cap=20)
+        assert p.reasons[f"over the 20/repo cap"] == 80
 
 
 def test_health_is_pure_stdlib():

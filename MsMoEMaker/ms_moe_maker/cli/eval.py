@@ -135,10 +135,23 @@ def _print_eval_report(report):
             width = "" if not excluded else (
                 f" (of {n + len(excluded)} experts; {', '.join(excluded)} "
                 f"not scored)")
+            hits = routing.get('own_is_max_count', 0)
             print(f"\n    own-expert is the column maximum for "
-                  f"{routing.get('own_is_max_count', 0)}/{n}{width}")
+                  f"{hits}/{n}{width}")
+            # SAY WHAT THE p IS FOR, AND LET THE PROBE SAY IT. This line used
+            # to read "p=... for {n}/{n} by chance" no matter what `hits` was,
+            # so one expert of five winning its column still printed the
+            # all-five-of-five significance figure under a failing table. The
+            # probe now reports the probability of the event it measured and
+            # names it; this only echoes both.
+            p = routing.get("p_value")
+            event = (routing.get("p_value_event")
+                     or f"at least {hits} of {n} by chance")
+            tail = (f"   p={p:.5f} for {event}"
+                    if isinstance(p, (int, float)) and not isinstance(p, bool)
+                    else "   (the probe reported no p-value)")
             print(f"    mean enrichment {routing.get('mean_enrichment', 0):.2f}x"
-                  f"   p={routing.get('p_value', 0):.5f} for {n}/{n} by chance")
+                  f"{tail}")
         js = routing.get("mean_js_bits")
         if js is not None:
             verdict = ("INPUT-BLIND — the router ignores its input entirely"
@@ -155,25 +168,62 @@ def _print_eval_report(report):
         conf = routing.get("mean_gate_confidence")
         unif = routing.get("uniform_confidence")
         if conf is not None and unif:
+            # SATURATION IS RELATIVE TO 1/K, NOT TO 1.0.
+            # `conf` is the MEAN of the K top softmax probabilities, and those
+            # K values sum to at most 1 - so the mean can never exceed 1/K.
+            # A fixed `conf > 0.95` was therefore unreachable for any
+            # experts_per_tok >= 2 (ceiling 0.50 at K=2), which silently
+            # switched off the one diagnosis that distinguishes
+            # saturated-and-blind from balanced-and-blind. That is the
+            # norm_topk_prob=false failure mode, and share and JS cannot tell
+            # them apart - which is the entire reason this column exists.
+            k = int(routing.get("top_k") or 1)
+            ceiling = 1.0 / max(k, 1)
             note = ("  <- SATURATED: the gate is not choosing, it is "
-                    "maximising its own output scale" if conf > 0.95 else "")
+                    "maximising its own output scale"
+                    if conf > 0.95 * ceiling else "")
             print(f"    mean gate confidence {conf:.3f} "
-                  f"(uniform would be {unif:.3f}){note}")
+                  f"(uniform would be {unif:.3f}, top-{k} maximum is "
+                  f"{ceiling:.3f}){note}")
     elif routing.get("status") == "unmeasurable":
         print(f"\n  Router discrimination: UNMEASURABLE - {routing.get('reason')}")
 
     quality = {k: v for k, v in report.stages.items() if not k.startswith("moe/")}
     if quality:
+        # PRINT THE DENOMINATOR. It existed only in `note`, which this
+        # function never printed and detect_dead_experts overwrote, so a row
+        # averaged over 3 of 20 rows and a row averaged over all 20 printed
+        # identically. `!` marks a sample too thin to compare with a full one.
+        def _thin(r):
+            return bool(r.attempted_samples) and (
+                r.scored_samples < 5
+                or r.scored_samples * 2 < r.attempted_samples)
+
+        def _n(r):
+            return (f"{r.scored_samples}/{r.attempted_samples}"
+                    if r.attempted_samples else "-")
+
         print("\n  Generation quality (held-out, real generation)")
-        print(f"  {'expert':18} {'exact':>7} {'rouge1':>7} {'bleu':>7}  status")
-        print(f"  {'-'*18} {'-'*7} {'-'*7} {'-'*7}  {'-'*12}")
+        print(f"  {'expert':18} {'exact':>7} {'rouge1':>7} {'bleu':>7} "
+              f"{'scored':>9}  status")
+        print(f"  {'-'*18} {'-'*7} {'-'*7} {'-'*7} {'-'*9}  {'-'*12}")
+        thin_rows = []
         for name, r in sorted(quality.items()):
             print(f"  {name:18} {r.exact_match:>7.3f} {r.rouge1:>7.3f} "
-                  f"{r.bleu:>7.3f}  {r.status}")
+                  f"{r.bleu:>7.3f} {_n(r):>9}  {r.status}"
+                  f"{'  ! thin sample' if _thin(r) else ''}")
+            if _thin(r):
+                thin_rows.append(name)
             moe = report.stages.get(f"moe/{name}")
             if moe is not None:
                 print(f"  {'  L moe here':18} {moe.exact_match:>7.3f} "
-                      f"{moe.rouge1:>7.3f} {moe.bleu:>7.3f}  {moe.status}")
+                      f"{moe.rouge1:>7.3f} {moe.bleu:>7.3f} "
+                      f"{_n(moe):>9}  {moe.status}"
+                      f"{'  ! thin sample' if _thin(moe) else ''}")
+        if thin_rows:
+            print(f"    ! {', '.join(thin_rows)}: most rows drawn could not be "
+                  f"scored (a `text` row needs 4+ lines to split into a "
+                  f"prompt and a reference). Not comparable with a full row.")
 
         # SCORED ON THE ANSWER, NOT THE THINKING. When the base is a reasoning
         # model, say separately how often it actually emitted a think block —

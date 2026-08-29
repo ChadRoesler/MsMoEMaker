@@ -349,9 +349,44 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         # "already present on disk; the pipeline's _done() fired". The
         # vocabulary was never the missing part.
         was_present = finetune_mod.specialist_is_done(config, safe_name)
+        # The ORIGINAL corpus path, deliberately - not the training split.
+        # train_router() appends ".train" to whatever it is handed, so storing
+        # the split here would send it looking for "X.jsonl.train.train",
+        # miss, and re-split the training half into a second, different split.
         expert_corpus_paths[safe_name] = data_path
+
+        # HELD-OUT MUST STAY HELD OUT - THE SPECIALISTS NEVER GOT THIS RULE.
+        # train_router() has a fourteen-line comment about preferring `.train`
+        # so the router mix cannot eat the evaluation set. The specialists
+        # were handed the whole corpus, and the split was not created until
+        # eval called _load_or_split - so every specialist trained on the rows
+        # it would later be scored against, while the MoE's copy of it was
+        # diluted by top-k routing and the shared expert.
+        #
+        # That biases --mode quality AGAINST the MoE: the expert row beats the
+        # "moe here" row because it memorised the reference, and the honest
+        # reading of the table becomes "the MoE answers worse than one expert
+        # alone" - the one claim this project exists to test.
+        #
+        # Same construction as train_router: reuse `.train` when it exists
+        # (same seed, same fraction, so it is exactly the complement of what
+        # eval holds out), otherwise create it here rather than falling back
+        # to the full corpus.
+        train_path = data_path
+        if data_path:
+            train_split = data_path + ".train"
+            if os.path.exists(train_split) and os.path.getsize(train_split) > 0:
+                train_path = train_split
+            else:
+                from ..eval.harness import _load_or_split
+                train_path, _ = _load_or_split(
+                    data_path, config.eval_held_out_fraction)
+            if train_path != data_path:
+                print(f"      training on held-out-excluded split: "
+                      f"{os.path.basename(train_path)}")
+
         out_dir = finetune_mod.fine_tune_specialist(
-            config, safe_name, data_path,
+            config, safe_name, train_path,
             expert_display=DISPLAY_LANG.get(safe_name, safe_name),
         )
         specialist_dirs[safe_name] = out_dir

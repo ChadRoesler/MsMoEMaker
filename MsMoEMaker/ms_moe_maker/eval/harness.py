@@ -60,6 +60,17 @@ class EvalResult:
     """BLEU score."""
     avg_length: float = 0.0
     """Average output token length."""
+    # HOW MANY ROWS THE AVERAGES ABOVE ARE ACTUALLY OVER. Its own field,
+    # because this used to live only in `note` - free text that
+    # detect_dead_experts overwrites, so the JSON lost it too - and a 3-row
+    # mean printed next to a 20-row mean with nothing to tell them apart is
+    # not a comparison. A `stack` corpus of mostly short files yields 3 usable
+    # rows out of 20: _prompt_and_reference needs 4+ lines to make a
+    # completion task, and everything shorter is skipped in silence.
+    scored_samples: int = 0
+    """Rows that yielded a prompt AND a reference, and were scored."""
+    attempted_samples: int = 0
+    """Rows drawn from the held-out file, scored or not."""
     # Fraction of outputs that emitted a NON-EMPTY reasoning block. -1 = not
     # applicable (the model under eval is not a reasoning model); 0..1 when the
     # eval split the trace from the answer. Reasons-but-wrong and
@@ -482,6 +493,35 @@ def _js_divergence(p: Sequence[float], q: Sequence[float]) -> float:
     return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
 
+def _own_column_p(hits: int, n: int):
+    """P(at least `hits` of `n` experts top their own column by chance).
+
+    THE OLD NUMBER ANSWERED A QUESTION NOBODY HAD ASKED. It was hardcoded to
+    1/n^n - the probability that ALL n experts win their own column - and it
+    got printed whatever the actual count was. On a table where one expert of
+    five topped its column the report still announced p=0.00032, a
+    significance figure for an event that did not occur, sitting directly
+    under a failing table. That is the worst kind of wrong number: decisive
+    looking, and about something else.
+
+    The upper binomial tail asks what the count actually poses - if every
+    column's maximum were a coin toss between the n experts on the table, how
+    often would at least this many land on their own? - under exactly the same
+    independence assumption 1/n^n already made. And it COLLAPSES to 1/n^n at
+    hits == n, so the proven 0.5B headline (5 of 5, p=0.00032) is unchanged.
+
+    Returns None when there is nothing to test.
+    """
+    import math
+
+    if n <= 0 or hits < 0:
+        return None
+    hits = min(hits, n)
+    p = 1.0 / n
+    return sum(math.comb(n, k) * (p ** k) * ((1.0 - p) ** (n - k))
+               for k in range(hits, n + 1))
+
+
 def probe_router_discrimination(moe_dir: str,
                                 held_paths: Dict[str, str],
                                 expert_order: Sequence[str],
@@ -490,6 +530,7 @@ def probe_router_discrimination(moe_dir: str,
                                 max_len: int = 1024,
                                 device: str = "cpu",
                                 trained_on: Optional[set] = None,
+                                raw_text_sources: Optional[Sequence[str]] = None,
                                 callback=None) -> Dict[str, Any]:
     """THE dead-expert measurement — ported from probe_router_discrimination.py.
 
@@ -656,16 +697,67 @@ def probe_router_discrimination(moe_dir: str,
     totals = {s: [0] * L for s in src_names}
     rnd = random.Random(0)
 
+    # PROBE IN THE FORMAT THE ROUTER WAS TRAINED IN, OR MEASURE FORMATTING.
+    #
+    # This asked every source with `Write {safe_name}:` inside a chat
+    # template. Router training does neither of those things:
+    #
+    #   * it uses _make_code_prompt with the DISPLAY name ("C#", not
+    #     "csharp") and one of six templates, so the probe's single made-up
+    #     line is a string the router has literally never seen; and
+    #   * for the tools expert and every reasoning expert its format_fn
+    #     returns ex["text"] RAW - no chat template at all - while the probe
+    #     wrapped them anyway.
+    #
+    # The mismatch is therefore WORSE for some experts than others: the code
+    # experts get an approximate match and the tools/synth expert - the
+    # largest domain contrast a Ms.MoE can have - gets probed under a format
+    # it never saw once, and its enrichment comes back depressed by a pure
+    # formatting artefact wearing a routing result's clothes.
+    #
+    # _make_code_prompt is imported from the trainer rather than copied, so
+    # the two cannot drift; it is a function-local import because train.router
+    # reaches back into this module (_load_or_split) and pulls torch in on the
+    # way past.
+    from ..config.pipeline import DISPLAY_LANG
+    from ..train.router import _make_code_prompt
+
+    raw_sources = {s for s in (raw_text_sources or ()) if s}
+    # unnamed_fraction=0.0 ON PURPOSE, and it is the one place this
+    # deliberately differs from training. Training mixes in 25% un-named
+    # prompts ("Write code:") so the router cannot lean entirely on the
+    # language name; a PROBE built from those is asking the router to
+    # discriminate on a prompt that names no source, which measures nothing
+    # and only adds variance to the column it lands in.
+    prompt_rnd = random.Random(0)
+    format_errors: Dict[str, str] = {}
+
     for s in src_names:
         for text in rnd.sample(sources[s], min(num_samples, len(sources[s]))):
-            wrapped = text
-            try:
-                msgs = [{"role": "user", "content": f"Write {s}:"},
+            if s in raw_sources:
+                # The raw path, exactly as router.format_fn takes it for the
+                # tools expert and the reasoning experts: no template, no eos.
+                wrapped = text
+            else:
+                prompt = _make_code_prompt(s, DISPLAY_LANG.get(s, s),
+                                           unnamed_fraction=0.0, rnd=prompt_rnd)
+                msgs = [{"role": "user", "content": prompt},
                         {"role": "assistant", "content": text}]
-                wrapped = tok.apply_chat_template(msgs, tokenize=False) + (
-                    tok.eos_token or "")
-            except Exception:
-                pass
+                try:
+                    wrapped = tok.apply_chat_template(msgs, tokenize=False) + (
+                        tok.eos_token or "")
+                except Exception as exc:
+                    # SILENCE IS SIGNAL, AND THIS USED TO BE `pass`. Falling
+                    # back to raw text is survivable; doing it invisibly means
+                    # one column was measured under a different format from
+                    # the rest of the table and the reader compares them
+                    # anyway. Record it once per source and report it.
+                    wrapped = text
+                    format_errors.setdefault(
+                        s, f"{exc.__class__.__name__}: {exc}")
+                    _trace(f"routing probe: no chat template for {s} "
+                           f"({exc.__class__.__name__}: {exc}) - "
+                           f"falling back to raw text")
             enc = tok(wrapped, return_tensors="pt", truncation=True,
                       max_length=max_len).to(device)
             with torch.no_grad():
@@ -739,11 +831,29 @@ def probe_router_discrimination(moe_dir: str,
         # construction: numerator and denominator are both a handful of token
         # selections out of tens of thousands. Compute it, flag it, and keep
         # it out of the mean.
+        # UNIFORM IS 1/E, NOT K/E. `avg` above divides by
+        # `sum(totals[s]) * K` - i.e. by total selection SLOTS - so the shares
+        # already sum to 1.0 across experts and uniform routing gives each of
+        # them 1/E. Using K/E made this cutoff K times too high, so at top-2
+        # a healthy expert on 0.30 of slots (90% of uniform) was blanked to
+        # STARVED and dropped from mean_enrichment. Invisible in tests because
+        # every routing test uses top_k=1, where K/E == 1/E.
         marginal = sum(col.values()) / max(len(col), 1)
-        starved = marginal < (K / max(E, 1)) * 0.2
+        starved = marginal < (1.0 / max(E, 1)) * 0.2
+        # COUNT THE HITS OVER THE SAME SET THE p-VALUE IS COMPUTED OVER.
+        #
+        # `hits` counted every expert that had a column; `n` counted only the
+        # ones whose enrichment is readable. Three experts with one starved
+        # expert topping its own row printed "column maximum for 3/2" - a
+        # fraction above 1, next to a p computed at a width its own numerator
+        # had never used.
+        #
+        # A starved expert's column maximum is the same handful of selections
+        # its enrichment is, and we already refuse to read that as enrichment.
+        # It does not get a vote in a test it cannot be evidence for.
         if not starved:
             enrich.append(r)
-        hits += (top == en)
+            hits += (top == en)
         rivals = sorted(((s, v) for s, v in col.items() if s != en),
                         key=lambda kv: kv[1], reverse=True)
         experts[en] = {
@@ -806,8 +916,14 @@ def probe_router_discrimination(moe_dir: str,
         "own_is_max_count": hits,
         "named_experts": n,
         "mean_enrichment": mean_enrichment,
-        # p for all-n-of-n winning their own column by chance.
-        "p_value": (1 / (n ** n)) if n else None,
+        # p FOR THE EVENT THAT ACTUALLY HAPPENED. See _own_column_p: this used
+        # to be 1/n^n regardless of `hits`, so a table where one of five
+        # experts won its column still printed the all-five-of-five figure.
+        "p_value": _own_column_p(hits, n),
+        # What that number is the probability OF, in words, so the printed
+        # sentence and the number cannot drift apart again. The reader should
+        # never have to know which event the harness had in mind.
+        "p_value_event": (f"at least {hits} of {n} by chance" if n else ""),
         "mean_js_bits": mean_js,
         "js_per_layer": per_layer,
         # Experts the probe could not score at all. Reported separately from
@@ -825,6 +941,13 @@ def probe_router_discrimination(moe_dir: str,
         # saturated and the softmax has stopped being a distribution.
         "mean_gate_confidence": (conf_sum[0] / conf_n[0]) if conf_n[0] else None,
         "uniform_confidence": 1.0 / E if E else None,
+        # Sources probed as RAW TEXT because that is how the router trained on
+        # them. Reported so a reader can see which columns were built which
+        # way rather than assuming one format across the table.
+        "raw_text_sources": sorted(raw_sources & set(src_names)),
+        # Sources whose chat template refused, with the reason. Empty is the
+        # normal case; non-empty means those columns fell back to raw text.
+        "prompt_format_errors": format_errors,
     }
 
 
@@ -964,6 +1087,53 @@ def _prompt_and_reference(item: Dict[str, Any],
     return "".join(lines[:cut]), "".join(lines[cut:])
 
 
+def _truncate_reference(reference: str, max_new_tokens: int,
+                        tok=None) -> Tuple[str, bool]:
+    """Cut the reference down to the budget the model was actually given.
+
+    BLEU WAS MEASURING HELD-OUT FILE LENGTH. `_prompt_and_reference` hands
+    back the whole second half of a document - unbounded - while generation is
+    capped at max_new_tokens. _bleu_simple's brevity penalty is exp(1 - r/c)
+    with c stuck under that cap, so two experts writing equally well scored
+    0.055 and 1.00 purely because one corpus has ~1000-token files and the
+    other ~250. A 20x gap in the same column, indistinguishable from a real
+    quality gap. _rouge1 has the mirror of it: set-recall over EVERY reference
+    token, so a long reference caps the achievable score no matter what the
+    model writes.
+
+    TRUNCATION CHANGES WHAT THE METRIC MEANS, so the note says so. The score
+    is now "how well does it continue the next max_new_tokens of this file",
+    not "does it reproduce the rest of the file". That is the question the
+    generation budget was already asking; the reference just stopped
+    disagreeing with it.
+
+    Returns (reference, was_truncated). The tokenizer is the honest unit
+    because it is the one the budget is denominated in. Whitespace words are
+    the fallback for anything that will not tokenize, and they are a GENEROUS
+    bound - a subword token is never more than a word - so the fallback can
+    only ever leave the reference longer than the model's real budget, never
+    shorter than it.
+    """
+    if max_new_tokens <= 0 or not reference:
+        return reference, False
+    if tok is not None:
+        try:
+            ids = tok(reference, add_special_tokens=False)["input_ids"]
+            if ids and not isinstance(ids[0], int):
+                ids = ids[0]
+            if len(ids) <= max_new_tokens:
+                return reference, False
+            cut = tok.decode(ids[:max_new_tokens], skip_special_tokens=True)
+            if cut:
+                return cut, True
+        except Exception:
+            pass
+    words = reference.split()
+    if len(words) <= max_new_tokens:
+        return reference, False
+    return " ".join(words[:max_new_tokens]), True
+
+
 def _split_reasoning_answer(text: str, style) -> Tuple[str, bool]:
     """(answer, reasoned). The shared splitter, in eval's shape.
 
@@ -1039,6 +1209,7 @@ def eval_generation(model_dir: str, test_data_path: str,
     lengths: List[int] = []
     reasoned_count: List[int] = []
     scored = 0
+    truncated_refs = 0
     completion_mode = False
 
     for line in samples:
@@ -1049,6 +1220,11 @@ def eval_generation(model_dir: str, test_data_path: str,
         prompt, reference = _prompt_and_reference(item)
         if not prompt or not reference:
             continue
+        # LIKE-FOR-LIKE OR IT IS NOT A COMPARISON. An unbounded reference next
+        # to a hardcoded max_new_tokens turns the brevity penalty into a
+        # measurement of the held-out file's length - see _truncate_reference.
+        reference, was_cut = _truncate_reference(reference, max_new_tokens, tok)
+        truncated_refs += 1 if was_cut else 0
         if "prompt" not in item and "input" not in item:
             completion_mode = True
 
@@ -1189,13 +1365,25 @@ def eval_generation(model_dir: str, test_data_path: str,
     result.avg_length = sum(lengths) / scored
     if reasoning_style is not None:
         result.reasoned = sum(reasoned_count) / scored
+    # THE DENOMINATOR TRAVELS WITH THE AVERAGE. Every number above is a mean
+    # over `scored`, not over the rows we drew, and the difference is the
+    # whole difference between a result and a rumour.
+    result.scored_samples = scored
+    result.attempted_samples = len(samples)
     result.status = "done"
     if peak_mib:
         _trace(f"{label}/{domain}: peak {peak_mib:,.0f}MiB over {scored} samples")
-    result.note = (f"{scored} samples generated"
+    result.note = (f"{scored} of {len(samples)} sampled rows scored"
                    + (" (completion: second half of each held-out doc; "
                       "read ROUGE/BLEU, exact-match is near zero by nature)"
-                      if completion_mode else ""))
+                      if completion_mode else "")
+                   # Truncation changes what BLEU/ROUGE mean, so it is stated
+                   # wherever the scores are read, not just in the source.
+                   + (f"; the reference was cut to the {max_new_tokens}-token "
+                      f"generation budget on {truncated_refs} of them - these "
+                      f"score the continuation the model had room to write, "
+                      f"not the whole rest of the file"
+                      if truncated_refs else ""))
     return result
 
 
@@ -1282,8 +1470,21 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
     # router training, and NOT a broken stitch.
     E = int(routing.get("n_experts") or len(experts) or 1)
     K = int(routing.get("top_k") or 1)
-    uniform = K / max(E, 1)
+    # UNIFORM IS 1/E. Shares are normalised over selection SLOTS upstream
+    # (`tot = sum(totals[s]) * K`), so they sum to 1.0 across experts no matter
+    # what K is. `K / E` therefore overstated uniform by exactly K, and at
+    # top-2-of-3 - the shipped flow recipe - it reported live experts as DEAD
+    # with exit code 2, printing "0.120 against 0.667 for uniform" directly
+    # under three shares that visibly summed to 1.0.
+    uniform = 1.0 / max(E, 1)
     floor = uniform * dead_share_frac
+    # The most any single expert can take when every token spends K slots.
+    # At K=1 this is 1.0 and the collapse test below is unchanged; at K>=2 the
+    # old `> 1.0 - floor` trigger was arithmetically unreachable, so a router
+    # shoving every token through one expert plus a random second could never
+    # be diagnosed as collapsed and the reader was pointed at the stitch
+    # instead of at router.aux_loss_coef.
+    hog_ceiling = 1.0 / max(K, 1)
 
     dead: List[str] = []
     weak: List[str] = []
@@ -1316,7 +1517,12 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
             continue
         result = report.stages.get(name)
         if result is not None:
-            result.note = why
+            # APPEND. This used to assign, and the note it clobbered was the
+            # only place the scored-sample count and the completion-mode
+            # caveat existed - written by eval_generation, destroyed here, and
+            # gone from the JSON too. A routing verdict is not entitled to
+            # delete a quality fact it did not write.
+            result.note = f"{result.note}; {why}" if result.note else why
 
     # THE TEST HAS A POWER FLOOR AND IT IS A FUNCTION OF E ALONE.
     # "own-expert is the column maximum for n/n" has probability 1/E^E by
@@ -1332,10 +1538,17 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
                                        kv[1].get("own_share", 0.0)),
               default=(None, {}))
     hog_share = hog[1].get("marginal_share", hog[1].get("own_share", 0.0)) if hog[0] else 0.0
-    if hog[0] and E >= 2 and hog_share > 1.0 - floor:
+    # Proportional to the ceiling, not offset from it: at K=1 this is
+    # exactly the old `1.0 - floor` trigger, and at K>=2 it asks the same
+    # question ("is this expert taking essentially all the mass it CAN take?")
+    # of a ceiling that is 1/K instead of 1. Subtracting a 1/E-derived floor
+    # from a 1/K ceiling instead would tighten as K grows and flag a healthy
+    # top-2 leader at 46% of slots.
+    if hog[0] and E >= 2 and hog_share > hog_ceiling * (1.0 - floor):
         report.caveats.append(
             f"router collapsed onto {hog[0]}: it takes {hog_share:.1%} of all "
-            f"tokens regardless of source ({uniform:.1%} is uniform). This is "
+            f"selection slots regardless of source ({uniform:.1%} is uniform, "
+            f"{hog_ceiling:.1%} is the top-{K} maximum). This is "
             f"rich-get-richer in a top-{K} router, not a stitch problem - the "
             f"load-balancing loss is what holds it off, and "
             f"router.aux_loss_coef controls how hard. Switch used 0.01, "
@@ -1522,6 +1735,15 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                     pass
         _trace(f"trained-on set built ({len(trained_on)} rows)")
 
+        # WHICH SOURCES THE ROUTER SAW AS RAW TEXT. router.format_fn skips
+        # the chat template entirely for the tools expert and the reasoning
+        # experts, so probing them through one measures the format rather than
+        # the routing. The probe needs the same list the trainer branched on.
+        raw_text = {n for n in
+                    ([getattr(config, "tools_expert_name", "")]
+                     + list(getattr(config, "reasoning_experts", None) or []))
+                    if n}
+
         report.routing = probe_router_discrimination(
             moe_dir=moe_dir,
             held_paths=held_paths,
@@ -1529,10 +1751,19 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             num_samples=num_samples,
             dead_threshold=dead_threshold,
             trained_on=trained_on,
+            raw_text_sources=raw_text,
         )
         if report.routing.get("status") == UNMEASURABLE:
             report.unmeasured.append(
                 f"routing: {report.routing.get('reason', 'unknown')}")
+        fmt_errors = report.routing.get("prompt_format_errors") or {}
+        if fmt_errors:
+            report.caveats.append(
+                "the routing probe could not apply the chat template for "
+                + ", ".join(f"{k} ({v})" for k, v in sorted(fmt_errors.items()))
+                + " and probed those sources as raw text instead. Those "
+                  "columns were measured in a different format from the rest "
+                  "of the table; their enrichment is not comparable with it.")
 
     # ── quality: real generation against held-out references ───────────────
     if do_quality:
@@ -1599,6 +1830,24 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             moe_model = moe_tok = None
             release_memory()
             _trace("after MoE released")
+
+        # A MEAN OVER THREE ROWS IS NOT A MEAN OVER TWENTY, AND IT USED TO
+        # PRINT THE SAME WAY. num_samples rows get drawn; any that cannot
+        # yield both a prompt and a reference are skipped in silence, so a
+        # corpus of short files scores 3 of 20 and lands in the table beside a
+        # full row with nothing to distinguish them. Say it where the exit
+        # code can see it, not only in a note.
+        for _name, _res in report.stages.items():
+            if _res.status != "done" or not _res.attempted_samples:
+                continue
+            if (_res.scored_samples < 5
+                    or _res.scored_samples * 2 < _res.attempted_samples):
+                report.caveats.append(
+                    f"quality/{_name}: averaged over {_res.scored_samples} of "
+                    f"{_res.attempted_samples} sampled rows - the rest had no "
+                    f"prompt/reference pair (a `text` row needs 4+ lines to "
+                    f"split into one). Read that row as a thin sample, not as "
+                    f"a score comparable with a full one.")
 
         # DID YOU PICK THE RIGHT TAG STYLE?
         #
@@ -1708,6 +1957,8 @@ def eval_from_manifest(run_dir: Path) -> EvalReport:
             rouge1=info.get("rouge1", 0.0),
             bleu=info.get("bleu", 0.0),
             avg_length=info.get("avg_length", 0.0),
+            scored_samples=info.get("scored_samples", 0),
+            attempted_samples=info.get("attempted_samples", 0),
             status=info.get("status", "pending"),
             note=info.get("note", ""),
         )
@@ -1733,6 +1984,10 @@ def save_eval_report(report: EvalReport, path: Path) -> None:
                 "rouge1": r.rouge1,
                 "bleu": r.bleu,
                 "avg_length": r.avg_length,
+                # The denominator, in the artifact too - a mean over 3 rows
+                # and a mean over 20 are not the same claim.
+                "scored_samples": r.scored_samples,
+                "attempted_samples": r.attempted_samples,
                 "status": r.status,
                 "note": r.note,
             }

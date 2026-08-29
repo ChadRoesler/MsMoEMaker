@@ -340,3 +340,65 @@ def test_bleu_does_not_penalise_a_long_answer():
     verbose = "alpha beta gamma delta epsilon zeta"
     # precision 0.5, no brevity penalty applies when c >= r
     assert ev._bleu_simple(verbose, reference) == pytest.approx(0.5)
+
+
+# ── and it must not measure the held-out file's LENGTH either ─────────────
+
+def test_the_reference_is_bounded_to_the_generation_budget():
+    """Two experts writing equally well must not be split by corpus length.
+
+    The reference was the whole second half of a held-out doc, unbounded,
+    while generation is capped at max_new_tokens. exp(1 - r/c) with c stuck
+    under that cap made an expert on ~1000-token files score ~0.05 and an
+    expert on ~250-token files score ~1.00 for the SAME quality of output -
+    a 20x gap in the same column that reads exactly like a quality gap. The
+    3-token reference in the test above can never see it.
+    """
+    budget = 32
+    short_ref = " ".join(f"w{i}" for i in range(30))
+    long_ref = " ".join(f"w{i}" for i in range(400))
+    # Same model, same budget, same quality: it continues correctly for as
+    # long as it is allowed to and then stops because it ran out of tokens.
+    gen_short = short_ref
+    gen_long = " ".join(f"w{i}" for i in range(budget))
+
+    raw_short = ev._bleu_simple(gen_short, short_ref)
+    raw_long = ev._bleu_simple(gen_long, long_ref)
+    assert raw_long < raw_short / 100, (
+        "this test only means something if the unbounded reference really "
+        "does destroy the long-corpus score")
+
+    cut_short, was_cut_short = ev._truncate_reference(short_ref, budget)
+    cut_long, was_cut_long = ev._truncate_reference(long_ref, budget)
+    assert not was_cut_short, "a reference inside the budget must be left alone"
+    assert was_cut_long
+
+    bleu_short = ev._bleu_simple(gen_short, cut_short)
+    bleu_long = ev._bleu_simple(gen_long, cut_long)
+    assert bleu_long == pytest.approx(bleu_short, abs=0.05), (
+        f"same quality, different corpus length: {bleu_short} vs {bleu_long}")
+
+    # ROUGE-1 has the mirror problem - set-recall over every reference token,
+    # so a long reference caps the score whatever the model writes.
+    assert ev._rouge1(gen_long, long_ref) < 0.15
+    assert ev._rouge1(gen_long, cut_long) == pytest.approx(
+        ev._rouge1(gen_short, cut_short), abs=0.05)
+
+
+def test_truncation_is_disclosed_where_the_scores_are_read(tmp_path,
+                                                           fake_torch):
+    """A truncated reference is a different measurement, so it has to say so."""
+    long_text = "".join(f"line{i} alpha beta gamma delta\n" for i in range(40))
+    corpus = tmp_path / "held.jsonl"
+    corpus.write_text(json.dumps({"text": long_text}) + "\n", encoding="utf-8")
+    model_dir = tmp_path / "expert"
+    model_dir.mkdir()
+
+    res = ev.eval_generation(
+        model_dir=str(model_dir), test_data_path=str(corpus),
+        label="stack", domain="stack", num_samples=1, max_new_tokens=8,
+        loaded=(_RecordingModel(), _StubTok(), "cpu"))
+
+    assert res.status == "done"
+    assert "reference was cut" in res.note, res.note
+    assert "8-token" in res.note, res.note

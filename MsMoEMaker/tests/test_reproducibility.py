@@ -230,3 +230,139 @@ class TestDescribeSurfacesTheBox:
         for older in ("started", "stage", "progress", "refused", "warning",
                       "error", "done"):
             assert older in d["events"], f"{older} must not disappear"
+
+
+class TestExpertSeedDerivation:
+    """`seed` is in the fingerprint, so build_id claims two runs trained the
+    same way. These pin the part of that claim the training path can keep:
+    the per-expert stream is a function of (seed, expert) and nothing else."""
+
+    def test_two_experts_do_not_share_a_stream(self):
+        from ms_moe_maker.train import finetune as F
+        assert F.expert_seed(42, "python") != F.expert_seed(42, "rust")
+
+    def test_a_different_build_seed_moves_every_stream(self):
+        from ms_moe_maker.train import finetune as F
+        assert F.expert_seed(42, "python") != F.expert_seed(43, "python")
+
+    def test_the_same_pair_is_the_same_number(self):
+        from ms_moe_maker.train import finetune as F
+        assert F.expert_seed(42, "python") == F.expert_seed(42, "python")
+
+    def test_it_survives_a_different_interpreter(self):
+        """The reason it is sha256 and not hash(): the builtin is salted per
+        process, so a hash()-derived seed would differ between the run that
+        stamped build_id and the run that resumed it."""
+        import os
+        import subprocess
+        import sys
+        code = ("from ms_moe_maker.train import finetune as F;"
+                "print(F.expert_seed(42, 'python'))")
+        vals = set()
+        for salt in ("0", "1", "12345"):
+            env = dict(os.environ)
+            env["PYTHONHASHSEED"] = salt
+            out = subprocess.run([sys.executable, "-c", code],
+                                 capture_output=True, text=True, env=env)
+            assert out.returncode == 0, out.stderr
+            vals.add(out.stdout.strip())
+        assert len(vals) == 1, f"seed moved with PYTHONHASHSEED: {vals}"
+
+
+class TestStaleCheckpointsAreNotResumed:
+    """--force plus a leftover tmp_{expert} used to resume a schedule that was
+    already over, take zero optimiser steps, and save an untrained adapter as
+    'done'. These cover the filesystem half, which needs no torch."""
+
+    def _ckpt(self, tmp_path, step, global_step=None):
+        d = tmp_path / f"checkpoint-{step}"
+        d.mkdir()
+        if global_step is not None:
+            (d / "trainer_state.json").write_text(
+                json.dumps({"global_step": global_step}))
+        return d
+
+    def test_latest_is_the_highest_step_not_the_last_alphabetically(self, tmp_path):
+        from ms_moe_maker.train import finetune as F
+        self._ckpt(tmp_path, 9)
+        self._ckpt(tmp_path, 100)
+        assert Path(F.latest_checkpoint(str(tmp_path))).name == "checkpoint-100"
+
+    def test_nothing_there_is_none_not_a_crash(self, tmp_path):
+        from ms_moe_maker.train import finetune as F
+        assert F.latest_checkpoint(str(tmp_path)) is None
+        assert F.latest_checkpoint(str(tmp_path / "never-made")) is None
+        assert F.clear_checkpoints(str(tmp_path / "never-made")) == []
+
+    def test_a_dir_that_only_looks_like_a_checkpoint_is_not_one(self, tmp_path):
+        from ms_moe_maker.train import finetune as F
+        (tmp_path / "checkpoint-notes").mkdir()
+        assert F.latest_checkpoint(str(tmp_path)) is None
+
+    def test_it_reads_the_step_a_resume_would_start_at(self, tmp_path):
+        from ms_moe_maker.train import finetune as F
+        d = self._ckpt(tmp_path, 200, global_step=200)
+        assert F.checkpoint_global_step(str(d)) == 200
+
+    def test_an_unreadable_state_reads_as_zero(self, tmp_path):
+        from ms_moe_maker.train import finetune as F
+        bare = self._ckpt(tmp_path, 5)
+        assert F.checkpoint_global_step(str(bare)) == 0
+        (bare / "trainer_state.json").write_text("{not json")
+        assert F.checkpoint_global_step(str(bare)) == 0
+
+    def test_clearing_removes_the_checkpoints_and_only_those(self, tmp_path):
+        from ms_moe_maker.train import finetune as F
+        self._ckpt(tmp_path, 100, global_step=100)
+        self._ckpt(tmp_path, 200, global_step=200)
+        (tmp_path / "runs").mkdir()
+        (tmp_path / "note.txt").write_text("mine")
+        assert F.clear_checkpoints(str(tmp_path)) == ["checkpoint-100",
+                                                      "checkpoint-200"]
+        assert F.latest_checkpoint(str(tmp_path)) is None
+        assert (tmp_path / "runs").is_dir()
+        assert (tmp_path / "note.txt").read_text() == "mine"
+
+
+class TestTheSeedActuallySeedsSomething:
+    """`seed` is not in _FINGERPRINT_EXCLUDE, so it is hashed into build_id.
+
+    Nothing in data/synth.py read it. The generators drew from the global,
+    unseeded `random`, so three runs produced three different tool surfaces
+    while advertising the same build id - and an id that does not predict the
+    data is worse than no id at all.
+    """
+
+    def _cfg(self, seed=42):
+        import types
+        return types.SimpleNamespace(seed=seed)
+
+    def _surface(self, cfg, expert="agentcore"):
+        from ms_moe_maker.data import synth as d
+        rnd = d._expert_rng(cfg, expert)
+        return [sorted(t["name"] for t in tools)
+                for _, tools, _, _ in d._agent_batch_specs(6, None, "sys", rnd)]
+
+    def test_the_same_seed_generates_the_same_tool_surface(self):
+        assert self._surface(self._cfg()) == self._surface(self._cfg())
+
+    def test_a_different_seed_generates_a_different_one(self):
+        assert self._surface(self._cfg(1)) != self._surface(self._cfg(2))
+
+    def test_two_experts_do_not_get_identical_draws(self):
+        """One shared stream would make each expert's data depend on which
+        expert ran first; one seed reused per expert would hand both the same
+        surface."""
+        cfg = self._cfg()
+        assert self._surface(cfg, "agentcore") != self._surface(cfg, "toolsy")
+
+    def test_the_generators_do_not_reach_for_the_global_random(self):
+        """The module RNG is process-wide and nothing seeds it, so a single
+        call anywhere in the generation path un-does the whole thing."""
+        import inspect
+
+        from ms_moe_maker.data import synth as d
+        src = inspect.getsource(d._agent_batch_specs)
+        assert "random.randint" not in src
+        assert "random.sample" not in src
+        assert "random.choice" not in src

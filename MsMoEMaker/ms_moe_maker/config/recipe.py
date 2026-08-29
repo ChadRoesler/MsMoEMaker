@@ -734,8 +734,17 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             errs.append(f"expert name {e.name!r} must be alphanumeric/underscore "
                         f"- it becomes a directory and a filename")
         if e.name != e.name.lower():
-            warns.append(f"expert name {e.name!r} is not lowercase; the "
-                         f"pipeline lowercases paths and 'C#' becomes 'csharp'")
+            # HARD ERROR, NOT A WARNING. This is not a style note. data/synth.py
+            # keys every corpus by safe_name(expert), which lowercases, and
+            # run/builder.py looks the corpus up by the RAW name - so `Bestiary`
+            # files bestiary_code.jsonl and then dies with "No data path for
+            # expert Bestiary" two experts into fine-tuning, with the scrape and
+            # the first specialist already paid for. Refuse it at parse time,
+            # where it costs nothing.
+            errs.append(f"expert name {e.name!r} must be lowercase - the "
+                        f"pipeline files this expert's corpus under "
+                        f"{e.name.lower()!r} and then looks it up under "
+                        f"{e.name!r}, which fails after the scrape")
         s = e.source
         if s:
             kind_errs, kind_warns = corpus.check(s.kind, s)

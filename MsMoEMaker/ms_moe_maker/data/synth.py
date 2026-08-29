@@ -147,11 +147,13 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
 
     # ── 2. Handle kind=stack sources ──────────────────────────────────────
     stack_languages = []
+    stack_names: Dict[str, str] = {}   # scanned LANGUAGE -> the EXPERT that wants it
     for expert_name, src in sources.items():
         kind = getattr(src, 'kind', '') if hasattr(src, 'kind') else src.get('kind', '')
         if kind == "stack":
             lang = getattr(src, 'language', None) or src.get('language', expert_name)
             stack_languages.append(lang)
+            stack_names[lang] = expert_name
 
     # ── 3. Fall-through languages (not covered by sources) ────────────────
     # ONLY expert names that have NO source. The old line was
@@ -164,7 +166,8 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
     if stack_languages:
         # Stack: scan shards filtered by the specified language(s)
         print(f"\nShard scan for stack sources: {stack_languages}")
-        scanned = _collect_from_shards(stack_languages, config, callback)
+        scanned = _collect_from_shards(stack_languages, config, callback,
+                                       names=stack_names)
         results.update(scanned)
 
     if remaining_languages:
@@ -178,17 +181,24 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
             if mapped and mapped not in [n for n in normalized]:
                 normalized.append(mapped)
                 name_lookup[mapped] = expert_name
-            elif not normalized:  # not in CODE_LANGUAGES, still scan
+            elif not mapped:
+                # THE GUARD USED TO BE `elif not normalized:` - on the LIST
+                # BEING EMPTY, not on this expert being unmappable. So the
+                # second and every later expert whose name is not a
+                # CODE_LANGUAGE was dropped on the floor without a word:
+                # ["monster_manual", "lore", "dm_guide"] scanned one language
+                # and the stage cheerfully reported "collected 1 corpora".
                 normalized.append(cfg.safe_name(expert_name))
                 name_lookup[cfg.safe_name(expert_name)] = expert_name
 
         if normalized:
-            scanned = _collect_from_shards(normalized, config, callback)
-            # Re-map keys from CODE_LANG to expert name
-            for code_lang, path in scanned.items():
-                safe = safe_map.get(name_lookup.get(code_lang, code_lang),
-                                    cfg.safe_name(code_lang))
-                results[safe] = path
+            # No re-map afterwards: the scan keys by expert name itself now.
+            # Re-keying here could never fix the FILENAME anyway, and the
+            # filename is what cli/_common.py and the expert gate go looking
+            # for on disk.
+            scanned = _collect_from_shards(normalized, config, callback,
+                                           names=name_lookup)
+            results.update(scanned)
 
     return results
 
@@ -499,7 +509,11 @@ def _collect_local(path: str, glob_pattern: str, out_path: str,
 
     kept, seen, kept_chars = [], set(), 0
 
-    for filepath in globmod.glob(os.path.join(path, glob_pattern), recursive=True):
+    # SORTED, because the loop below BREAKS at the token target: unsorted,
+    # which documents make it into the corpus is whatever order the filesystem
+    # happened to hand back, so the same directory collects a different corpus
+    # on a different box (or after a copy) under the same build id.
+    for filepath in sorted(globmod.glob(os.path.join(path, glob_pattern), recursive=True)):
         try:
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
@@ -625,13 +639,27 @@ def _line_reuse(docs: List[Dict[str, Any]], sample: int = 300) -> float:
 
 
 def _collect_from_shards(languages: List[str], config,
-                         callback=None) -> Dict[str, str]:
-    """Adaptive shard scan — fetch stack-v3-train shards until every language is satisfied."""
+                         callback=None,
+                         names: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Adaptive shard scan — fetch stack-v3-train shards until every language is satisfied.
+
+    THE LANGUAGE IS WHAT GETS SCANNED; THE EXPERT IS WHAT GETS KEYED AND FILED.
+    `names` maps each scanned language to the expert that asked for it, and
+    both the returned keys and the on-disk `*_code.jsonl` names come from the
+    expert. Keying by language instead was a build-killer: an expert named
+    `dotnet` with `language: C#` wrote csharp_code.jsonl and returned the key
+    `csharp`, while run/builder.py and cli/_common.py look corpora up by expert
+    name - so the run died on "No data path for expert dotnet" AFTER the full
+    45 GB shard scan. And silently, an `hf` expert literally named `csharp`
+    plus a stack expert with `language: C#` both landed on csharp_code.jsonl
+    and clobbered each other.
+    """
     from huggingface_hub import hf_hub_download, list_repo_files
     from collections import Counter
 
     cap = min(config.max_shards, 1000)  # safe cap
-    safe_map = {l: cfg.safe_name(l) for l in languages}
+    names = names or {}
+    safe_map = {l: cfg.safe_name(names.get(l, l)) for l in languages}
 
     # Check if everything is already on disk
     existing = {l: f"{config.data_root}/{safe_map[l]}_code.jsonl" for l in languages}
@@ -926,19 +954,34 @@ def generate_agent_traces(config, callback=None,
         print(f"[skip] agent dataset already present at {out_path}")
         return out_path
 
-    # Check if the base model has a chat template
+    # THE TRACE IS TRAINED ON BY THE SPECIALIST, SO IT MUST SPEAK THE BASE'S
+    # TOKENIZER, NOT THE TEACHER'S. This name used to be plain `tokenizer`, and
+    # `tokenizer = teacher.tokenizer` fifty lines down quietly took it over - so
+    # every row of the corpus was stamped with the TEACHER's chat template and
+    # eos. A DeepSeek teacher over a Qwen base wrote <｜User｜> markers the Qwen
+    # tokenizer shreds; a Qwen-Instruct teacher ended every row with <|im_end|>
+    # when the base's eos is <|endoftext|>, so the specialist never learned to
+    # stop. generate_reasoning_traces keeps the base under its own name for
+    # exactly this reason; so does this now.
     base_model = config.base if config.base else config.base_safe
     try:
         from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(base_model, cache_dir=config.hf_home)
-        if not getattr(tokenizer, "chat_template", None):
-            raise RuntimeError(
-                f"{base_model} has no chat_template. The agent dataset requires "
-                f"an Instruct-family base model. Use an Instruct model or set "
-                f"a custom tokenizer.chat_template.")
+        base_tokenizer = AutoTokenizer.from_pretrained(base_model, cache_dir=config.hf_home)
     except Exception as exc:
-        print(f"WARNING: cannot check chat_template: {exc}")
-        # Continue anyway — the template check happens later.
+        # FATAL, NOT ADVISORY. Without the base tokenizer there is no correct
+        # template to write this corpus in, and the old code's answer to that
+        # was to carry on and use the teacher's - the bug above.
+        raise RuntimeError(
+            f"cannot load the base tokenizer for {base_model}: {exc}") from exc
+    if not getattr(base_tokenizer, "chat_template", None):
+        # RAISED OUTSIDE THE try ON PURPOSE. This check used to sit inside it,
+        # where `except Exception` caught the RuntimeError the code had just
+        # raised itself, printed it as a warning and continued "because the
+        # template check happens later". It never happened later.
+        raise RuntimeError(
+            f"{base_model} has no chat_template. The agent dataset requires "
+            f"an Instruct-family base model. Use an Instruct model or set "
+            f"a custom tokenizer.chat_template.")
 
     mcp_path = f"{config.data_root}/{expert_name}_mcp_code.jsonl"
     print(f"\nGenerating MCP agent traces "
@@ -947,6 +990,13 @@ def generate_agent_traces(config, callback=None,
     # Resume from partial
     partial_path = mcp_path + ".partial"
     kept = 0
+    if config.force and os.path.exists(partial_path):
+        # --force MEANS THE INPUTS CHANGED, AND A .partial IS AN INPUT. The
+        # finished-file skip above is gated on `not config.force`; this was
+        # not, so `--force` after switching the teacher or the tool surface
+        # either adopted the stale partial wholesale or appended fresh rows to
+        # it, and os.replace'd the mix into place as the "fresh" corpus.
+        os.remove(partial_path)
     if os.path.exists(partial_path):
         with open(partial_path) as f:
             kept = sum(1 for line in f if line.strip())
@@ -975,7 +1025,10 @@ def generate_agent_traces(config, callback=None,
     else:
         teacher = _HFTeacher(config, model=teacher_model)
 
-    tokenizer = teacher.tokenizer
+    # Two names, because one name was the bug: the TEACHER's tokenizer prompts
+    # the teacher, the BASE's writes the corpus.
+    teacher_tokenizer = teacher.tokenizer
+    rnd = _expert_rng(config, expert_name)
     attempted, rejects = 0, 0
     t0 = time.time()
     t_kept0 = kept
@@ -984,9 +1037,9 @@ def generate_agent_traces(config, callback=None,
     try:
         while kept < config.num_agent_samples:
             n = min(teacher.batch_size, (config.num_agent_samples - kept) * 2)
-            batch_specs = _agent_batch_specs(n, real_surface, system_prompt)
-            prompts = [tokenizer.apply_chat_template(m, tokenize=False,
-                                                     add_generation_prompt=True)
+            batch_specs = _agent_batch_specs(n, real_surface, system_prompt, rnd)
+            prompts = [teacher_tokenizer.apply_chat_template(
+                           m, tokenize=False, add_generation_prompt=True)
                        for m, _, _, _ in batch_specs]
             completions = teacher.complete(prompts)
 
@@ -1007,7 +1060,8 @@ def generate_agent_traces(config, callback=None,
                     continue
 
                 conv = msgs + [{"role": "assistant", "content": text}]
-                text_out = tokenizer.apply_chat_template(conv, tokenize=False) + tokenizer.eos_token
+                text_out = (base_tokenizer.apply_chat_template(conv, tokenize=False)
+                            + base_tokenizer.eos_token)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
                 kept += 1
                 if kept >= config.num_agent_samples:
@@ -1164,6 +1218,13 @@ def generate_reasoning_traces(config, expert_name, callback=None,
 
     partial = out_path + ".partial"
     kept = 0
+    if config.force and os.path.exists(partial):
+        # --force MEANS THE INPUTS CHANGED, AND A .partial IS AN INPUT. The
+        # finished-file skip above is gated on `not config.force`; this was
+        # not, so `--force` after switching the teacher or the tool surface
+        # either adopted the stale partial wholesale or appended fresh rows to
+        # it, and os.replace'd the mix into place as the "fresh" corpus.
+        os.remove(partial)
     if os.path.exists(partial):
         with open(partial) as fh:
             kept = sum(1 for line in fh if line.strip())
@@ -1271,6 +1332,13 @@ def generate_domain_traces(config, expert_name, callback=None,
 
     partial = out_path + ".partial"
     kept = 0
+    if config.force and os.path.exists(partial):
+        # --force MEANS THE INPUTS CHANGED, AND A .partial IS AN INPUT. The
+        # finished-file skip above is gated on `not config.force`; this was
+        # not, so `--force` after switching the teacher or the tool surface
+        # either adopted the stale partial wholesale or appended fresh rows to
+        # it, and os.replace'd the mix into place as the "fresh" corpus.
+        os.remove(partial)
     if os.path.exists(partial):
         with open(partial) as fh:
             kept = sum(1 for line in fh if line.strip())
@@ -1480,17 +1548,43 @@ def _synth_tool_surface(rnd, n_tools: int) -> List[Dict[str, Any]]:
     return tools
 
 
-def _agent_batch_specs(n: int, real_surface, system_prompt: str):
-    """n independent (msgs, tools, task, listing) specs."""
+def _expert_rng(config, expert_name: str) -> random.Random:
+    """The deterministic draw stream for one expert's generated corpus.
+
+    `config.seed` is NOT in _FINGERPRINT_EXCLUDE, so it is hashed into
+    `build_id` - two runs at the same seed advertise the same build. They were
+    not the same build: every generator in this file reached for the global,
+    unseeded `random`, so three runs produced three different tool surfaces
+    under one id. An id that does not predict the data is worse than no id.
+
+    Per-EXPERT, not per-run: seeding one stream and sharing it would make the
+    draws depend on which expert ran first, and two experts seeded identically
+    would get the identical tool surface. The expert name is mixed in with
+    sha256 rather than added, so neighbouring seeds do not give overlapping
+    streams.
+    """
+    seed = getattr(config, "seed", 42)
+    digest = hashlib.sha256(f"{seed}:{expert_name}".encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:16], 16))
+
+
+def _agent_batch_specs(n: int, real_surface, system_prompt: str, rnd=None):
+    """n independent (msgs, tools, task, listing) specs.
+
+    `rnd` is the expert's seeded stream (see _expert_rng). It defaults to the
+    global module RNG only so a caller that does not care still works; the
+    build always passes one.
+    """
+    rnd = rnd if rnd is not None else random
     batch = []
     for _ in range(n):
-        k = random.randint(3, 8)
+        k = rnd.randint(3, 8)
         if real_surface:
-            tools = random.sample(real_surface, min(k, len(real_surface)))
+            tools = rnd.sample(real_surface, min(k, len(real_surface)))
         else:
-            tools = _synth_tool_surface(random, k)
+            tools = _synth_tool_surface(rnd, k)
 
-        target = random.choice(tools)
+        target = rnd.choice(tools)
         listing = {
             "jsonrpc": "2.0", "id": 1,
             "result": {"tools": [{"name": t["name"],
@@ -1571,9 +1665,17 @@ def _validate_tool_call(call: Dict, tools_by_name: Dict) -> tuple:
         want = spec.get("type")
         if want == "string" and not isinstance(v, str):
             return False, f"{k} should be string"
-        if want == "integer" and not isinstance(v, int) or isinstance(v, bool):
+        # PARENTHESES ARE LOAD-BEARING. `a and not b or isinstance(v, bool)`
+        # binds as `(a and not b) or isinstance(v, bool)`, so EVERY bool was
+        # rejected regardless of its declared type. Measured over 2,000
+        # synthesized surfaces: 22.4% of tools have a required boolean, so
+        # ~21% of generated examples were unwinnable by construction and the
+        # accepted corpus contained zero passing boolean calls - the tools
+        # expert was being trained never to use them. The 5% accept-rate
+        # tripwire never fired because 79% still got through.
+        if want == "integer" and (not isinstance(v, int) or isinstance(v, bool)):
             return False, f"{k} should be integer"
-        if want == "number" and not isinstance(v, (int, float)) or isinstance(v, bool):
+        if want == "number" and (not isinstance(v, (int, float)) or isinstance(v, bool)):
             return False, f"{k} should be number"
         if want == "boolean" and not isinstance(v, bool):
             return False, f"{k} should be boolean"
@@ -1605,6 +1707,14 @@ class _HFTeacher:
         self.model_id = model or config.teacher_model
         self.max_new_tokens = max_new_tokens or config.teacher_max_new
         self.batch_size = config.teacher_batch
+        # SEED THE SAMPLER TOO, or `build_id` still lies. The batch specs are
+        # deterministic now, but generate(do_sample=True) draws from torch's
+        # global RNG - including the ONE probe generation in
+        # generate_reasoning_traces that decides, for the whole corpus, whether
+        # the teacher gets the tag prompt or the marker prompt. Unseeded, that
+        # coin flip re-decides the shape of every trace on every run.
+        from transformers import set_seed
+        set_seed(getattr(config, "seed", 42))
         try:
             from transformers import BitsAndBytesConfig
         except ImportError:
@@ -1678,6 +1788,12 @@ class _VLLMTeacher:
             enable_prefix_caching=True,
             cache_dir=config.hf_home,
             trust_remote_code=True,
+            # Engine-level seed, NOT SamplingParams(seed=...): a per-request
+            # seed would hand every batch the same draw and the reasoning
+            # generator, which rebuilds the same prompts each batch, would
+            # generate one trace over and over. Same reason as the HF teacher -
+            # config.seed is in the build id, so the sampler has to honour it.
+            seed=getattr(config, "seed", 42),
         )
         if config.vllm_quantization:
             self.llm = LLM(

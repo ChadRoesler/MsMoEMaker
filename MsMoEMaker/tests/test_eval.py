@@ -796,6 +796,76 @@ class TestStarvedEnrichment:
         assert "STARVED" not in out
 
 
+class TestTheOwnColumnPValue:
+    """A p-value for an event that did not happen is worse than no p-value.
+
+    The probe hardcoded 1/n^n - the probability that ALL n experts top their
+    own column - and printed it whatever the count was. On a table where one
+    expert of five won its column it still announced p=0.00032, a decisive
+    looking significance figure for something that never occurred, directly
+    under a failing table. And `hits` was counted over every expert with a
+    column while `n` counted only the readable ones, so three experts with one
+    starved-but-topping-its-own-row printed "column maximum for 3/2".
+    """
+
+    def test_all_n_of_n_is_unchanged(self):
+        from ms_moe_maker.eval.harness import _own_column_p
+        # the proven 0.5B headline: five experts, five columns, p=0.00032
+        assert _own_column_p(5, 5) == pytest.approx(1 / 5 ** 5)
+        assert _own_column_p(2, 2) == pytest.approx(0.25)
+
+    def test_a_partial_result_gets_a_bigger_p_not_the_n_of_n_one(self):
+        from ms_moe_maker.eval.harness import _own_column_p
+        assert _own_column_p(1, 5) > _own_column_p(3, 5) > _own_column_p(5, 5)
+        assert _own_column_p(1, 5) > 0.05, (
+            "one of five winning its column is not a significant result")
+        assert _own_column_p(0, 5) == pytest.approx(1.0)
+        assert _own_column_p(1, 0) is None
+
+    def test_hits_are_counted_over_the_same_set_as_n(self):
+        """A starved expert has no readable enrichment and no vote here."""
+        import ast
+        import inspect
+        from ms_moe_maker.eval.harness import probe_router_discrimination
+        src = inspect.getsource(probe_router_discrimination)
+        tree = ast.parse(src.lstrip())
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.If)
+                    and isinstance(node.test, ast.UnaryOp)
+                    and isinstance(node.test.op, ast.Not)
+                    and getattr(node.test.operand, "id", "") == "starved"):
+                body = ast.unparse(node)
+                assert "hits" in body, (
+                    "hits must be counted inside `if not starved`, over the "
+                    "same set n and the p-value are computed over")
+                break
+        else:
+            pytest.fail("the starved branch went missing")
+
+    def test_the_printed_sentence_and_the_number_agree(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        from ms_moe_maker.eval.harness import _own_column_p
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=5, top_k=2,
+            a={"enrichment": 1.4, "own_share": 0.30, "others_share": 0.21,
+               "marginal_share": 0.20, "enrichment_reliable": True,
+               "own_is_column_max": True})
+        report.routing.update({
+            "mean_js_bits": 0.3, "moe_layers": 24, "named_experts": 5,
+            "own_is_max_count": 1, "mean_enrichment": 1.10,
+            "p_value": _own_column_p(1, 5),
+            "p_value_event": "at least 1 of 5 by chance"})
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "column maximum for 1/5" in out
+        assert "for 5/5 by chance" not in out, (
+            "a significance figure for all-five-of-five, printed under a "
+            "table where one expert won its column")
+        assert "0.00032" not in out
+        assert "at least 1 of 5" in out
+
+
 class TestAnExpertThatLostItsHeldOutSet:
     """Narrowing the test is allowed. Narrowing it quietly is not.
 
@@ -863,6 +933,116 @@ class TestAnExpertThatLostItsHeldOutSet:
         report.routing.update({"mean_js_bits": 0.4, "excluded": []})
         detect_dead_experts(report)
         assert not any("not scored" in c for c in report.caveats)
+
+
+class TestTheScoredSampleCount:
+    """A mean over 3 rows and a mean over 20 used to print identically.
+
+    The count lived only in `result.note` - which _print_eval_report never
+    printed, and which detect_dead_experts overwrote with its routing verdict,
+    so the JSON lost it too. A `stack` corpus of mostly short files yields 3
+    usable rows out of num_samples: 20, because _prompt_and_reference needs
+    4+ lines to build a completion task.
+    """
+
+    def test_the_count_is_a_field_and_it_is_printed(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.stages["stack"] = EvalResult(
+            expert_name="stack", domain="stack", status="done",
+            exact_match=0.0, rouge1=0.4, bleu=0.3,
+            scored_samples=3, attempted_samples=20)
+        report.stages["python"] = EvalResult(
+            expert_name="python", domain="python", status="done",
+            exact_match=0.0, rouge1=0.4, bleu=0.3,
+            scored_samples=20, attempted_samples=20)
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "3/20" in out and "20/20" in out
+        assert "thin" in out, "a 3-of-20 average must not read like a 20-of-20"
+
+    def test_the_routing_verdict_does_not_erase_the_count(self):
+        report = EvalReport(ok=True)
+        report.stages["python"] = EvalResult(
+            expert_name="python", domain="python", status="done",
+            scored_samples=3, attempted_samples=20,
+            note="3 of 20 sampled rows scored (completion: second half)")
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 1.01, "own_share": 0.50,
+                    "marginal_share": 0.50, "enrichment_reliable": True},
+            csharp={"enrichment": 1.01, "own_share": 0.50,
+                    "marginal_share": 0.50, "enrichment_reliable": True})
+        report.routing.update({"mean_js_bits": 0.4})
+        detect_dead_experts(report, threshold=1.2)
+        note = report.stages["python"].note
+        assert "3 of 20" in note, (
+            "the routing verdict deleted a quality fact it did not write")
+        assert "not specialised" in note, "and it must still say its own piece"
+
+    def test_the_count_survives_a_round_trip_through_json(self, tmp_path):
+        from ms_moe_maker.eval.harness import save_eval_report, eval_from_manifest
+        report = EvalReport(ok=True, message="")
+        report.stages["stack"] = EvalResult(
+            expert_name="stack", domain="stack", status="done",
+            scored_samples=3, attempted_samples=20)
+        save_eval_report(report, tmp_path / "eval_report.json")
+        back = eval_from_manifest(tmp_path)
+        assert back.stages["stack"].scored_samples == 3
+        assert back.stages["stack"].attempted_samples == 20
+
+
+class TestTheProbeSpeaksTheRoutersLanguage:
+    """The probe asked `Write csharp:` in a chat template. Training never did.
+
+    router.format_fn uses _make_code_prompt with the DISPLAY name and one of
+    six templates for code sources, and returns ex["text"] RAW - no chat
+    template at all - for the tools expert and the reasoning experts. Probing
+    everything through one made-up template measured formatting, and measured
+    it WORSE for the tools expert than for the code ones.
+    """
+
+    def test_the_probe_uses_the_trainers_own_prompt_builder(self):
+        import inspect
+        from ms_moe_maker.eval.harness import probe_router_discrimination
+        src = inspect.getsource(probe_router_discrimination)
+        assert "_make_code_prompt" in src, (
+            "the probe must build its prompt the way the trainer does, not "
+            "reimplement it and drift")
+        assert 'f"Write {s}:"' not in src, (
+            "that string is a format the router has never seen once")
+        assert "raw_sources" in src, (
+            "tools/reasoning experts trained on raw text and must be probed "
+            "on raw text")
+
+    def test_display_names_are_what_training_used(self):
+        import random as _random
+        from ms_moe_maker.config.pipeline import DISPLAY_LANG
+        from ms_moe_maker.train.router import _make_code_prompt
+        prompts = [_make_code_prompt("csharp", DISPLAY_LANG["csharp"],
+                                     unnamed_fraction=0.0,
+                                     rnd=_random.Random(i))
+                   for i in range(25)]
+        assert all("C#" in p for p in prompts), prompts
+        assert not any("csharp" in p for p in prompts), (
+            "the safe_name is a filename, not a language a router was taught")
+
+    def test_run_eval_tells_the_probe_which_sources_were_raw(self):
+        import inspect
+        from ms_moe_maker.eval.harness import run_eval
+        src = inspect.getsource(run_eval)
+        assert "raw_text_sources=" in src
+        assert "tools_expert_name" in src and "reasoning_experts" in src, (
+            "the probe needs the same list router.format_fn branched on")
+
+    def test_a_template_failure_is_recorded_not_swallowed(self):
+        import inspect
+        from ms_moe_maker.eval.harness import probe_router_discrimination
+        src = inspect.getsource(probe_router_discrimination)
+        assert "format_errors" in src
+        assert "except Exception:\n                    pass" not in src, (
+            "a silent fallback means one column was measured in a different "
+            "format and nobody can tell")
 
 
 def test_the_router_mix_prefers_the_train_split():

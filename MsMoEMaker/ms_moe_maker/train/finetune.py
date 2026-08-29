@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
+import random
+import shutil
 import time
 from typing import Optional
 
@@ -125,6 +128,88 @@ def specialist_is_done(config, safe_name: str) -> bool:
     return os.path.exists(f"{specialist_dir(config, safe_name)}/config.json")
 
 
+def expert_seed(seed: int, safe_name: str) -> int:
+    """A stable per-expert seed derived from the build's `seed`.
+
+    Two reasons it is not just `config.seed`:
+
+    Seeding every expert off the same number hands python and rust the
+    IDENTICAL prompt sequence - correlated rather than random, which is a
+    different kind of wrong from unseeded and harder to notice. Mixing the
+    expert name in keeps the streams independent while keeping the whole set
+    reproducible from one number.
+
+    And it is sha256, not the builtin hash(): hash() of a str is salted per
+    interpreter (PYTHONHASHSEED), so it would answer differently in every
+    process - which defeats the entire point. `seed` is inside the build
+    fingerprint (config.pipeline.build_fingerprint keeps every field it does
+    not explicitly exclude), so build_id has always CLAIMED two runs trained
+    the same way. Until this was wired, that claim was only ever about what
+    the config asked for: nothing in train/ called set_seed, and the prompt
+    attached to every row came from the unseeded module-level `random`.
+    """
+    blob = f"{int(seed)}:{safe_name}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(blob).digest()[:4], "big") % (2 ** 31 - 1)
+
+
+def _checkpoint_dirs(tmp_dir: str) -> list:
+    """`checkpoint-N` dirs under tmp_dir, lowest step first.
+
+    Sorted by the STEP NUMBER, not by name: the old resume check was a bare
+    `d.startswith("checkpoint-")`, and anything that sorts checkpoint dirs as
+    strings puts checkpoint-9 after checkpoint-100. Anything that is not
+    `checkpoint-<int>` is not a checkpoint and is ignored rather than counted.
+    """
+    if not os.path.isdir(tmp_dir):
+        return []
+    found = []
+    for d in os.listdir(tmp_dir):
+        if not d.startswith("checkpoint-"):
+            continue
+        if not os.path.isdir(os.path.join(tmp_dir, d)):
+            continue
+        try:
+            step = int(d.split("-", 1)[1])
+        except ValueError:
+            continue
+        found.append((step, d))
+    return [d for _, d in sorted(found)]
+
+
+def latest_checkpoint(tmp_dir: str) -> Optional[str]:
+    """Full path of the highest-step checkpoint under tmp_dir, or None."""
+    dirs = _checkpoint_dirs(tmp_dir)
+    return os.path.join(tmp_dir, dirs[-1]) if dirs else None
+
+
+def checkpoint_global_step(ckpt_dir: str) -> int:
+    """The optimiser step a checkpoint would resume AT. 0 if unreadable.
+
+    0 is the honest answer for a checkpoint transformers could not resume from
+    either - it reads the same trainer_state.json - and it keeps the zero-step
+    guard below meaningful instead of raising a second, less useful error.
+    """
+    try:
+        with open(os.path.join(ckpt_dir, "trainer_state.json"),
+                  encoding="utf-8") as fh:
+            return int(json.load(fh).get("global_step", 0) or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def clear_checkpoints(tmp_dir: str) -> list:
+    """Delete every `checkpoint-N` under tmp_dir. Returns the names removed.
+
+    Only the checkpoint dirs, not the whole tmp dir: the trainer owns this
+    folder but a human may well have dropped a log or a note in it, and the
+    thing that has to go is specifically the state a resume would latch onto.
+    """
+    removed = _checkpoint_dirs(tmp_dir)
+    for d in removed:
+        shutil.rmtree(os.path.join(tmp_dir, d), ignore_errors=True)
+    return removed
+
+
 def fine_tune_specialist(config, safe_name: str, data_path: str,
                          expert_display: Optional[str] = None) -> str:
     """LoRA fine-tune one specialist expert.
@@ -143,6 +228,26 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         return out_dir
 
     print(f"\nFine-tuning {safe_name}...")
+
+    # SEED FIRST, BEFORE ANYTHING DRAWS.
+    #
+    # `config.seed` had exactly one consumer - the router init in
+    # moe/stitch.py - so nothing in the training path was seeded at all. That
+    # matters most for the prompt: _make_code_prompt drew from the unseeded
+    # module-level `random` inside dataset.map, which happens BELOW here and
+    # well before SFTTrainer is constructed and calls set_seed(args.seed). So
+    # every row of every expert got a prompt from a stream that differed run
+    # to run, and re-running ONE expert with --force gave it a different
+    # prompt distribution from its neighbours - the one thing this pipeline
+    # spends whole stages trying to keep comparable.
+    #
+    # Placed above the model load on purpose: LoRA init draws too, and a seed
+    # set after it seeds nothing that matters.
+    from transformers import set_seed
+    seed = expert_seed(config.seed, safe_name)
+    set_seed(seed)
+    prompt_rnd = random.Random(seed)
+    print(f"   seed: build {config.seed} -> {safe_name} stream {seed}")
 
     # Check unsloth availability
     want_unsloth = config.use_unsloth
@@ -240,7 +345,11 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         lang = expert_display or safe_name
         from ..config.pipeline import DISPLAY_LANG
         display = DISPLAY_LANG.get(safe_name, safe_name)
-        prompt = _make_code_prompt(safe_name, display, config.code_prompt_unnamed_fraction)
+        # rnd= is why _make_code_prompt has that parameter: without it the
+        # draw is the process-global `random` and the prompts are unrepeatable.
+        prompt = _make_code_prompt(safe_name, display,
+                                   config.code_prompt_unnamed_fraction,
+                                   rnd=prompt_rnd)
         msgs = [{"role": "user", "content": prompt},
                 {"role": "assistant", "content": ex["text"]}]
         return tokenizer.apply_chat_template(msgs, tokenize=False) + tokenizer.eos_token
@@ -275,7 +384,36 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
     # Build trainer
     tmp_dir = f"{config.output_root}/tmp_{safe_name}"
 
+    # --force MEANS RETRAIN. A LEFTOVER CHECKPOINT QUIETLY MADE IT MEAN RESUME.
+    #
+    # specialist_is_done() short-circuits on config.force, so --force gets you
+    # past the "already trained, skipping" gate - but nothing ever cleared
+    # tmp_{expert}, and the resume branch below only asked "is there a
+    # checkpoint-* dir in there".
+    #
+    # The run that costs you a build: run 1 dies at step 300 of 1200. You lower
+    # target_steps to 150 - which is exactly what cli/build.py tells you to do
+    # when drift refuses - and re-run with --force. The shorter schedule plans
+    # ~150 steps, the inherited trainer_state.json says global_step=200, the
+    # Trainer works out epochs_trained >= 1 and skips the epoch loop body
+    # entirely. train() returns having taken ZERO optimiser steps,
+    # merge_and_unload() saves the base weights with an untouched LoRA, and the
+    # builder records "finetune.X -> done, saved". An untrained expert,
+    # reported trained, then stitched into the MoE.
+    if config.force:
+        gone = clear_checkpoints(tmp_dir)
+        if gone:
+            print(f"   --force: discarded {len(gone)} stale checkpoint(s) in "
+                  f"{tmp_dir} ({', '.join(gone)}). Forcing means retraining, "
+                  f"not resuming.")
+
     train_kwargs = dict(
+        # THE TRAINER SEEDS ITSELF, FROM ITS OWN DEFAULT, IF YOU LET IT.
+        # TrainingArguments.seed defaults to 42 and the Trainer calls
+        # set_seed(args.seed) on construction - so a recipe that asked for any
+        # other seed would have had it overwritten somewhere between the model
+        # load and the first batch. Hand it the same stream we used above.
+        seed=seed,
         per_device_train_batch_size=config.per_device_batch,
         gradient_accumulation_steps=config.grad_accum,
         warmup_steps=config.warmup_steps,
@@ -331,13 +469,37 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
     )
 
     # Resume from checkpoint
-    have_ckpt = os.path.isdir(tmp_dir) and any(
-        d.startswith("checkpoint-") for d in os.listdir(tmp_dir))
-    if have_ckpt:
-        print(f"   resuming {safe_name} from checkpoint in {tmp_dir}")
-        trainer.train(resume_from_checkpoint=have_ckpt)
+    ckpt = latest_checkpoint(tmp_dir)
+    resumed_at = checkpoint_global_step(ckpt) if ckpt else 0
+    if ckpt:
+        print(f"   resuming {safe_name} from {os.path.basename(ckpt)} "
+              f"(global_step {resumed_at})")
+        trainer.train(resume_from_checkpoint=ckpt)
     else:
         trainer.train()
+
+    # DID IT ACTUALLY TRAIN? ASK AFTERWARDS - DO NOT PREDICT.
+    #
+    # The stale-checkpoint story above is the common way to end up here, and
+    # --force now prevents that one. This is the general case: ANY resume whose
+    # global_step is already at or past the end of the current schedule skips
+    # the epoch loop and returns quietly, and the next lines would merge and
+    # save an adapter that never saw a gradient.
+    #
+    # Checked after the fact rather than by computing the planned step count
+    # up front, because "planned steps" means re-deriving the Trainer's own
+    # len(dataloader) // grad_accum arithmetic and staying bug-compatible with
+    # it forever, while state.global_step is the actual answer and free. Loud
+    # beats clever: refuse to save rather than save something untrained.
+    if trainer.state.global_step <= resumed_at:
+        raise RuntimeError(
+            f"{safe_name}: training took ZERO optimiser steps "
+            f"(global_step {resumed_at} -> {trainer.state.global_step}). "
+            f"A checkpoint at step {resumed_at} is at or past the end of "
+            f"the schedule this run planned, so there was nothing left to do "
+            f"and the adapter is UNTRAINED - saving it would report a specialist that never "
+            f"learned anything. Delete {tmp_dir} and re-run, or raise the step "
+            f"budget above {resumed_at}.")
 
     # Save merged specialist (dense, NOT quantised)
     if config.load_in_4bit:

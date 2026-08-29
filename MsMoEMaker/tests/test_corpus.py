@@ -154,23 +154,36 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
     (kind=synth) was scanned as if it were the Shell language.
 
     The source kind is the contract; the name is a label.
+
+    And the label is what the corpus is KEYED by: `dotnet` scans the language
+    C# and must come back as `dotnet`. Keyed by language it came back as
+    `csharp`, while run/builder.py and cli/_common.py look corpora up by expert
+    name - so the build died on "No data path for expert dotnet" after the full
+    shard scan. The old version of this test only covered the case where the
+    expert name and the language name happen to be the same word, which is the
+    one case the bug could not reach.
     """
     import types
 
     from ms_moe_maker.data import synth as d
     from ms_moe_maker.config.recipe import Source
 
-    calls = {"hf": [], "shards": []}
+    calls = {"hf": [], "shards": [], "names": []}
 
     def fake_hf(repo, text_field, split, out_path, config,
                 callback=None, lang=""):
         calls["hf"].append(repo)
         return out_path
 
-    def fake_shards(languages, config, callback=None):
+    def fake_shards(languages, config, callback=None, names=None):
         calls["shards"].append(list(languages))
+        calls["names"].append(dict(names or {}))
         from ms_moe_maker.config import pipeline as cfg_mod
-        return {cfg_mod.safe_name(l): f"stack:{l}" for l in languages}
+        # Keyed the way the real scan keys: by the EXPERT the language was
+        # scanned for. `names.get(l, l)` is exactly the old language-keyed
+        # behaviour, so a caller that stops passing `names` fails this test.
+        return {cfg_mod.safe_name((names or {}).get(l, l)): f"stack:{l}"
+                for l in languages}
 
     monkeypatch.setattr(d, "_collect_hf", fake_hf)
     monkeypatch.setattr(d, "_collect_from_shards", fake_shards)
@@ -178,7 +191,7 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
     config = types.SimpleNamespace(data_root="test_data", force=False)
     sources = {
         "python": Source(kind="stack", language="Python"),
-        "csharp": Source(kind="stack", language="C#"),
+        "dotnet": Source(kind="stack", language="C#"),
         "powershell": Source(
             kind="hf", repo="SaeedRahmani/codeparrot_github_code_powershell",
             text_field="code"),
@@ -186,7 +199,7 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
     }
 
     results = d.collect_corpus(
-        config, languages=["python", "csharp", "powershell", "shell"],
+        config, languages=["python", "dotnet", "powershell", "shell"],
         sources=sources)
 
     # The hf expert went to the HF collector, once, with its repo.
@@ -194,5 +207,68 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
     # The stack scan was asked for ONLY the two stack languages — never
     # "PowerShell" (an hf expert) or "Shell" (a synth expert).
     assert calls["shards"] == [["Python", "C#"]]
+    # And it was told WHICH EXPERT each language is being scanned for.
+    assert calls["names"] == [{"Python": "python", "C#": "dotnet"}]
     # And the hf result survived — it was not overwritten by a stack path.
     assert results["powershell"] == "test_data/powershell_code.jsonl"
+    # Keyed by the expert that asked, not by the language that was scanned.
+    assert results["dotnet"] == "stack:C#"
+    assert "csharp" not in results, (
+        "the corpus is keyed by expert name; `csharp` here is the language "
+        "leaking into the key, which is what builder.py cannot look up")
+
+
+def test_the_shard_scan_files_and_keys_by_expert_name(monkeypatch, tmp_path):
+    """The same claim against the REAL function, not a fake.
+
+    The already-on-disk skip is the only branch of _collect_from_shards that
+    can be reached without a 45 GB download, and it derives its answer from the
+    same safe_map the write does - so it pins both the returned key and the
+    filename the scan would have written.
+    """
+    import sys
+    import types
+
+    from ms_moe_maker.data import synth as d
+
+    # The heavy import is at the top of the function; stub it so the branch
+    # below it is reachable. Anything that actually touched the network here
+    # would be a bug in the skip path.
+    stub = types.ModuleType("huggingface_hub")
+    stub.hf_hub_download = stub.list_repo_files = None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", stub)
+
+    (tmp_path / "dotnet_code.jsonl").write_text('{"text": "x"}\n',
+                                                encoding="utf-8")
+    config = types.SimpleNamespace(data_root=str(tmp_path), force=False,
+                                   max_shards=1)
+    got = d._collect_from_shards(["C#"], config, names={"C#": "dotnet"})
+    assert got == {"dotnet": str(tmp_path / "dotnet_code.jsonl")}
+
+
+def test_every_unsourced_expert_is_scanned_not_just_the_first(monkeypatch):
+    """`elif not normalized:` guarded on the LIST being empty.
+
+    So the second and every later expert with no source and a name that is not
+    a code language was dropped without a word: three experts went in, one
+    corpus came out, and the stage printed "collected 1 corpora".
+    """
+    import types
+
+    from ms_moe_maker.data import synth as d
+
+    seen = {}
+
+    def fake_shards(languages, config, callback=None, names=None):
+        seen["languages"] = list(languages)
+        seen["names"] = dict(names or {})
+        return {n: f"stack:{l}" for l, n in (names or {}).items()}
+
+    monkeypatch.setattr(d, "_collect_from_shards", fake_shards)
+    config = types.SimpleNamespace(data_root="test_data", force=False)
+
+    results = d.collect_corpus(
+        config, languages=["monster_manual", "lore", "dm_guide"], sources={})
+
+    assert seen["languages"] == ["monster_manual", "lore", "dm_guide"]
+    assert sorted(results) == ["dm_guide", "lore", "monster_manual"]
