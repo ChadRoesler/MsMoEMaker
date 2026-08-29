@@ -1,8 +1,8 @@
 """Tests for ms_moe_maker/builder.py — pipeline orchestrator."""
 
 import pytest
-from ms_moe_maker import builder
-from ms_moe_maker import config
+from ms_moe_maker.run import builder
+from ms_moe_maker.config import pipeline as config
 
 
 class TestStageCallback:
@@ -175,16 +175,16 @@ class TestConfigConstants:
 
     def test_display_lang_accessible(self):
         """DISPLAY_LANG should be importable from config."""
-        from ms_moe_maker.config import DISPLAY_LANG
+        from ms_moe_maker.config.pipeline import DISPLAY_LANG
         assert isinstance(DISPLAY_LANG, dict)
         assert "python" in DISPLAY_LANG
 
     def test_model_sizes_accessible(self):
-        from ms_moe_maker.config import MODEL_SIZES
+        from ms_moe_maker.config.pipeline import MODEL_SIZES
         assert isinstance(MODEL_SIZES, dict)
         assert "0.5B" in MODEL_SIZES
 
     def test_code_languages_accessible(self):
-        from ms_moe_maker.config import CODE_LANGUAGES
+        from ms_moe_maker.config.pipeline import CODE_LANGUAGES
         assert isinstance(CODE_LANGUAGES, list)
         assert len(CODE_LANGUAGES) == 4

@@ -18,8 +18,8 @@ import json
 import time
 from typing import Optional
 
-from . import config as cfg_module
-from . import stages as st
+from ..config import pipeline as cfg_module
+from ..run import stages as st
 
 
 def make_heartbeat_callback(print_interval: int = 100,
@@ -134,7 +134,7 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
 
     Returns the output directory path.
     """
-    from . import config as cfg_module
+    from ..config import pipeline as cfg_module
     import torch
 
     out_dir = specialist_dir(config, safe_name)
@@ -238,7 +238,7 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
                 or safe_name in config.synth_experts):
             return ex["text"]
         lang = expert_display or safe_name
-        from .config import DISPLAY_LANG
+        from ..config.pipeline import DISPLAY_LANG
         display = DISPLAY_LANG.get(safe_name, safe_name)
         prompt = _make_code_prompt(safe_name, display, config.code_prompt_unnamed_fraction)
         msgs = [{"role": "user", "content": prompt},

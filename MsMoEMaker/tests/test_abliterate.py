@@ -8,8 +8,8 @@ half needs a GPU and the training stack.
 
 import pytest
 
-from ms_moe_maker import stages
-from ms_moe_maker.recipe import Abliterate, _build_abliterate, parse, validate
+from ms_moe_maker.run import stages
+from ms_moe_maker.config.recipe import Abliterate, _build_abliterate, parse, validate
 
 
 BASE = {
@@ -93,7 +93,7 @@ class TestValidate:
 
 class TestBuildConfig:
     def test_abliterate_fields_resolve(self):
-        from ms_moe_maker import config
+        from ms_moe_maker.config import pipeline as config
 
         rec, _ = parse({**BASE, "abliterate": {"n_trials": 123}})
         cfg = config.build_config(rec)
@@ -102,7 +102,7 @@ class TestBuildConfig:
         assert cfg.abliterate_export == "merge"
 
     def test_abliterate_off_by_default(self):
-        from ms_moe_maker import config
+        from ms_moe_maker.config import pipeline as config
 
         rec, _ = parse(dict(BASE))
         cfg = config.build_config(rec)

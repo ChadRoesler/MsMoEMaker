@@ -31,7 +31,7 @@ def test_describe_returns_valid_json():
 
 def test_describe_tiers_match_hardware():
     """The tier list reflects the current hardware tiers."""
-    from ms_moe_maker import hardware
+    from ms_moe_maker.box import hardware
 
     tier_names = DESCRIBE.get("tiers", [])
     assert set(tier_names) == set(hardware.TIERS.keys())
@@ -41,7 +41,7 @@ def test_describe_tiers_match_hardware():
 
 def test_describe_templates_match_registry():
     """The template list matches the template registry."""
-    from ms_moe_maker import template
+    from ms_moe_maker.config import templates as template
 
     tpl_names = DESCRIBE.get("templates", [])
     assert set(tpl_names) == set(template.TEMPLATES.keys())
@@ -54,7 +54,7 @@ def test_every_advertised_template_has_question_templates():
     never written."""
     import os
 
-    from ms_moe_maker import defaults as D
+    from ms_moe_maker.config import defaults as D
 
     for name in DESCRIBE.get("templates", []):
         path = D.packaged_path(f"{name}_templates.yaml")
@@ -78,7 +78,7 @@ def test_describe_commands_are_current():
 
     Three sources, checked against each other, so any future drift fails here.
     """
-    from ms_moe_maker import _describe
+    from ms_moe_maker.box import describe as _describe
     from ms_moe_maker.__main__ import COMMAND_HANDLERS
 
     assert list(DESCRIBE["commands"]) == list(_describe.COMMANDS)
@@ -101,7 +101,7 @@ def test_every_advertised_verb_actually_dispatches(tmp_path, monkeypatch):
     So: drive main() for every verb and assert none of them dies with "unknown
     command". A verb we advertise has to run.
     """
-    from ms_moe_maker import _describe
+    from ms_moe_maker.box import describe as _describe
 
     monkeypatch.chdir(tmp_path)
     recipe = tmp_path / "r.yaml"
@@ -124,7 +124,7 @@ def test_every_advertised_verb_actually_dispatches(tmp_path, monkeypatch):
 
 def test_eval_modes_are_current():
     """Same rule for --mode: advertised, accepted and honoured must agree."""
-    from ms_moe_maker import _describe
+    from ms_moe_maker.box import describe as _describe
     assert list(DESCRIBE["modes"]) == list(_describe.EVAL_MODES)
 
 
@@ -174,9 +174,9 @@ def test_build_writes_a_manifest(recipe_yaml, tmp_path):
     a watcher reads, so it has to exist for a run that DIED, or a dashboard
     cannot tell "crashed" from "never started".
     """
-    from ms_moe_maker.manifest import MANIFEST_NAME
-    from ms_moe_maker.config import build_config
-    from ms_moe_maker.recipe import load
+    from ms_moe_maker.run.manifest import MANIFEST_NAME
+    from ms_moe_maker.config.pipeline import build_config
+    from ms_moe_maker.config.recipe import load
 
     rc = main(["build", str(recipe_yaml), "--dryrun"])
     rec, _ = load(str(recipe_yaml))
@@ -200,7 +200,7 @@ def test_build_writes_a_manifest(recipe_yaml, tmp_path):
 
 def test_recipe_example_parses_clean():
     """recipe.example.yaml loads without errors or warnings."""
-    from ms_moe_maker.recipe import load
+    from ms_moe_maker.config.recipe import load
 
     rec, warnings = load(str(EXAMPLE))
     assert rec is not None
@@ -210,7 +210,7 @@ def test_recipe_example_parses_clean():
 
 def test_recipe_example_has_correct_tier():
     """The recipe's hardware_tier is set by template auto-fill."""
-    from ms_moe_maker.recipe import load
+    from ms_moe_maker.config.recipe import load
 
     rec, _ = load(str(EXAMPLE))
     # The example recipe doesn't set template: directly, but the tier
@@ -220,8 +220,8 @@ def test_recipe_example_has_correct_tier():
 
 def test_recipe_example_size_is_auto():
     """The example recipe uses size=auto and resolves from tier."""
-    from ms_moe_maker.recipe import load
-    from ms_moe_maker import config as cfg_module
+    from ms_moe_maker.config.recipe import load
+    from ms_moe_maker.config import pipeline as cfg_module
 
     rec, _ = load(str(EXAMPLE))
     assert rec.size == "auto"
@@ -235,8 +235,8 @@ def test_recipe_example_size_is_auto():
 
 def test_code_template_applies_clean():
     """The 'code' template fills all expected fields."""
-    from ms_moe_maker.recipe import load
-    from ms_moe_maker.template import get_template
+    from ms_moe_maker.config.recipe import load
+    from ms_moe_maker.config.templates import get_template
 
     # Get the code template to see what it provides
     tpl = get_template("code")
@@ -248,7 +248,7 @@ def test_code_template_applies_clean():
 
 def test_dnd_template_applies_clean():
     """The 'dnd' template fills all expected fields."""
-    from ms_moe_maker.template import get_template
+    from ms_moe_maker.config.templates import get_template
 
     tpl = get_template("dnd")
     assert tpl is not None
@@ -259,7 +259,7 @@ def test_dnd_template_applies_clean():
 
 def test_template_unknown_raises():
     """Using an unknown template name raises ValueError."""
-    from ms_moe_maker.template import get_template
+    from ms_moe_maker.config.templates import get_template
 
     assert get_template("nonexistent") is None
 
@@ -267,7 +267,7 @@ def test_template_unknown_raises():
 def test_recipe_load_with_template_field():
     """A recipe with template: field resolves its tier correctly."""
     from io import StringIO
-    from ms_moe_maker.recipe import parse
+    from ms_moe_maker.config.recipe import parse
 
     yaml_text = """
 schema_version: 1
@@ -283,7 +283,7 @@ template: dnd
 
 def test_recipe_load_code_template():
     """A recipe with template: code resolves spark tier."""
-    from ms_moe_maker.recipe import parse
+    from ms_moe_maker.config.recipe import parse
     import yaml
 
     yaml_text = """
@@ -358,7 +358,7 @@ class TestDescribeIsAContract:
         source of truth, it is quietly making a second one. Now it is merged,
         so a key added over there cannot be lost here.
         """
-        from ms_moe_maker import _describe
+        from ms_moe_maker.box import describe as _describe
         missing = set(_describe.DESCRIBE) - set(DESCRIBE)
         assert not missing, f"describe dropped published key(s): {missing}"
 
@@ -375,7 +375,7 @@ class TestDescribeIsAContract:
         json.loads(out)
 
     def test_kinds_come_from_the_registry(self):
-        from ms_moe_maker import corpus
+        from ms_moe_maker.data import corpus
         # The rich shape now, matching `validators` and recipe.DESCRIBE.
         # Names stay derivable, which is what this ever asserted.
         assert [k["name"] for k in DESCRIBE["kinds"]] == corpus.names()
@@ -423,7 +423,7 @@ class TestJsonIsAWireFormatEverywhere:
     def test_every_emitted_kind_is_declared(self, recipe_yaml, capsys):
         """_describe.EVENTS is a wire contract: a consumer that meets an
         undeclared kind has no rule for it."""
-        from ms_moe_maker import _describe
+        from ms_moe_maker.box import describe as _describe
         main(["validate", str(recipe_yaml), "--json"])
         for line in capsys.readouterr().out.splitlines():
             if line.strip():
@@ -443,7 +443,7 @@ class TestFailuresReachTheHuman:
 
     def test_the_failure_path_uses_the_unconditional_channel(self):
         import inspect
-        from ms_moe_maker import runner
+        from ms_moe_maker.run import runner
         src = inspect.getsource(runner.Runner.run_builder)
         head, _, tail = src.partition("except Exception as exc:")
         assert tail, "run_builder no longer has a failure branch"
@@ -453,7 +453,7 @@ class TestFailuresReachTheHuman:
 
     def test_a_terminal_line_is_always_printed(self):
         import inspect
-        from ms_moe_maker import runner
+        from ms_moe_maker.run import runner
         src = inspect.getsource(runner.Runner.run_builder)
         assert src.count(".say(") >= 2, (
             "'did it finish?' must never be answered by absence of output")
@@ -461,7 +461,7 @@ class TestFailuresReachTheHuman:
     def test_say_is_not_gated_but_emit_is(self):
         """The property the fix relies on."""
         import io
-        from ms_moe_maker.events import Events
+        from ms_moe_maker.run.events import Events
         out, prose = io.StringIO(), io.StringIO()
         ev = Events(enabled=False, stream=out, prose=prose)
         ev.error(stage="x", message="boom")

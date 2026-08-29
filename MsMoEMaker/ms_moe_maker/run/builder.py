@@ -23,7 +23,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from . import config as cfg_module
+from ..config import pipeline as cfg_module
 from . import manifest as mf
 from . import stages
 
@@ -77,12 +77,12 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     Returns:
         BuildResult with outcomes.
     """
-    from . import config as cfg_module
-    from . import data as data_mod
-    from . import finetune as finetune_mod
-    from . import stitch as stitch_mod
-    from . import router as router_mod
-    from . import export as export_mod
+    from ..config import pipeline as cfg_module
+    from ..data import synth as data_mod
+    from ..train import finetune as finetune_mod
+    from ..moe import stitch as stitch_mod
+    from ..train import router as router_mod
+    from ..moe import export as export_mod
     import torch
 
     result = BuildResult()
@@ -166,7 +166,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     if config.abliterate_enabled:
         import dataclasses
 
-        from . import abliterate as abliterate_mod
+        from ..abliterate import stage as abliterate_mod
 
         cb.stage(stages.ABLITERATE_BASE, "running", "decensoring the base model")
         ablated_dir = abliterate_mod.abliterate_base(config)
@@ -181,7 +181,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     if not expert_names:
         expert_names = [e.name for e in recipe.experts]
 
-    from .config import DISPLAY_LANG
+    from ..config.pipeline import DISPLAY_LANG
 
     # ── Stage 1: Collect code corpora ─────────────────────────────────────
     cb.stage(stages.DATA_CORPUS, "running", "collecting expert corpora")
@@ -397,8 +397,8 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     if len(specialist_dirs) >= 2 and gate_mode != "skip":
         cb.stage(stages.GATE_EXPERTS, "running", "comparing the specialists")
         try:
-            from . import experts as experts_mod
-            from . import eval as eval_mod
+            from ..train import experts as experts_mod
+            from ..eval import harness as eval_mod
 
             held: Dict[str, str] = {}
             if gate_mode == "auto":

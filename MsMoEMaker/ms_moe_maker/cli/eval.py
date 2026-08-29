@@ -19,7 +19,7 @@ def _cmd_eval(args):
     if rec is None:
         return 1
 
-    from ..config import build_config
+    from ..config.pipeline import build_config
     from ..eval import run_eval
 
     config = build_config(rec, force=args.force)
@@ -89,7 +89,7 @@ def _print_eval_report(report):
     # Reading "1.00x enrichment" before "the experts are interchangeable" sends
     # you to the router; reading them the other way round does not.
     if report.experts:
-        from .. import experts as _ex
+        from ..train import experts as _ex
         rep = _ex.ExpertsReport(
             status=report.experts.get("status", _ex.OK),
             divergence=report.experts.get("divergence", {}),

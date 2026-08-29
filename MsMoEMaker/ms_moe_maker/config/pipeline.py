@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import hardware
+from ..box import hardware
 from . import reasoning as _reasoning
 
 

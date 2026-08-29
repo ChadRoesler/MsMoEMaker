@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .evalrecord import ERROR, FAIL, PASS, UNMEASURABLE
+from ..eval.record import ERROR, FAIL, PASS, UNMEASURABLE
 
 # How long any external parser gets. A hung compiler must not hang the eval.
 TOOL_TIMEOUT = 20

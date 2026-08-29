@@ -20,7 +20,7 @@ no fallback. Deleted. If streaming cannot run, that is a loud error.
 """
 from __future__ import annotations
 
-from . import stages as st
+from ..run import stages as st
 
 import json
 import os
@@ -140,7 +140,7 @@ def stitch_moe(config, safe_names: List[str]) -> str:
     )
 
     # Stream it. One path, no try/except around the import: the module is
-    # vendored at ms_moe_maker/_moe_stitch.py, so if this import fails the
+    # vendored at ms_moe_maker/moe/_moe_stitch.py, so if this import fails the
     # install is broken and that should be loud, not quietly downgraded.
     #
     # The old code did `import moe_stitch` INSIDE this function and then called

@@ -20,8 +20,8 @@ def _cmd_corpus(args):
     so the rule that matters most cannot run and says so rather than pruning
     on the two weaker signals and reporting success.
     """
-    from .. import corpus as corpus_mod
-    from .. import corpushealth as ch
+    from ..data import corpus as corpus_mod
+    from ..data import health as ch
 
     rec, errs, _ = _load_recipe(args.recipe, defaults_path=getattr(args, 'defaults', None))
     if rec is None:

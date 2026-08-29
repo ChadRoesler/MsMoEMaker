@@ -23,6 +23,6 @@ try:
 except Exception:  # noqa: BLE001 - source checkout without a build
     __version__ = "0.0.0+unknown"
 
-from ._describe import DESCRIBE, NAME  # noqa: F401  (stdlib-only, safe here)
+from .box.describe import DESCRIBE, NAME  # noqa: F401  (stdlib-only, safe here)
 
 __all__ = ["DESCRIBE", "NAME", "__version__"]

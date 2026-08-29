@@ -19,7 +19,7 @@ it is the "is the skeleton well-formed" answer, not a training starting point.
 """
 import pytest
 
-from ms_moe_maker.recipe import parse, validate
+from ms_moe_maker.config.recipe import parse, validate
 
 
 def _rec(**moe):
@@ -63,7 +63,7 @@ def test_a_sane_noise_scale_passes():
 
 
 def test_the_knob_reaches_the_pipeline_config():
-    from ms_moe_maker import config as cfg_mod
+    from ms_moe_maker.config import pipeline as cfg_mod
     c = cfg_mod.build_config(_rec(router_init="random", router_init_std=0.05),
                              dryrun=True)
     assert c.router_init == "random"
@@ -81,7 +81,7 @@ class TestVerifyKnowsWhatWasAskedFor:
 
     def test_the_zero_check_is_still_strict_by_default(self):
         import inspect
-        from ms_moe_maker import stitch
+        from ms_moe_maker.moe import stitch
         src = inspect.getsource(stitch.verify_stitch)
         assert 'router_init == "random"' in src
         assert "router not zero" in src, (
@@ -89,7 +89,7 @@ class TestVerifyKnowsWhatWasAskedFor:
 
     def test_random_still_refuses_an_uninitialised_gate(self):
         import inspect
-        from ms_moe_maker import stitch
+        from ms_moe_maker.moe import stitch
         src = inspect.getsource(stitch.verify_stitch)
         assert "the init did not run" in src, (
             "all-zeros under router_init=random means the init silently did "
@@ -97,7 +97,7 @@ class TestVerifyKnowsWhatWasAskedFor:
 
     def test_random_bounds_the_noise(self):
         import inspect
-        from ms_moe_maker import stitch
+        from ms_moe_maker.moe import stitch
         src = inspect.getsource(stitch.verify_stitch)
         assert "route on this" in src, (
             "unbounded noise means the untrained MoE routes on garbage")

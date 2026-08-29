@@ -22,7 +22,7 @@ def _corpus_kinds():
     kept (here vs there) because a `.join()` over dicts is a TypeError at the
     worst possible moment: while somebody is generating their first recipe.
     """
-    from .. import corpus
+    from ..data import corpus
     return corpus.names()
 
 
@@ -33,7 +33,7 @@ def _load_recipe(path, quiet: bool = False, defaults_path=None):
     nothing else may write to it. Prose goes to stderr or nowhere; a stray
     print here would corrupt the very format a consumer is parsing.
     """
-    from ..recipe import load, validate as validate_recipe
+    from ..config.recipe import load, validate as validate_recipe
 
     def out(msg):
         if quiet:
@@ -61,7 +61,7 @@ def _load_recipe(path, quiet: bool = False, defaults_path=None):
 
 def _build_output_dir(rec) -> str:
     """Find the output directory from the recipe or config."""
-    from ..config import build_config
+    from ..config.pipeline import build_config
     
     try:
         config = build_config(rec)
@@ -81,7 +81,7 @@ def _find_gguf(output_dir: str):
 
 def _corpus_paths(rec) -> Dict[str, str]:
     """Where this recipe's corpora would live, without building anything."""
-    from .. import config as cfg_module
+    from ..config import pipeline as cfg_module
     roots = cfg_module.resolve_run_roots(rec)
     data_root = roots["data"]
     out: Dict[str, str] = {}

@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from ms_moe_maker import corpushealth as ch
+from ms_moe_maker.data import health as ch
 
 
 def _write(tmp_path, rows, name="c.jsonl"):

@@ -51,7 +51,7 @@ def is_builtin_plugin(name: str) -> bool:
     plugins (file paths or third-party import paths) disable the reproducibility
     offer during upload.
     """
-    return name.startswith("ms_moe_maker.heretic.scorers.")
+    return name.startswith("ms_moe_maker.abliterate.heretic.scorers.")
 
 
 def load_plugin(

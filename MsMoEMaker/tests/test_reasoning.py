@@ -8,8 +8,8 @@ loud paths as the working ones.
 """
 import pytest
 
-from ms_moe_maker import config as C
-from ms_moe_maker import reasoning as Rz
+from ms_moe_maker.config import pipeline as C
+from ms_moe_maker.config import reasoning as Rz
 
 
 def _w(tmp_path, name, body):
@@ -173,8 +173,8 @@ class TestOneSplitterEverywhere:
         """A scorer that splits differently from the writer is measuring a
         different artifact than the one on disk. Both now call reasoning.split."""
         import inspect
-        from ms_moe_maker import data as data_mod
-        from ms_moe_maker.eval import _split_reasoning_answer
+        from ms_moe_maker.data import synth as data_mod
+        from ms_moe_maker.eval.harness import _split_reasoning_answer
         s, _, _ = Rz.load(include_user=False)
         text = "<think>why</think>the answer"
 
@@ -186,13 +186,13 @@ class TestOneSplitterEverywhere:
 
         # the writer calls the SAME splitter, not a private copy
         src = inspect.getsource(data_mod._parse_teacher_output)
-        assert "from .reasoning import split" in src, (
+        assert "from ..config.reasoning import split" in src, (
             "the writer must split with reasoning.split, not a private copy")
 
 
 class TestTheTagsTravelWithTheRun:
     def _rec(self, base="", reasoning_expert=False):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         src = {"kind": "stack", "language": "Python"}
         if reasoning_expert:
             src["reasoning"] = True

@@ -337,11 +337,11 @@ class Settings(BaseSettings):
     scorers: list[ScorerConfig] = Field(
         default_factory=lambda: [
             ScorerConfig(
-                plugin="ms_moe_maker.heretic.scorers.keyword_rate.KeywordRate",
+                plugin="ms_moe_maker.abliterate.heretic.scorers.keyword_rate.KeywordRate",
                 optimization="minimize",
             ),
             ScorerConfig(
-                plugin="ms_moe_maker.heretic.scorers.kl_divergence.KLDivergence",
+                plugin="ms_moe_maker.abliterate.heretic.scorers.kl_divergence.KLDivergence",
                 optimization="minimize",
             ),
         ],

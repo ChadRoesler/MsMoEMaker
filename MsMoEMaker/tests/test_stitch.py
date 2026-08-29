@@ -20,7 +20,8 @@ import types
 
 import pytest
 
-from ms_moe_maker import stitch, stages as st
+from ms_moe_maker.moe import stitch
+from ms_moe_maker.run import stages as st
 
 
 class TestQuantisationGuard:

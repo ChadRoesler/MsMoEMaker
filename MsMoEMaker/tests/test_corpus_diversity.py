@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from ms_moe_maker import data as d
+from ms_moe_maker.data import synth as d
 
 
 class TestRepoLabel:
@@ -142,8 +142,8 @@ class TestPerRepoCap:
 
 
 def test_per_repo_cap_is_a_recipe_knob():
-    from ms_moe_maker.recipe import parse
-    from ms_moe_maker import config as cfg_mod
+    from ms_moe_maker.config.recipe import parse
+    from ms_moe_maker.config import pipeline as cfg_mod
     base = {
         "schema_version": 1, "name": "t", "size": "0.5B",
         "experts": [{"name": "a",
@@ -217,8 +217,8 @@ def test_max_shards_is_a_recipe_knob():
     """It was hardcoded at 80, so a recipe setting it parsed fine and did
     nothing - and the run then failed for the reason the setting existed to
     prevent."""
-    from ms_moe_maker.recipe import parse
-    from ms_moe_maker import config as cfg_mod
+    from ms_moe_maker.config.recipe import parse
+    from ms_moe_maker.config import pipeline as cfg_mod
     base = {
         "schema_version": 1, "name": "t", "size": "0.5B",
         "experts": [{"name": "a",
@@ -231,7 +231,7 @@ def test_max_shards_is_a_recipe_knob():
 
 
 def test_a_floor_above_the_ceiling_is_refused_at_validate():
-    from ms_moe_maker.recipe import parse, validate
+    from ms_moe_maker.config.recipe import parse, validate
     rec, _ = parse({
         "schema_version": 1, "name": "t", "size": "0.5B",
         "experts": [{"name": "a",
@@ -252,7 +252,7 @@ def test_a_mix_the_ceiling_cannot_fill_is_refused_at_validate():
     specialist, and then starves the gate - reported as a router that would
     not learn. Two seconds on a laptop beats four hours on the Spark.
     """
-    from ms_moe_maker.recipe import parse, validate
+    from ms_moe_maker.config.recipe import parse, validate
     rec, _ = parse({
         "schema_version": 1, "name": "t", "size": "0.5B",
         "experts": [{"name": "a",
@@ -267,7 +267,7 @@ def test_a_mix_the_ceiling_cannot_fill_is_refused_at_validate():
 
 
 def test_a_ceiling_that_can_feed_the_mix_is_not_refused():
-    from ms_moe_maker.recipe import parse, validate
+    from ms_moe_maker.config.recipe import parse, validate
     rec, _ = parse({
         "schema_version": 1, "name": "t", "size": "0.5B",
         "experts": [{"name": "a",

@@ -276,7 +276,7 @@ def cross_domain_loss(expert_dirs: Dict[str, str],
     One model resident at a time, fp16, reservoir-sampled corpora - the same
     discipline eval.py learned the hard way on a unified-memory box.
     """
-    from . import eval as ev
+    from ..eval import harness as ev
 
     ok, reason = ev._torch_available()
     if not ok:

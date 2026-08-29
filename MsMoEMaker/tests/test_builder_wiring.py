@@ -22,8 +22,8 @@ import types
 
 import pytest
 
-from ms_moe_maker import builder
-from ms_moe_maker.recipe import parse
+from ms_moe_maker.run import builder
+from ms_moe_maker.config.recipe import parse
 
 
 @pytest.fixture
@@ -107,20 +107,24 @@ def wired(tmp_path, monkeypatch, request):
     torch_stub.cuda = types.SimpleNamespace(
         is_available=lambda: False, empty_cache=lambda: None)
 
-    # BOTH sys.modules AND the package attribute.
+    # THE PACKAGE ATTRIBUTE, now that the modules live in subpackages.
     #
-    # `from . import router as router_mod` reads the ATTRIBUTE on the parent
-    # package once that package has one - which it does as soon as any earlier
-    # test imported the real module. Patching sys.modules alone therefore
-    # worked when this file ran on its own and silently did nothing in a full
-    # suite run, which is the worst way for a fixture to be wrong: green
-    # in isolation, green-looking in aggregate, testing the real modules.
-    import ms_moe_maker
-    for name, mod in (("data", data_mod), ("finetune", ft),
-                      ("stitch", stitch), ("router", router),
-                      ("export", export)):
-        monkeypatch.setitem(sys.modules, f"ms_moe_maker.{name}", mod)
-        monkeypatch.setattr(ms_moe_maker, name, mod, raising=False)
+    # `from ..data import synth as data_mod` reads the ATTRIBUTE `synth` on
+    # the data package - which the package's __init__ set the moment the real
+    # module was imported. Patching sys.modules alone therefore worked when
+    # this file ran on its own and silently did nothing in a full suite run,
+    # which is the worst way for a fixture to be wrong: green in isolation,
+    # green-looking in aggregate, testing the real modules. Patch the
+    # attribute each import site actually reads.
+    import ms_moe_maker.data as _data_pkg
+    import ms_moe_maker.moe as _moe_pkg
+    import ms_moe_maker.train as _train_pkg
+    import ms_moe_maker.run as _run_pkg
+    monkeypatch.setattr(_data_pkg, "synth", data_mod)
+    monkeypatch.setattr(_train_pkg, "finetune", ft)
+    monkeypatch.setattr(_train_pkg, "router", router)
+    monkeypatch.setattr(_moe_pkg, "stitch", stitch)
+    monkeypatch.setattr(_moe_pkg, "export", export)
     monkeypatch.setitem(sys.modules, "torch", torch_stub)
 
     # preflight would want a real box; it is not what this file tests
@@ -128,8 +132,7 @@ def wired(tmp_path, monkeypatch, request):
     pf.run = lambda config, recipe, **kw: types.SimpleNamespace(
         ok=True, warnings=[], failures=[], checks=[])
     pf.render = lambda p: []
-    monkeypatch.setitem(sys.modules, "ms_moe_maker.preflight", pf)
-    monkeypatch.setattr(ms_moe_maker, "preflight", pf, raising=False)
+    monkeypatch.setattr(_run_pkg, "preflight", pf)
 
     rec, _ = parse(getattr(request, "param", None) or {
         "schema_version": 1, "name": "t", "size": "0.5B",
@@ -192,7 +195,7 @@ class TestRouterRefusesTheWrongShape:
     with the reason instead of ten minutes in with an errno."""
 
     def test_directories_are_refused_by_name(self, tmp_path):
-        from ms_moe_maker.router import train_router
+        from ms_moe_maker.train.router import train_router
         d = tmp_path / "specialist_python"
         d.mkdir()
         cfg = types.SimpleNamespace(output_root=str(tmp_path), force=False)

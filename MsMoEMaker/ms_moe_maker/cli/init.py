@@ -86,7 +86,7 @@ def _write_defaults_template(args) -> int:
     example was a file in a repo they might never open. Refuses to clobber,
     because the file this overwrites is somebody's machine configuration.
     """
-    from .. import defaults as _defaults
+    from ..config import defaults as _defaults
     target = getattr(args, "output", "") or ""
     if target == "-":
         print(_defaults_template_body())
@@ -119,7 +119,7 @@ def _cmd_init(args):
     present but commented out. Uncommenting is a much smaller ask than
     inventing.
     """
-    from ..template import TEMPLATES, get_template
+    from ..config.templates import TEMPLATES, get_template
 
     if getattr(args, "defaults_template", False):
         return _write_defaults_template(args)

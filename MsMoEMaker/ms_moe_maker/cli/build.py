@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..events import Events
+from ..run.events import Events
 from ._common import _load_recipe
 
 
@@ -36,9 +36,9 @@ def _cmd_build(args):
         say(f"  · {w}")
         events.warning(w)
 
-    from ..config import build_config
-    from ..levers import translate
-    from ..runner import Runner
+    from ..config.pipeline import build_config
+    from ..config.levers import translate
+    from ..run.runner import Runner
 
     config = build_config(rec, force=args.force, dryrun=args.dryrun)
     translation = translate(rec, force=args.force, dryrun=args.dryrun)
@@ -47,7 +47,7 @@ def _cmd_build(args):
     # me"; build_id answers "will my machine build what yours did". They stopped
     # being the same question when defaults moved onto the box.
     try:
-        from ..config import build_id as _bid
+        from ..config.pipeline import build_id as _bid
         _build = _bid(config)
     except Exception:
         _build = "?"
@@ -57,7 +57,7 @@ def _cmd_build(args):
     # moment a defaults file could redefine one: two machines can both say
     # `tier=spark` and mean different sizes, ranks and quants.
     try:
-        from ..config import tier_table as _tt
+        from ..config.pipeline import tier_table as _tt
         _spec = _tt(rec)[config.tier]
         say(f"  tier     {config.tier}: {_spec.max_vram_gb} GB, "
             f"default {_spec.default_size}, lora_r {_spec.default_lora_r}, "
@@ -123,7 +123,7 @@ def _cmd_build(args):
         # a five-field tier definition should not push the disk checks off the
         # screen. `validate` is the command you run when something is
         # surprising, so that one lists every leaf.
-        from .. import defaults as _dm
+        from ..config import defaults as _dm
         _blocks, _leaves = {}, []
         for _k, _v in sorted(prov.items()):
             _top = _k.split(".")[0]
@@ -173,8 +173,8 @@ def _cmd_build(args):
         # what would stop it. Preflight runs here too - the whole point is
         # that it costs nothing, so there is no reason to make someone start a
         # build to find out their corpus path is wrong.
-        from .. import preflight as _pf
-        from .. import stages as _st
+        from ..run import preflight as _pf
+        from ..run import stages as _st
 
         # NOT offline. --plan exists to answer "what would stop this", and a
         # dead model or dataset id is the most common answer. It used to skip

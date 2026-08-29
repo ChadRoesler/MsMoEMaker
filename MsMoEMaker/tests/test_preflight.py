@@ -9,10 +9,10 @@ import types
 
 import pytest
 
-from ms_moe_maker import preflight as pf
-from ms_moe_maker.evalrecord import FAIL, PASS, UNMEASURABLE
-from ms_moe_maker.preflight import WARN
-from ms_moe_maker.recipe import parse
+from ms_moe_maker.run import preflight as pf
+from ms_moe_maker.eval.record import FAIL, PASS, UNMEASURABLE
+from ms_moe_maker.run.preflight import WARN
+from ms_moe_maker.config.recipe import parse
 
 
 def _cfg(tmp_path, **over):
@@ -172,7 +172,7 @@ class TestDatasetReachability:
     """
 
     def _recipe(self, experts):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, _ = parse({"schema_version": 1, "name": "t", "experts": experts})
         return rec
 
@@ -201,7 +201,7 @@ class TestDatasetReachability:
         monkeypatch.setitem(sys.modules, "huggingface_hub", mod)
 
     def test_a_dead_repo_is_a_failure_with_a_remedy(self, monkeypatch):
-        import ms_moe_maker.preflight as mod
+        import ms_moe_maker.run.preflight as mod
 
         class _Api:
             def dataset_info(self, repo):
@@ -219,8 +219,8 @@ class TestDatasetReachability:
     def test_stack_sources_check_the_corpus_repo(self, monkeypatch):
         """A `stack` expert names a language, not a repo - but the scan still
         pulls from one, so that is what gets checked."""
-        import ms_moe_maker.preflight as mod
-        from ms_moe_maker.data import STACK_REPO
+        import ms_moe_maker.run.preflight as mod
+        from ms_moe_maker.data.synth import STACK_REPO
         seen = []
 
         class _Api:
@@ -237,7 +237,7 @@ class TestDatasetReachability:
 
     def test_one_request_per_repo_not_per_expert(self, monkeypatch):
         """Four stack experts is still one corpus."""
-        import ms_moe_maker.preflight as mod
+        import ms_moe_maker.run.preflight as mod
         seen = []
 
         class _Api:
@@ -255,13 +255,13 @@ class TestDatasetReachability:
         """A reachability check against a merely-similar id is worse than none,
         because it passes."""
         import inspect
-        from ms_moe_maker import data
+        from ms_moe_maker.data import synth as data
         src = inspect.getsource(data._collect_from_shards)
         assert "STACK_REPO" in src
         assert data.STACK_REPO.count("/") == 1
 
     def test_local_sources_need_no_network(self, monkeypatch):
-        import ms_moe_maker.preflight as mod
+        import ms_moe_maker.run.preflight as mod
         calls = []
 
         class _Api:
@@ -279,7 +279,7 @@ class TestDatasetReachability:
     def test_a_missing_hub_is_unmeasurable_not_a_failure(self, monkeypatch):
         """On a base install the client is absent. That blocks nothing."""
         import sys
-        import ms_moe_maker.preflight as mod
+        import ms_moe_maker.run.preflight as mod
         monkeypatch.setitem(sys.modules, "huggingface_hub", None)
         out = pf.Preflight()
         mod._check_datasets(out, self._recipe([

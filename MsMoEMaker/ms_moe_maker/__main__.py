@@ -23,8 +23,8 @@ import json
 import os
 import sys
 
-from . import _describe as _d
-from . import hardware
+from .box import describe as _d
+from .box import hardware
 
 
 def _box_defaults():
@@ -35,7 +35,7 @@ def _box_defaults():
     which is the difference between showing a number and explaining it.
     """
     try:
-        from . import defaults as _defaults
+        from .config import defaults as _defaults
         resolved, prov, warns = _defaults.resolve()
         digests = _defaults.file_digests()
         layers = [{"label": label, "path": path,
@@ -62,7 +62,7 @@ def _box_registry_errors():
     which predates this key and stays where it is.)
     """
     errs = []
-    for mod, label in (("corpus", "corpus kind"), ("validators", "validator")):
+    for mod, label in (("data.corpus", "corpus kind"), ("config.validators", "validator")):
         try:
             m = __import__(f"ms_moe_maker.{mod}", fromlist=[mod])
             errs.extend(f"{label} registry: {e}" for e in m.load_errors())
@@ -79,7 +79,7 @@ def _box_validators():
     degrades to an empty list rather than taking the contract down.
     """
     try:
-        from . import validators as _v
+        from .config import validators as _v
         return _v.describe()
     except Exception:
         return []
@@ -95,7 +95,7 @@ def _box_reasoning():
     contract test exists to police, except nothing was policing this one.
     """
     try:
-        from . import reasoning as _rz
+        from .config import reasoning as _rz
         return {**_rz.describe(), "warnings": _rz.load_errors()}
     except Exception:
         return {"styles": [], "families": [], "warnings": []}
@@ -109,7 +109,7 @@ def _box_tiers():
     degrade to the floor, never take the contract down with it.
     """
     try:
-        from . import defaults as _defaults
+        from .config import defaults as _defaults
         box, _, _ = _defaults.resolve()
         table, _ = hardware.merge_tiers(box.get("tiers"))
         return sorted(table)
@@ -195,7 +195,7 @@ def _box_corpus_kinds():
     Names stay one comprehension away: [k["name"] for k in kinds].
     """
     try:
-        from . import corpus
+        from .data import corpus
         return corpus.describe()
     except Exception:
         return []
@@ -281,7 +281,7 @@ def main(argv=None):
     # Load `.env` (HF_TOKEN, HF_HOME, MSMOE_*) before anything touches the
     # network or the config. The shell still wins over the file, so an
     # explicit export or `huggingface-cli login` always takes precedence.
-    from .dotenv import load_dotenv
+    from .box.dotenv import load_dotenv
     load_dotenv()
     
     ap = argparse.ArgumentParser(

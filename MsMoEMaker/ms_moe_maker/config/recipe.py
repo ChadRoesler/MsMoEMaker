@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import corpus
+from ..data import corpus
 
 
 SCHEMA_VERSION = 1
@@ -325,7 +325,7 @@ class Roots:
 class Abliterate:
     """The `abliterate:` block. Decensor the base before training specialists.
 
-    Runs the vendored Heretic core (ms_moe_maker.heretic) on the resolved base,
+    Runs the vendored Heretic core (ms_moe_maker.abliterate.heretic) on the resolved base,
     then points the build at the decensored result. `abliterate: true` is the
     on-ramp; a mapping customises the knobs below.
     """
@@ -438,7 +438,7 @@ def _apply_template(data: Dict[str, Any]) -> Dict[str, Any]:
     Template fields fill in wherever the recipe dict is empty / missing.
     The recipe's own values always win.
     """
-    from .template import apply_template
+    from .templates import apply_template
 
     tpl_name = data.get("template")
     if not tpl_name:
@@ -615,7 +615,7 @@ def load(path: str, defaults_path: Optional[str] = None,
     _, _, _rz_warns = _rz.load()
     dwarns = list(dwarns) + _rz_warns
 
-    from . import hardware as _hw
+    from ..box import hardware as _hw
     _table, _tier_warns = _hw.merge_tiers(resolved.get("tiers"))
     dwarns = list(dwarns) + _tier_warns
     _named = getattr(getattr(rec, "runtime", None), "hardware_tier", "")
@@ -668,7 +668,7 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     # can fine-tune but cannot stitch. Catch it here, where it costs two
     # seconds on a laptop, not at stage 4 after every specialist has trained.
     if rec.base:
-        from .config import SUPPORTED_BASE_HINTS, SUPPORTED_MOE_ARCHS
+        from .pipeline import SUPPORTED_BASE_HINTS, SUPPORTED_MOE_ARCHS
         low = rec.base.lower()
         if not any(hint in low for hint in SUPPORTED_BASE_HINTS):
             errs.append(
@@ -877,7 +877,7 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     # short of quota on every expert - hours later, reported as a gate that
     # would not learn. Refuse in two seconds on a laptop instead.
     if rec.corpus.max_samples > 0:
-        from .config import router_doc_need
+        from .pipeline import router_doc_need
         _mix = (rec.corpus.router_mix_total
                 if rec.corpus.router_mix_total > 0 else 16_000)
         _frac = (rec.router.agent_mix_fraction
@@ -918,7 +918,7 @@ def resolve(rec: Recipe) -> Dict[str, Any]:
     # Roots come from the real resolver, not rec.roots verbatim: the raw
     # templates still carry "{size}", and rec.size is "auto" in any recipe that
     # lets the tier pick. resolve_run_roots answers both at once.
-    from .config import resolve_run_roots  # lazy: keep the base import light
+    from .pipeline import resolve_run_roots  # lazy: keep the base import light
     roots = resolve_run_roots(rec)
     return {
         "recipe_id": rec.recipe_id(),

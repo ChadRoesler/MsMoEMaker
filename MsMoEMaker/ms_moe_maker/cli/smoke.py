@@ -8,13 +8,13 @@ from ._common import _build_output_dir, _find_gguf, _load_recipe
 
 def _cmd_smoke(args):
     """Smoke-test the GGUF model — proves it generates outside Python."""
-    from ..export import smoke_gguf
+    from ..moe.export import smoke_gguf
     
     rec, errs, warns = _load_recipe(args.recipe, defaults_path=getattr(args, 'defaults', None))
     if rec is None:
         return 1
     
-    from ..config import build_config
+    from ..config.pipeline import build_config
     config = build_config(rec)
 
     output_dir = _build_output_dir(rec)

@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from ms_moe_maker import experts as ex
-from ms_moe_maker import stages as st
+from ms_moe_maker.train import experts as ex
+from ms_moe_maker.run import stages as st
 
 
 def _write_cfg(tmp_path, **cfg):
@@ -223,13 +223,13 @@ def test_the_legacy_runner_plans_no_gate():
 
 
 def test_experts_is_a_declared_eval_mode():
-    from ms_moe_maker import _describe
+    from ms_moe_maker.box import describe as _describe
     assert "experts" in _describe.EVAL_MODES
     assert list(_describe.DESCRIBE["eval_modes"]) == list(_describe.EVAL_MODES)
 
 
 def test_unknown_eval_mode_names_the_new_one():
-    from ms_moe_maker.eval import run_eval
+    from ms_moe_maker.eval.harness import run_eval
 
     class _C:
         data_root = "/nope"
@@ -240,7 +240,7 @@ def test_unknown_eval_mode_names_the_new_one():
 
 
 def test_gates_experts_accepts_three_settings():
-    from ms_moe_maker.recipe import parse, validate
+    from ms_moe_maker.config.recipe import parse, validate
     for value, should_error in (("auto", False), ("cheap", False),
                                 ("skip", False), ("sometimes", True)):
         rec, _ = parse({

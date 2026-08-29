@@ -11,5 +11,5 @@ suite, Hugging Face upload, reproducibility/archival machinery, the residual
 geometry/plotting research module (`analyzer`), multimodal dispatch
 (AutoModelForImageTextToText), and the reproducibility helpers.
 
-The headless entry point is `ms_moe_maker.heretic.abliterate.run_abliteration`.
+The headless entry point is `ms_moe_maker.abliterate.heretic.abliterate.run_abliteration`.
 """

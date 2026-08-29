@@ -1,7 +1,7 @@
 """`abliterate.base` stage — decensor the base with the vendored Heretic core.
 
 The Heretic core runs in its OWN process (`python -m
-ms_moe_maker.heretic.abliterate`), so its process-global state — torch grad
+ms_moe_maker.abliterate.heretic.abliterate`), so its process-global state — torch grad
 mode, seeds, logging verbosity, and its CUDA context — dies with the child
 instead of leaking into the finetune stages. The stage writes a settings JSON,
 spawns the child, and the builder repoints `config.base` at the result so every
@@ -55,7 +55,7 @@ def abliterate_base(config) -> str:
         json.dump(payload, fh, indent=2)
 
     completed = subprocess.run(
-        [sys.executable, "-m", "ms_moe_maker.heretic.abliterate",
+        [sys.executable, "-m", "ms_moe_maker.abliterate.heretic.abliterate",
          "--settings", settings_path],
     )
     if completed.returncode != 0:

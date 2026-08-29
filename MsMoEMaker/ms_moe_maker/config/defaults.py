@@ -125,8 +125,8 @@ def _user_path() -> str:
 
 def packaged_path(name: str) -> str:
     """A data file that ships inside the package (ms_moe_maker/assets/)."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "assets", name)
+    return os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "assets", name))
 
 
 def user_path(env_var: str, rel: str) -> str:

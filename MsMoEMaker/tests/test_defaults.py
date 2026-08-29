@@ -10,8 +10,8 @@ import os
 
 import pytest
 
-from ms_moe_maker import defaults as D
-from ms_moe_maker import recipe as R
+from ms_moe_maker.config import defaults as D
+from ms_moe_maker.config import recipe as R
 
 
 def _write(tmp_path, name, body):
@@ -205,7 +205,7 @@ class TestBoxTiers:
         return str(p)
 
     def test_a_box_can_redefine_a_tier(self, tmp_path):
-        from ms_moe_maker import config as C
+        from ms_moe_maker.config import pipeline as C
         box = _write(tmp_path, "box.yaml",
                      "tiers:\n  spark:\n    default_size: 14B\n"
                      "    default_lora_r: 96\n")
@@ -220,7 +220,7 @@ class TestBoxTiers:
         assert cfg.lora_r == 96
 
     def test_a_box_can_add_a_tier_the_tool_never_heard_of(self, tmp_path):
-        from ms_moe_maker import config as C
+        from ms_moe_maker.config import pipeline as C
         box = _write(tmp_path, "box.yaml",
                      "runtime:\n  hardware_tier: orin_agx\n"
                      "tiers:\n  orin_agx:\n    like: spark\n"
@@ -259,7 +259,7 @@ class TestBoxTiers:
         assert any("default_sizee" in w for w in warns), warns
 
     def test_a_box_can_point_a_size_at_its_own_checkpoint(self, tmp_path):
-        from ms_moe_maker import config as C
+        from ms_moe_maker.config import pipeline as C
         box = _write(tmp_path, "box.yaml",
                      'models:\n  "0.5B":\n'
                      "    abliterated: /mnt/models/local-0.5B\n")
@@ -269,7 +269,7 @@ class TestBoxTiers:
         assert C.build_config(rec, dryrun=False).base == "/mnt/models/local-0.5B"
 
     def test_a_bare_string_is_the_kind_reading(self, tmp_path):
-        from ms_moe_maker import config as C
+        from ms_moe_maker.config import pipeline as C
         box = _write(tmp_path, "box.yaml", 'models:\n  "0.5B": /mnt/m/tiny\n')
         rec, _ = R.load(self._recipe(tmp_path, size="0.5B"), defaults_path=box,
                         include_user_defaults=False)
@@ -281,12 +281,12 @@ class TestBoxTiers:
         rec, warns = R.load(
             self._recipe(tmp_path, tiers={"spark": {"default_size": "0.5B"}}),
             include_user_defaults=False)
-        from ms_moe_maker import config as C
+        from ms_moe_maker.config import pipeline as C
         assert C.tier_table(rec)["spark"].default_size == "32B"
         assert any("tiers" in w and "IGNORED" in w for w in warns), warns
 
     def test_parse_resolves_against_the_floor_alone(self, tmp_path, monkeypatch):
-        from ms_moe_maker import config as C
+        from ms_moe_maker.config import pipeline as C
         mine = _write(tmp_path, "mine.yaml",
                       "tiers:\n  spark:\n    default_size: 0.5B\n")
         monkeypatch.setenv(D.USER_ENV, mine)

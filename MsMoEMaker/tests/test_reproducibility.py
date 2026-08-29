@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from ms_moe_maker import config as C
-from ms_moe_maker import manifest as mf
-from ms_moe_maker import recipe as R
+from ms_moe_maker.config import pipeline as C
+from ms_moe_maker.run import manifest as mf
+from ms_moe_maker.config import recipe as R
 
 
 def _rec(**extra):
@@ -123,9 +123,9 @@ class TestDrift:
     """
 
     def _runner(self, tmp_path, rec):
-        from ms_moe_maker.events import Events
-        from ms_moe_maker.levers import translate
-        from ms_moe_maker.runner import Runner
+        from ms_moe_maker.run.events import Events
+        from ms_moe_maker.config.levers import translate
+        from ms_moe_maker.run.runner import Runner
         return Runner(rec, None, translate(rec), Events(enabled=False),
                       cwd=tmp_path, builder=True)
 

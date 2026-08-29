@@ -13,9 +13,9 @@ import types
 
 import pytest
 
-from ms_moe_maker import corpus
-from ms_moe_maker.data import _corpus_from_tarball, _collect_gh
-from ms_moe_maker.recipe import parse, validate
+from ms_moe_maker.data import corpus
+from ms_moe_maker.data.synth import _corpus_from_tarball, _collect_gh
+from ms_moe_maker.config.recipe import parse, validate
 
 
 def _cfg(**over):
@@ -163,7 +163,7 @@ class TestCollectGh:
         """An under-filled corpus must not be written and called done — the
         next stage would train an expert on almost nothing and report success.
         """
-        import ms_moe_maker.data as data
+        import ms_moe_maker.data.synth as data
         monkeypatch.setattr(data, "_fetch_gh_tarball",
                             lambda repo, ref: (_tarball({"a.md": BODY}), "HEAD"))
         out = tmp_path / "o.jsonl"
@@ -173,7 +173,7 @@ class TestCollectGh:
         assert not out.exists()
 
     def test_a_good_fetch_writes_jsonl_rows(self, tmp_path, monkeypatch):
-        import ms_moe_maker.data as data
+        import ms_moe_maker.data.synth as data
         files = {f"docs/{i}.md": BODY + str(i) for i in range(4)}
         monkeypatch.setattr(data, "_fetch_gh_tarball",
                             lambda repo, ref: (_tarball(files), "main"))
@@ -186,7 +186,7 @@ class TestCollectGh:
         assert all("text" in r for r in rows)
 
     def test_a_failed_fetch_writes_nothing(self, tmp_path, monkeypatch):
-        import ms_moe_maker.data as data
+        import ms_moe_maker.data.synth as data
         monkeypatch.setattr(data, "_fetch_gh_tarball", lambda repo, ref: (None, ""))
         out = tmp_path / "o.jsonl"
         assert data._collect_gh("o/r", "**/*.md", None, None, str(out),

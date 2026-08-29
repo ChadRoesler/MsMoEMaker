@@ -1,7 +1,7 @@
 """Tests for ms_moe_maker/config.py — recipe -> PipelineConfig bridge."""
 
 import pytest
-from ms_moe_maker import config
+from ms_moe_maker.config import pipeline as config
 
 
 class TestModelSizes:
@@ -236,8 +236,8 @@ class TestBuildConfig:
     """build_config creates a PipelineConfig from a Recipe."""
 
     def test_invalid_size_auto_fills_from_tier(self):
-        from ms_moe_maker.recipe import Recipe, Expert, Source
-        from ms_moe_maker.config import MODEL_SIZES
+        from ms_moe_maker.config.recipe import Recipe, Expert, Source
+        from ms_moe_maker.config.pipeline import MODEL_SIZES
         recipe = Recipe(
             name="test", base="Qwen/Qwen2.5-0.5B",
             experts=[Expert(
@@ -250,7 +250,7 @@ class TestBuildConfig:
         assert pc.size in MODEL_SIZES, f"size {pc.size} not in MODEL_SIZES"
 
     def test_valid_0_5b_resolves_base(self):
-        from ms_moe_maker.recipe import Recipe, Expert, Source
+        from ms_moe_maker.config.recipe import Recipe, Expert, Source
         recipe = Recipe(
             name="test", base="Qwen/Qwen2.5-0.5B",
             experts=[Expert(
@@ -284,7 +284,7 @@ class TestBuildConfig:
             "warns about exactly this")
 
     def test_build_config_sets_data_and_output_roots(self):
-        from ms_moe_maker.recipe import Recipe, Expert, Source
+        from ms_moe_maker.config.recipe import Recipe, Expert, Source
         import os
         old = os.environ.get("MSMOE_DRYRUN")
         try:
@@ -320,7 +320,7 @@ class TestOneRunDirForEverybody:
     """
 
     def _recipe(self, size="auto"):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, _ = parse({
             "schema_version": 1, "name": "t", "size": size,
             "experts": [
@@ -364,7 +364,7 @@ class TestDryrunReachesTheBudgets:
     """
 
     def _recipe(self):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, _ = parse({
             "schema_version": 1, "name": "t", "size": "0.5B",
             "experts": [
@@ -422,7 +422,7 @@ class TestCorpusKnobs:
     """
 
     def _rec(self, corpus=None):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         body = {"schema_version": 1, "name": "t", "size": "0.5B",
                 "experts": [
                     {"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
@@ -490,7 +490,7 @@ class TestCorpusKnobs:
         """agentcore is SYNTHESISED, not collected, so it does not raise the
         collection floor - but the slice it takes does shrink what the
         collected experts have to cover."""
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         body = {"schema_version": 1, "name": "t", "size": "0.5B",
                 "experts": [
                     {"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
@@ -503,7 +503,7 @@ class TestCorpusKnobs:
         assert with_agent < without
 
     def test_no_experts_means_no_opinion(self):
-        from ms_moe_maker.recipe import Recipe
+        from ms_moe_maker.config.recipe import Recipe
         assert config.router_doc_need(Recipe(), 4_000, 0.15) == 0
         assert config.router_doc_need(self._rec(), 0, 0.15) == 0
 
@@ -532,7 +532,7 @@ class TestCorpusKnobs:
     def test_held_out_fraction_is_resolved_once(self, monkeypatch):
         """router_doc_need and the router's .train split must agree, or the
         raised floor is a lie. Both now derive from held_out_fraction()."""
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         rec, _ = parse({
             "schema_version": 1, "name": "t", "size": "0.5B",
@@ -579,7 +579,7 @@ class TestCorpusKnobs:
     def _shipped(self, name):
         import pathlib
         import pytest
-        from ms_moe_maker.recipe import load, validate
+        from ms_moe_maker.config.recipe import load, validate
         p = (pathlib.Path(config.__file__).parent.parent / name)
         if not p.is_file():
             pytest.skip(f"{name} not present in this checkout")
@@ -694,7 +694,7 @@ class TestRouterKnobs:
         return data
 
     def _cfg(self, tmp_path, **router):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, _ = parse(self._data(**router))
         return config.build_config(rec, dryrun=True)
 
@@ -726,7 +726,7 @@ class TestRouterKnobs:
         the README for months while not being in _KNOWN_TOP, so a user who
         wrote exactly what the docs said got their block silently ignored.
         Adding a dataclass is only half of adding a knob."""
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, warns = parse(self._data(lr=1e-3))
         assert not any("router" in w and "IGNORED" in w for w in warns), warns
         assert rec.router.lr == 1e-3
@@ -737,7 +737,7 @@ class TestTopOneRouterGradient:
     gradient from the LM loss and can only drift toward uniform."""
 
     def _rec(self, top_k, norm, n_experts=2):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         langs = ["Python", "C#", "Go", "Rust"][:n_experts]
         rec, _ = parse({
             "schema_version": 1, "name": "t", "size": "0.5B",
@@ -749,17 +749,17 @@ class TestTopOneRouterGradient:
         return rec
 
     def test_top1_with_normalisation_is_refused(self):
-        from ms_moe_maker.recipe import validate
+        from ms_moe_maker.config.recipe import validate
         errs, _ = validate(self._rec(1, True))
         assert any("severs the router from the loss" in e for e in errs), errs
 
     def test_top1_without_normalisation_is_fine(self):
-        from ms_moe_maker.recipe import validate
+        from ms_moe_maker.config.recipe import validate
         errs, _ = validate(self._rec(1, False))
         assert not any("norm_topk_prob" in e for e in errs), errs
 
     def test_top2_still_prefers_normalisation(self):
-        from ms_moe_maker.recipe import validate
+        from ms_moe_maker.config.recipe import validate
         errs, warns = validate(self._rec(2, False, n_experts=3))
         assert not any("severs" in e for e in errs), errs
         assert any("0.40x at init" in w for w in warns), warns
@@ -767,7 +767,7 @@ class TestTopOneRouterGradient:
     def test_the_degenerate_hint_names_both_fields(self):
         """The hint that sends you to top-1 must also send you to
         norm_topk_prob=false, or it walks you into the other trap."""
-        from ms_moe_maker.recipe import validate
+        from ms_moe_maker.config.recipe import validate
         _, warns = validate(self._rec(2, True, n_experts=2))
         hint = [w for w in warns if "experts_per_tok=2" in w]
         assert hint, warns
@@ -781,7 +781,7 @@ class TestLoraKnobs:
     target_steps looks like it should raise the rank, and never did."""
 
     def _rec(self, **budget):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         data = {
             "schema_version": 1, "name": "t", "size": "0.5B",
             "experts": [{"name": "a",
@@ -833,7 +833,7 @@ class TestToolsExpert:
     """
 
     def _rec(self, tools_expert=False):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         body = {"schema_version": 1, "name": "t", "size": "0.5B",
                 "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
                             {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]}
@@ -861,7 +861,7 @@ class TestToolsExpert:
         assert rec.tools_expert_name == "agentcore"
 
     def test_legacy_agentcore_name_still_means_tools_expert(self):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, _ = parse({
             "schema_version": 1, "name": "t", "size": "0.5B",
             "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
@@ -882,7 +882,7 @@ class TestBaseKind:
     eval handling based on whether the base emits a thinking trace."""
 
     def _rec(self, base="", base_kind="auto"):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         body = {"schema_version": 1, "name": "t", "size": "0.5B",
                 "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
                             {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]}
@@ -919,7 +919,7 @@ class TestTeacherFor:
     teacher."""
 
     def _cfg(self, monkeypatch, **expert_source):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         rec, _ = parse({
             "schema_version": 1, "name": "t", "size": "0.5B",
             "experts": [{"name": "a", "source": expert_source}]})
@@ -946,7 +946,7 @@ class TestReasoningTypeResolution:
     `<think>` block as the answer."""
 
     def _rec(self, reasoning_expert=False, base=""):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         src = {"kind": "stack", "language": "Python"}
         if reasoning_expert:
             src["reasoning"] = True
@@ -1003,7 +1003,7 @@ class TestTeacherMaxNewKnobs:
 
     @staticmethod
     def _rec(budget=None):
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config.recipe import parse
         body = {"schema_version": 1, "name": "t", "size": "0.5B",
                 "experts": [{"name": "python",
                              "source": {"kind": "stack", "language": "Python"}}]}

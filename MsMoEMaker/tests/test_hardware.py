@@ -1,7 +1,7 @@
 """Tests for the hardware tier definitions."""
 import pytest
 
-from ms_moe_maker import hardware
+from ms_moe_maker.box import hardware
 
 
 class TestTierSpec:
@@ -86,7 +86,7 @@ class TestTiersStayReal:
     does not exist. Pin that every size a tier names actually resolves."""
 
     def test_every_default_and_recommended_size_is_real(self):
-        from ms_moe_maker import config
+        from ms_moe_maker.config import pipeline as config
         for name in hardware.TIERS:
             spec = hardware.get_tier(name)
             assert spec.default_size in config.MODEL_SIZES, (
@@ -98,8 +98,8 @@ class TestTiersStayReal:
     def test_config_reads_hardware_not_a_copy(self, monkeypatch):
         """config.py used to keep _TIER_HINTS/_TIER_RANK and they drifted.
         Assert build_config resolves tier defaults from hardware.TIERS."""
-        from ms_moe_maker import config
-        from ms_moe_maker.recipe import parse
+        from ms_moe_maker.config import pipeline as config
+        from ms_moe_maker.config.recipe import parse
 
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         monkeypatch.delenv("MSMOE_TIER", raising=False)

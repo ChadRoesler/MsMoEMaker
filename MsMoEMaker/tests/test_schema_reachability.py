@@ -51,7 +51,7 @@ ALLOWED_UNREAD: dict = {
 
 
 def _schema_fields():
-    tree = ast.parse((PKG / "recipe.py").read_text(encoding="utf-8"))
+    tree = ast.parse((PKG / "config" / "recipe.py").read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             for stmt in node.body:
@@ -63,7 +63,7 @@ def _consumers():
     """Everything in the package except the schema that declares the fields."""
     out = {}
     for path in PKG.rglob("*.py"):
-        if path.name == "recipe.py" and path.parent == PKG:
+        if path.parent == PKG / "config" and path.name == "recipe.py":
             continue
         out[str(path.relative_to(PKG))] = path.read_text(
             encoding="utf-8", errors="replace")

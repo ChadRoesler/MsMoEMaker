@@ -15,8 +15,8 @@ import random
 import time
 from typing import Dict, List, Optional
 
-from . import config as cfg_module
-from . import stages as st
+from ..config import pipeline as cfg_module
+from ..run import stages as st
 
 
 def router_dir(config) -> str:
@@ -170,7 +170,7 @@ def train_router(config, final_dir: str, safe_names: List[str],
             if os.path.exists(train_split) and os.path.getsize(train_split) > 0:
                 path = train_split
             else:
-                from .eval import _load_or_split
+                from ..eval.harness import _load_or_split
                 path, _ = _load_or_split(path, config.eval_held_out_fraction)
         if not path or not os.path.exists(path):
             print(f"   WARNING: no data for expert {name!r} at {path}")
@@ -237,7 +237,7 @@ def train_router(config, final_dir: str, safe_names: List[str],
                 or ex["src"] in config.reasoning_experts):
             return ex["text"]
         lang = ex["src"]
-        from .config import DISPLAY_LANG
+        from ..config.pipeline import DISPLAY_LANG
         display = DISPLAY_LANG.get(lang, lang)
         prompt = _make_code_prompt(lang, display, config.code_prompt_unnamed_fraction)
         msgs = [{"role": "user", "content": prompt},

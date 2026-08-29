@@ -40,7 +40,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .evalrecord import FAIL, PASS, UNMEASURABLE
+from ..eval.record import FAIL, PASS, UNMEASURABLE
 
 WARN = "warn"
 
@@ -189,7 +189,7 @@ def _check_datasets(pf: Preflight, recipe, offline: bool = False) -> None:
         if kind == "hf" and getattr(src, "repo", ""):
             wanted[src.repo] = e.name
         elif kind == "stack":
-            from .data import STACK_REPO
+            from ..data.synth import STACK_REPO
             wanted.setdefault(STACK_REPO, e.name)
 
     for repo, who in wanted.items():
@@ -281,7 +281,7 @@ def _check_exporter(pf: Preflight, config) -> None:
     "smoke-passed" are different states, so preflight should not collapse
     them into one green tick.
     """
-    from .export import resolve_llama_binary
+    from ..moe.export import resolve_llama_binary
 
     conv = os.path.join(config.llama_cpp_dir, "convert_hf_to_gguf.py")
     cli = resolve_llama_binary(config.llama_cpp_dir, "llama-cli")
@@ -307,7 +307,7 @@ def _check_exporter(pf: Preflight, config) -> None:
 
 def _check_sources(pf: Preflight, recipe) -> None:
     """Anything checkable about the corpora, without fetching them."""
-    from . import corpus as corpus_mod
+    from ..data import corpus as corpus_mod
 
     for e in recipe.experts:
         src = getattr(e, "source", None)

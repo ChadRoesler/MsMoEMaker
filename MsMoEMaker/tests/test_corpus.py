@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from ms_moe_maker import corpus
-from ms_moe_maker import recipe as rp
-from ms_moe_maker import stages as st
+from ms_moe_maker.data import corpus
+from ms_moe_maker.config import recipe as rp
+from ms_moe_maker.run import stages as st
 
 
 # ── the registry ────────────────────────────────────────────────────────────
@@ -157,8 +157,8 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
     """
     import types
 
-    from ms_moe_maker import data as d
-    from ms_moe_maker.recipe import Source
+    from ms_moe_maker.data import synth as d
+    from ms_moe_maker.config.recipe import Source
 
     calls = {"hf": [], "shards": []}
 
@@ -169,7 +169,7 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
 
     def fake_shards(languages, config, callback=None):
         calls["shards"].append(list(languages))
-        from ms_moe_maker import config as cfg_mod
+        from ms_moe_maker.config import pipeline as cfg_mod
         return {cfg_mod.safe_name(l): f"stack:{l}" for l in languages}
 
     monkeypatch.setattr(d, "_collect_hf", fake_hf)

@@ -22,11 +22,11 @@ from pathlib import Path
 
 import pytest
 
-from ms_moe_maker import manifest as mf
-from ms_moe_maker import stages as st
-from ms_moe_maker.events import Events
-from ms_moe_maker.levers import Translation
-from ms_moe_maker.runner import Runner
+from ms_moe_maker.run import manifest as mf
+from ms_moe_maker.run import stages as st
+from ms_moe_maker.run.events import Events
+from ms_moe_maker.config.levers import Translation
+from ms_moe_maker.run.runner import Runner
 
 
 # -- a stand-in recipe -------------------------------------------------------

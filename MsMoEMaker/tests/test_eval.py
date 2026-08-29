@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ms_moe_maker.eval import (
+from ms_moe_maker.eval.harness import (
     EvalResult,
     EvalReport,
     _tokenize_simple,
@@ -23,7 +23,7 @@ from ms_moe_maker.eval import (
     save_eval_report,
     eval_from_manifest,
 )
-from ms_moe_maker.evalrecord import PASS, FAIL, UNMEASURABLE
+from ms_moe_maker.eval.record import PASS, FAIL, UNMEASURABLE
 
 
 # -- metrics ------------------------------------------------------------------
@@ -446,7 +446,7 @@ class TestDegenerateRoutingIsUnmeasurable:
         assert counts[0] != counts[1], "top-1 of 2 must be able to prefer one"
 
     def test_validate_warns_before_the_build(self):
-        from ms_moe_maker.recipe import parse, validate
+        from ms_moe_maker.config.recipe import parse, validate
         rec, _ = parse({
             "schema_version": 1, "name": "t", "moe": {"experts_per_tok": 2},
             "experts": [
@@ -459,7 +459,7 @@ class TestDegenerateRoutingIsUnmeasurable:
 
     def test_the_shipped_flow_recipe_is_measurable(self):
         import pathlib
-        from ms_moe_maker.recipe import load
+        from ms_moe_maker.config.recipe import load
         p = (pathlib.Path(__file__).resolve().parent.parent
              / "recipe.flow-0.5B.yaml")
         if not p.is_file():
@@ -479,14 +479,14 @@ class TestQualityOnRawTextCorpora:
     """
 
     def test_qa_shaped_rows_are_used_directly(self):
-        from ms_moe_maker.eval import _prompt_and_reference
+        from ms_moe_maker.eval.harness import _prompt_and_reference
         for keys in (("prompt", "answer"), ("input", "output"),
                      ("question", "reference")):
             row = {keys[0]: "Q", keys[1]: "A"}
             assert _prompt_and_reference(row) == ("Q", "A"), keys
 
     def test_text_rows_become_a_completion_task(self):
-        from ms_moe_maker.eval import _prompt_and_reference
+        from ms_moe_maker.eval.harness import _prompt_and_reference
         text = "".join(f"line{i}\n" for i in range(10))
         prompt, ref = _prompt_and_reference({"text": text})
         assert prompt and ref
@@ -494,17 +494,17 @@ class TestQualityOnRawTextCorpora:
         assert prompt.endswith("\n"), "split on a line boundary, not mid-token"
 
     def test_content_field_works_too(self):
-        from ms_moe_maker.eval import _prompt_and_reference
+        from ms_moe_maker.eval.harness import _prompt_and_reference
         text = "".join(f"line{i}\n" for i in range(10))
         assert all(_prompt_and_reference({"content": text}))
 
     def test_a_document_too_short_to_split_is_skipped(self):
         """Two lines cannot be halved into a prompt and a meaningful reference."""
-        from ms_moe_maker.eval import _prompt_and_reference
+        from ms_moe_maker.eval.harness import _prompt_and_reference
         assert _prompt_and_reference({"text": "a\nb\n"}) == ("", "")
 
     def test_an_empty_row_is_skipped(self):
-        from ms_moe_maker.eval import _prompt_and_reference
+        from ms_moe_maker.eval.harness import _prompt_and_reference
         assert _prompt_and_reference({}) == ("", "")
 
 
@@ -525,7 +525,7 @@ class TestEvalMemoryDiscipline:
         in builder.py - a function cannot drop a reference it does not own.
         """
         import inspect
-        from ms_moe_maker import eval as ev
+        from ms_moe_maker.eval import harness as ev
         assert hasattr(ev, "release_memory")
         assert not hasattr(ev, "model_cleanup"), (
             "model_cleanup could not free anything; taking the object is the "
@@ -562,7 +562,7 @@ class TestEvalMemoryDiscipline:
         """
         import ast
         import inspect
-        from ms_moe_maker.eval import _load_model, probe_router_discrimination
+        from ms_moe_maker.eval.harness import _load_model, probe_router_discrimination
 
         def code_only(fn):
             tree = ast.parse(inspect.getsource(fn).lstrip())
@@ -584,7 +584,7 @@ class TestEvalMemoryDiscipline:
 
     def test_the_moe_is_loaded_once_not_once_per_expert(self):
         import inspect
-        from ms_moe_maker.eval import run_eval
+        from ms_moe_maker.eval.harness import run_eval
         src = inspect.getsource(run_eval)
         body = src[src.index("if do_quality:"):]
         # the MoE load happens outside the per-expert loop
@@ -594,14 +594,14 @@ class TestEvalMemoryDiscipline:
 
     def test_eval_generation_can_borrow_a_model(self):
         import inspect
-        from ms_moe_maker.eval import eval_generation
+        from ms_moe_maker.eval.harness import eval_generation
         assert "loaded" in inspect.signature(eval_generation).parameters
 
     def test_a_borrowed_model_is_not_freed_by_the_borrower(self):
         """Whoever loads it frees it. Releasing a shared model mid-loop would
         pull it out from under the next call."""
         import inspect
-        from ms_moe_maker.eval import eval_generation
+        from ms_moe_maker.eval.harness import eval_generation
         src = inspect.getsource(eval_generation)
         assert "owns_model" in src
         assert "if owns_model:" in src
@@ -870,7 +870,7 @@ def test_the_router_mix_prefers_the_train_split():
     enough mix ate the very rows the routing probe needs. `.train` is written
     at a fixed seed and is exactly the complement of what eval holds out."""
     import inspect
-    from ms_moe_maker import router
+    from ms_moe_maker.train import router
     src = inspect.getsource(router.train_router)
     assert 'path + ".train"' in src, (
         "the router mix must prefer the .train split so held-out stays held "

@@ -1,7 +1,7 @@
 """Tests for the recipe template system."""
 import pytest
 
-from ms_moe_maker import template
+from ms_moe_maker.config import templates as template
 
 
 class TestGetTemplate:
@@ -98,7 +98,7 @@ class TestApplyTemplate:
         """A shipped template that cannot validate is a broken on-ramp, and it
         breaks at the worst moment: the user's first command. `culinary`
         shipped a local source with an empty path and failed exactly there."""
-        from ms_moe_maker.recipe import parse, validate
+        from ms_moe_maker.config.recipe import parse, validate
         for name in template.TEMPLATES:
             rec, _ = parse({"schema_version": 1, "template": name})
             errs, _ = validate(rec)

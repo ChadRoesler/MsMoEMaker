@@ -43,11 +43,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import corpus
+from ..data import corpus
 from . import manifest as mf
 from . import stages as st
 from .events import Events
-from .levers import Translation
+from ..config.levers import Translation
 
 # -- what the child says, and what it means ----------------------------------
 # Quoted from the pipeline's own prints. Each maps a line to (stage_id, status).
@@ -163,7 +163,7 @@ class Runner:
         # worse than no manifest. A watcher finds an empty-looking run and a
         # resume finds no artifacts, and both look like "nothing happened".
         # Ask build_config once; it is the thing that decides.
-        from . import config as cfg_module
+        from ..config import pipeline as cfg_module
         roots = cfg_module.resolve_run_roots(recipe, dryrun=dryrun)
         self.run_dir = self.cwd / roots["output"]
         self.data_root = self.cwd / roots["data"]
@@ -192,7 +192,7 @@ class Runner:
         # Best-effort: a fingerprint that cannot be computed must not take a
         # build down, it just costs the drift check.
         try:
-            from . import config as _cfg_mod
+            from ..config import pipeline as _cfg_mod
             _c = _cfg_mod.build_config(recipe, dryrun=bool(self.dryrun))
             self.manifest.resolved = _cfg_mod.build_fingerprint(_c)
             self.manifest.build_id = _cfg_mod.build_id(_c)
@@ -289,7 +289,7 @@ class Runner:
             return [], []
         finished = [s.id for s in prev.stages if s.status in (mf.DONE, mf.SKIPPED)]
         try:
-            from .config import fingerprint_diff
+            from ..config.pipeline import fingerprint_diff
             changed = [f"{k}: {was!r} -> {now!r}"
                        for k, was, now in fingerprint_diff(
                            prev.resolved or {}, self.manifest.resolved or {})]

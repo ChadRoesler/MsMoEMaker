@@ -1,8 +1,8 @@
 """The gate axis belongs to the model, not the recipe."""
 import json
 
-from ms_moe_maker import stitch as st_mod
-from ms_moe_maker.eval import run_eval
+from ms_moe_maker.moe import stitch as st_mod
+from ms_moe_maker.eval.harness import run_eval
 
 
 class _Cfg:

@@ -51,7 +51,7 @@ def stub_transformers(monkeypatch):
 
 
 def test_the_callback_implements_every_event(stub_transformers):
-    from ms_moe_maker.finetune import make_heartbeat_callback
+    from ms_moe_maker.train.finetune import make_heartbeat_callback
     cb = make_heartbeat_callback()
     missing = [e for e in EVENTS if not hasattr(cb, e)]
     assert not missing, (
@@ -62,12 +62,12 @@ def test_the_callback_implements_every_event(stub_transformers):
 def test_it_derives_from_trainercallback(stub_transformers):
     """Not 'has the methods' - IS one. The base class is where the no-op
     defaults come from, and new transformers versions add events."""
-    from ms_moe_maker.finetune import make_heartbeat_callback
+    from ms_moe_maker.train.finetune import make_heartbeat_callback
     assert isinstance(make_heartbeat_callback(), stub_transformers.TrainerCallback)
 
 
 def test_on_step_end_still_does_its_job(stub_transformers):
-    from ms_moe_maker.finetune import make_heartbeat_callback
+    from ms_moe_maker.train.finetune import make_heartbeat_callback
     cb = make_heartbeat_callback(print_interval=2, checkpoint_interval=10_000)
     state = types.SimpleNamespace(log_history=[])
     for _ in range(4):
@@ -78,7 +78,7 @@ def test_on_step_end_still_does_its_job(stub_transformers):
 def test_on_step_end_returns_control(stub_transformers):
     """The handler assigns the return value back to `control`; returning None
     silently discards whatever a previous callback asked for."""
-    from ms_moe_maker.finetune import make_heartbeat_callback
+    from ms_moe_maker.train.finetune import make_heartbeat_callback
     cb = make_heartbeat_callback()
     sentinel = object()
     assert cb.on_step_end(None, types.SimpleNamespace(log_history=[]),
@@ -88,7 +88,7 @@ def test_on_step_end_returns_control(stub_transformers):
 def test_a_missing_loss_does_not_crash_the_heartbeat(stub_transformers):
     """log_history can be empty, or hold entries with no 'loss'. A progress
     printer that raises would kill a run it was only meant to describe."""
-    from ms_moe_maker.finetune import make_heartbeat_callback
+    from ms_moe_maker.train.finetune import make_heartbeat_callback
     cb = make_heartbeat_callback(print_interval=1, checkpoint_interval=-1)
     for hist in ([], [{}], [{"loss": 0.5}]):
         cb.on_step_end(None, types.SimpleNamespace(log_history=hist), "ctl")
@@ -97,7 +97,7 @@ def test_a_missing_loss_does_not_crash_the_heartbeat(stub_transformers):
 def test_no_bare_callback_is_handed_to_the_trainer():
     """Static guard: the trainer must receive the factory's product."""
     import inspect
-    from ms_moe_maker import finetune
+    from ms_moe_maker.train import finetune
     src = inspect.getsource(finetune)
     assert "callbacks=[make_heartbeat_callback()]" in src
     assert "callbacks=[HeartbeatCallback()]" not in src, (
@@ -108,7 +108,7 @@ def test_no_bare_callback_is_handed_to_the_trainer():
 def test_finetune_imports_without_transformers():
     """The reason the factory exists at all."""
     import importlib
-    import ms_moe_maker.finetune as f
+    import ms_moe_maker.train.finetune as f
     importlib.reload(f)
     assert "torch" not in sys.modules or True   # nothing heavy at import time
     assert callable(f.make_heartbeat_callback)

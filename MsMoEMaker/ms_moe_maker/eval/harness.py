@@ -39,10 +39,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import config as cfg_module
-from . import stages as st
-from . import manifest as mf
-from .evalrecord import ERROR, FAIL, PASS, UNMEASURABLE
+from ..config import pipeline as cfg_module
+from ..run import stages as st
+from ..run import manifest as mf
+from .record import ERROR, FAIL, PASS, UNMEASURABLE
 
 
 @dataclass
@@ -972,7 +972,7 @@ def _split_reasoning_answer(text: str, style) -> Tuple[str, bool]:
     trace - and a scorer that splits differently from the writer is measuring
     a different artifact than the one on disk. reasoning.split() is both.
     """
-    from .reasoning import split
+    from ..config.reasoning import split
     _think, answer, reasoned = split(text, style)
     return answer, reasoned
 
@@ -1493,7 +1493,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     # differ and whether routing correctly lowers the loss - and those are
     # measured here.
     if do_experts:
-        from . import experts as experts_mod
+        from ..train import experts as experts_mod
         expert_dirs = {
             n: str(output_root / st.FINETUNE_ARTIFACT.format(expert=n))
             for n in expert_order}
@@ -1536,7 +1536,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
 
     # ── quality: real generation against held-out references ───────────────
     if do_quality:
-        from .config import reasoning_style_of_config
+        from ..config.pipeline import reasoning_style_of_config
         # None → score the whole output. Otherwise the tags this RUN wrote its
         # traces with, carried on the config rather than looked up again: the
         # table is a file now, and a scorer splitting on different delimiters

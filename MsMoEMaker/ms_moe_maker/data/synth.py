@@ -36,8 +36,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # costs the no-torch-on-a-laptop promise nothing and removes the whole class of
 # failure for this name. Heavy imports (torch, transformers, datasets) stay
 # inside their functions, where they belong.
-from . import config as cfg
-from . import stages as st
+from ..config import pipeline as cfg
+from ..run import stages as st
 
 # ---------------------------------------------------------------------------
 # Corpus collection
@@ -892,7 +892,7 @@ def _collect_from_shards(languages: List[str], config,
         # has to wonder whether the build's numbers and the checker's numbers
         # came from the same arithmetic.
         try:
-            from . import corpushealth as _ch
+            from . import health as _ch
             print(_ch.format_health(_ch.inspect(out_path)))
         except Exception as exc:            # advisory: never fail the stage
             print(f"   [warn] corpus health check skipped: {exc}")
@@ -1064,7 +1064,7 @@ def _load_templates(path: Optional[str] = None) -> List[str]:
     missing or empty.
     """
     import yaml
-    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
     if not path:
         resolved = os.path.join(here, "generic_templates.yaml")
     elif os.path.sep in path or path.endswith((".yaml", ".yml")):
@@ -1095,8 +1095,8 @@ def generate_reasoning_traces(config, expert_name, callback=None,
 
     Returns the JSONL path, or None if generation was skipped.
     """
-    from . import reasoning as _reasoning
-    from .config import DISPLAY_LANG, reasoning_style_of_config
+    from ..config import reasoning as _reasoning
+    from ..config.pipeline import DISPLAY_LANG, reasoning_style_of_config
 
     # TWO STYLES, BOTH FROM DATA, DIFFERENT BY DESIGN.
     #
@@ -1244,7 +1244,7 @@ def generate_domain_traces(config, expert_name, callback=None,
     `reasoning: true`. The teacher answers the templates questions directly -
     no think block, no tool calls. Rejection sampling keeps non-empty answers.
     """
-    from .config import DISPLAY_LANG
+    from ..config.pipeline import DISPLAY_LANG
 
     n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_code.jsonl"
@@ -1332,7 +1332,7 @@ def _parse_teacher_output(text: str, style) -> tuple:
     its style's tags), then the prompted `AnswerMarker` (prose teachers like
     R1-distill). Both halves must be non-empty for a trace to pass.
     """
-    from .reasoning import split
+    from ..config.reasoning import split
     think, answer, reasoned = split(text, style)
     if reasoned and think and answer:
         return think, answer

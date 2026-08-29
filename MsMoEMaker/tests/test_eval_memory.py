@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from ms_moe_maker import eval as ev
+from ms_moe_maker.eval import harness as ev
 
 EVAL_SRC = Path(ev.__file__).read_text(encoding="utf-8")
 

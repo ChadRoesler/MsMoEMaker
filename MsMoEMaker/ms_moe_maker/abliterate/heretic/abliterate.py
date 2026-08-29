@@ -343,7 +343,7 @@ def main(argv=None) -> int:
     """CLI entry for the SUBPROCESS boundary.
 
     `ms_moe_maker.abliterate` spawns this as
-    `python -m ms_moe_maker.heretic.abliterate --settings <path>`, so Heretic's
+    `python -m ms_moe_maker.abliterate.heretic.abliterate --settings <path>`, so Heretic's
     process-global state (torch grad mode, seeds, logging verbosity, and its
     CUDA context) dies with the child instead of leaking into the finetune
     stages that run afterwards in the parent.
@@ -354,7 +354,7 @@ def main(argv=None) -> int:
     from .config import Settings
 
     parser = argparse.ArgumentParser(
-        prog="ms_moe_maker.heretic.abliterate",
+        prog="ms_moe_maker.abliterate.heretic.abliterate",
         description="Run one headless abliteration to completion.")
     parser.add_argument("--settings", required=True,
                         help="path to a JSON file of Heretic Settings fields")

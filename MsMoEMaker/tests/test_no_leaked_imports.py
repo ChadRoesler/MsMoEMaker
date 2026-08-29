@@ -121,7 +121,7 @@ def _leaks(path):
     return sorted(set(found))
 
 
-MODULES = sorted(PKG.glob("*.py"))
+MODULES = sorted(p for p in PKG.rglob("*.py") if "heretic" not in p.parts)
 
 
 @pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)

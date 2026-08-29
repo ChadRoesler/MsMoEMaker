@@ -11,8 +11,8 @@ import shutil
 
 import pytest
 
-from ms_moe_maker import validators as v
-from ms_moe_maker.evalrecord import ERROR, FAIL, MEASURED, PASS, UNMEASURABLE
+from ms_moe_maker.config import validators as v
+from ms_moe_maker.eval.record import ERROR, FAIL, MEASURED, PASS, UNMEASURABLE
 
 
 # ── the funnel ──────────────────────────────────────────────────────────────

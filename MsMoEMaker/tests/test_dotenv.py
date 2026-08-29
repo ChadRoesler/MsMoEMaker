@@ -10,7 +10,7 @@ box.
 """
 import os
 
-from ms_moe_maker.dotenv import _parse, load_dotenv
+from ms_moe_maker.box.dotenv import _parse, load_dotenv
 
 # A key no real environment will ever set, so "reads a file" and "shell wins"
 # are deterministic on any box.

@@ -91,9 +91,9 @@ def test_missing_pipeline_flag_is_error(lonely_recipe):
 
 def test_python_defaults_to_our_own_interpreter(lonely_recipe, tmp_path):
     import sys
-    from ms_moe_maker.runner import Runner
-    from ms_moe_maker.levers import Translation
-    from ms_moe_maker.events import Events
+    from ms_moe_maker.run.runner import Runner
+    from ms_moe_maker.config.levers import Translation
+    from ms_moe_maker.run.events import Events
     from tests.test_runner import FakeRecipe
 
     r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
@@ -102,9 +102,9 @@ def test_python_defaults_to_our_own_interpreter(lonely_recipe, tmp_path):
 
 
 def test_an_explicit_interpreter_is_used_instead(tmp_path):
-    from ms_moe_maker.runner import Runner
-    from ms_moe_maker.levers import Translation
-    from ms_moe_maker.events import Events
+    from ms_moe_maker.run.runner import Runner
+    from ms_moe_maker.config.levers import Translation
+    from ms_moe_maker.run.events import Events
     from tests.test_runner import FakeRecipe
 
     r = Runner(FakeRecipe(["python"]), tmp_path / "p.py", Translation(),
@@ -114,9 +114,9 @@ def test_an_explicit_interpreter_is_used_instead(tmp_path):
 
 def test_a_missing_module_in_the_child_is_reported_as_an_env_answer(
         tmp_path, capsys):
-    from ms_moe_maker.runner import Runner
-    from ms_moe_maker.levers import Translation
-    from ms_moe_maker.events import Events
+    from ms_moe_maker.run.runner import Runner
+    from ms_moe_maker.config.levers import Translation
+    from ms_moe_maker.run.events import Events
     from tests.test_runner import FakeRecipe
 
     script = tmp_path / "pipeline.py"

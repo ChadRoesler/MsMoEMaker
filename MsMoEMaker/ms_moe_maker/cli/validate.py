@@ -1,7 +1,7 @@
 """`ms-moe-maker validate` - structure only: no GPU, no network."""
 from __future__ import annotations
 
-from ..events import Events
+from ..run.events import Events
 from ._common import _corpus_paths, _load_recipe
 
 
@@ -40,7 +40,7 @@ def _cmd_validate(args):
     # The recipe id is what you wrote; the build id is what this box will make
     # of it. Printing only the first is how "but it works on mine" happens.
     try:
-        from ..config import build_config as _bc, build_id as _bid
+        from ..config.pipeline import build_config as _bc, build_id as _bid
         say(f"  Build:  {_bid(_bc(rec, dryrun=False))}")
     except Exception:
         pass
@@ -77,7 +77,7 @@ def _cmd_validate(args):
     # Refusals are a legitimate answer, not a failure: they are fields the
     # recipe asked for that this build cannot honour. Named on the wire so a
     # consumer can show them without parsing prose.
-    from ..levers import translate
+    from ..config.levers import translate
     refusals = translate(rec).refusals
     if refusals:
         events.refused(refusals)
@@ -105,8 +105,8 @@ def _cmd_validate(args):
 
 def _validate_corpora(rec, say, events) -> int:
     """Report on every corpus that exists. Never builds one."""
-    from .. import corpus as corpus_mod
-    from .. import corpushealth as ch
+    from ..data import corpus as corpus_mod
+    from ..data import health as ch
 
     paths = _corpus_paths(rec)
     if not any(paths.values()):
