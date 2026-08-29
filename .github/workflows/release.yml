@@ -235,7 +235,7 @@ jobs:
           python - <<'PY'
           from importlib.metadata import distribution
           import ms_moe_maker
-          from ms_moe_maker import run.manifest, run.stages, config.levers, run.runner, run.recipe  # noqa: F401
+          from ms_moe_maker import manifest, stages, levers, runner, recipe  # noqa: F401
 
           # Assert what ms-moe-maker DECLARES, not what happens to be importable.
           # Ambient importability is a correlation - a runner image, or another
