@@ -141,7 +141,7 @@ def wired(tmp_path, monkeypatch, request):
             {"name": "python", "source": {"kind": "stack", "language": "Python"}},
             {"name": "csharp", "source": {"kind": "stack", "language": "C#"}}]})
 
-    monkeypatch.setattr("ms_moe_maker.config.resolve_roots",
+    monkeypatch.setattr("ms_moe_maker.config.pipeline.resolve_roots",
                         lambda size, dryrun: {"data": str(data_root),
                                               "output": str(out_root)})
     result = builder.run_pipeline(rec)
