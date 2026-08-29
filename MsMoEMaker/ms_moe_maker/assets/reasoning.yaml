@@ -25,10 +25,13 @@ TagStyles:
     ClosingTag: "</think>"
     Interwoven: false
 
-  # DeepSeek-R1's raw tokenizer emits non-ASCII ``/`` special tokens; the
-  # widely-used re-tokenised form (R1-Distill via transformers, OpenThinker) is
-  # `<|reasoning|>`. If your checkpoint emits the raw tokens, put the exact
-  # bytes here or in ~/.msmoe/reasoning.yaml — that is what this file is FOR.
+  # DeepSeek-R1's raw tokenizer emits non-ASCII ``/`` special tokens; some
+  # re-tokenised forms (OpenThinker) use `<|reasoning|>`. The R1-Distill-QWEN
+  # checkpoints emit <think> instead and are mapped to `xml` by the
+  # r1_distill_qwen family below - a wrong tag style is a silent wrong answer,
+  # so the two lookalike families must NOT share one entry. If your checkpoint
+  # emits the raw tokens, put the exact bytes here or in
+  # ~/.msmoe/reasoning.yaml — that is what this file is FOR.
   #
   # AnswerMarker is the plain-language separator the GENERATOR prompts the
   # teacher for, because small R1-distill checkpoints emit NO delimiter at all

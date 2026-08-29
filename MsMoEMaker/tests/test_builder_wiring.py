@@ -71,6 +71,17 @@ def wired(tmp_path, monkeypatch, request):
     data_mod.generate_agent_traces = _fake_agent
     data_mod.generate_reasoning_traces = _fake_reasoning
 
+    # The third synth shape: a plain `kind: synth` expert (no reasoning, not
+    # the tools expert) gets PLAIN DOMAIN TEXT, written to the same
+    # `{expert}_code.jsonl` name the real generator uses.
+    def _fake_domain(config, expert_name, callback=None, **kw):
+        seen.setdefault('domain_calls', []).append(expert_name)
+        p = data_root / f'{expert_name}_code.jsonl'
+        p.write_text('{"text": "domain"}\n', encoding='utf-8')
+        return str(p)
+
+    data_mod.generate_domain_traces = _fake_domain
+
     ft = types.ModuleType("finetune")
     ft.specialist_is_done = lambda config, name: False
 
@@ -245,19 +256,25 @@ REASONING_SYNTH_RECIPE = {
 
 @pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
 def test_a_named_synth_expert_gets_its_corpus_generated(wired):
-    """THE regression. Without the fix the pipeline never completes."""
+    """THE regression. Without the fix the pipeline never completes.
+
+    A plain synth expert now routes to generate_domain_traces (no think
+    block, no tool calls) - the third synth shape."""
     result, seen, _, _ = wired
     assert result.ok, result.message
-    assert "shell" in seen.get("agent_calls", []), (
-        f"generate_agent_traces ran for {seen.get('agent_calls')}, "
+    assert "shell" in seen.get("domain_calls", []), (
+        f"generate_domain_traces ran for {seen.get('domain_calls')}, "
         f"never for the synth expert 'shell'")
+    assert "shell" not in seen.get("agent_calls", []), (
+        "a plain synth expert must not get tool traces - that output is "
+        "discarded, the domain corpus is what it fine-tunes on")
 
 
 @pytest.mark.parametrize("wired", [SYNTH_RECIPE], indirect=True)
 def test_the_synth_expert_finetunes_on_what_was_generated_for_it(wired):
     _, seen, _, _ = wired
     path = seen["finetune"].get("shell")
-    assert path and path.endswith("shell_traces.jsonl"), (
+    assert path and path.endswith("shell_code.jsonl"), (
         f"shell fine-tuned on {path!r}; it must be its own generated corpus")
 
 
