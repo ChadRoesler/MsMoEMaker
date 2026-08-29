@@ -110,8 +110,15 @@ def wired(tmp_path, monkeypatch, request):
     stitch.stitch_is_done = lambda config: False
     stitch.stitch_moe = lambda config, names: str(out_root / "moe_untrained")
     # **kw so a new verify option does not break the fake. The fake's job
-    # is to say 'the stitch was fine', not to mirror a signature.
-    stitch.verify_stitch = lambda d, **kw: True
+    # is to say 'the stitch was fine', not to mirror a signature - but it
+    # RECORDS what it was handed, so the moe.* recipe knobs can be proven to
+    # arrive (gate_fill and router_init_std used to be hardcoded 0.02 here
+    # while the recipe fields sat dead).
+    def _fake_verify(d, **kw):
+        seen["verify_kwargs"] = dict(kw)
+        return True
+
+    stitch.verify_stitch = _fake_verify
 
     router = types.ModuleType("router")
     router.router_is_done = lambda config: False
@@ -174,6 +181,15 @@ def wired(tmp_path, monkeypatch, request):
 def test_the_pipeline_completes(wired):
     result, _, _, _ = wired
     assert result.ok, result.message
+
+
+def test_verify_stitch_gets_the_recipe_moe_values(wired):
+    """moe.shared_expert_gate_fill and moe.router_init_std must arrive at the
+    verifier - they were hardcoded 0.02 there while the recipe fields sat
+    dead, so the fill and its check were wrong together and agreed."""
+    _, seen, _, _ = wired
+    assert seen["verify_kwargs"].get("gate_fill") == 0.02
+    assert seen["verify_kwargs"].get("router_init_std") == 0.02
 
 
 def test_router_gets_corpora_not_model_directories(wired):

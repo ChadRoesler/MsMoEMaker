@@ -189,14 +189,25 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     print(f"Stage 1: Collecting corpora for {len(expert_names)} experts")
     print(f"{'=' * 60}")
 
-    # Build sources dict from recipe experts for data collection
+    # Build sources dict from recipe experts for data collection. Expert.tokens
+    # (per-expert budget override) and Source.max_shards (per-source scan cap)
+    # ride alongside - both were declared, validated, and never read.
     _sources: Dict[str, Any] = {}
+    _token_budgets: Dict[str, int] = {}
+    _shard_caps: Dict[str, int] = {}
     for e in recipe.experts:
         if e.source:
             _sources[e.name] = e.source
+            src = e.source
+            if getattr(src, "max_shards", 0) and int(src.max_shards) > 0:
+                _shard_caps[e.name] = int(src.max_shards)
+        if getattr(e, "tokens", None):
+            _token_budgets[e.name] = int(e.tokens)
 
     code_paths = data_mod.collect_corpus(config, languages=expert_names,
-                                         sources=_sources, callback=cb.stage)
+                                         sources=_sources, callback=cb.stage,
+                                         token_budgets=_token_budgets,
+                                         shard_caps=_shard_caps)
 
     if not code_paths:
         result.failed_stage = stages.DATA_CORPUS
@@ -265,14 +276,16 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
             agent_path = data_mod.generate_agent_traces(
                 config, callback=cb.stage,
                 expert_name=tools_name,
-                teacher_model=cfg_module.teacher_for(recipe, config, tools_name))
+                teacher_model=cfg_module.teacher_for(recipe, config, tools_name),
+                n=cfg_module.examples_for(recipe, config, tools_name))
 
         for sname in domain_names:
             spath = data_mod.generate_domain_traces(
                 config, callback=cb.stage,
                 expert_name=sname,
                 teacher_model=cfg_module.teacher_for(recipe, config, sname),
-                templates_path=cfg_module.templates_for(recipe, sname))
+                templates_path=cfg_module.templates_for(recipe, sname),
+                n=cfg_module.examples_for(recipe, config, sname))
             if spath:
                 synth_paths[sname] = spath
 
@@ -280,7 +293,8 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
             rpath = data_mod.generate_reasoning_traces(
                 config, rname, callback=cb.stage,
                 teacher_model=cfg_module.teacher_for(recipe, config, rname),
-                templates_path=cfg_module.templates_for(recipe, rname))
+                templates_path=cfg_module.templates_for(recipe, rname),
+                n=cfg_module.examples_for(recipe, config, rname))
             if rpath:
                 reasoning_paths[rname] = rpath
 
@@ -486,6 +500,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     # compare against, rather than guessing from the MoE dir's parent.
     if stitch_mod.verify_stitch(moe_dir, output_root=config.output_root,
                                 gate_fill=config.shared_expert_gate_fill,
+                                router_init_std=config.router_init_std,
                                 router_init=getattr(config, "router_init",
                                                     "zero")):
         cb.stage(stages.STITCH,

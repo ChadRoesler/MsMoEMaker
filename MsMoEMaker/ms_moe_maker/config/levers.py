@@ -41,10 +41,12 @@ def translate(recipe: Any, force: bool = False,
               dryrun: bool = False) -> Translation:
     """Map a Recipe onto env levers, and say what we cannot honour.
 
-    The env half only bites on the legacy subprocess path - the in-package
-    builder reads the recipe directly through config.build_config. It is still
-    computed and reported either way, because "what would this run set" is a
-    question worth being able to answer before the run.
+    The env half is applied by Runner on BOTH paths now: run_subprocess hands
+    it to the child, and run_builder sets os.environ around the in-process
+    pipeline (before any torch import) and restores it afterwards. It used to
+    be subprocess-only, which is how runtime.alloc_conf - the lever measured
+    at 106.6 GB reserved versus 8.3 GB - was lost silently on the default
+    path while being reported under "agreed".
     """
     tr = Translation(force=force)
 

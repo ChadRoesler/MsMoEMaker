@@ -160,6 +160,12 @@ def stitch_moe(config, safe_names: List[str]) -> str:
         moe_config=moe_config,
         shared_gate_fill=config.shared_expert_gate_fill,
         router_init=getattr(config, 'router_init', 'zero'),
+        # THE FORGOTTEN ARGUMENT. stream_stitch has always taken
+        # router_init_std; this call never forwarded it, so the recipe's value
+        # sat in the fingerprint (busting resume on change) while the
+        # streamer's own 0.02 default produced bit-identical weights. Now it
+        # flows to both the stitch and the verifier.
+        router_init_std=getattr(config, 'router_init_std', 0.02),
         router_seed=getattr(config, 'seed', 42),
         num_layers=config_dict.get("num_hidden_layers", 32),
         tokenizer_src=anchor_dir,

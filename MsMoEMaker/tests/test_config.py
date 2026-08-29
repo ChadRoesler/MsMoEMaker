@@ -1032,3 +1032,98 @@ class TestTeacherMaxNewKnobs:
         c = config.build_config(
             self._rec(budget={"teacher_max_new": -1}), dryrun=True)
         assert c.teacher_max_new == 512
+
+
+class TestDeadKnobsAreAlive:
+    """The tier-2 audit: fields that were declared, validated, and then
+    hardcoded over. Each test pins the wiring that made the field real."""
+
+    @staticmethod
+    def _rec(blocks=None, base="", template=""):
+        from ms_moe_maker.config.recipe import parse
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "python",
+                             "source": {"kind": "stack", "language": "Python"}}]}
+        if base:
+            body["base"] = base
+        if template:
+            body["template"] = template
+        for key, value in (blocks or {}).items():
+            body[key] = value
+        rec, _ = parse(body)
+        return rec
+
+    def test_the_roots_block_decides_where_things_land(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec = self._rec(blocks={"roots": {"data": "corpora/{size}",
+                                          "output": "runs/my-{size}"}})
+        c = config.build_config(rec, dryrun=False)
+        assert c.data_root == "corpora/0.5B"
+        assert c.output_root == "runs/my-0.5B"
+
+    def test_roots_left_unset_keep_the_historical_defaults(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(self._rec(), dryrun=False)
+        assert c.data_root == "msmoe_data"
+        assert c.output_root == "msmoe_run_0.5B"
+
+    def test_shared_expert_gate_fill_flows_from_the_recipe(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(
+            self._rec(blocks={"moe": {"shared_expert_gate_fill": 0.07}}),
+            dryrun=True)
+        assert c.shared_expert_gate_fill == 0.07
+
+    def test_load_in_4bit_derives_from_the_tier_when_unset(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(self._rec(), dryrun=True)  # tier default
+        assert c.load_in_4bit is False
+        nano = self._rec(blocks={"runtime": {"hardware_tier": "nano"}})
+        assert config.build_config(nano, dryrun=True).load_in_4bit is True
+
+    def test_load_in_4bit_explicit_wins_in_both_directions(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        forced_off = self._rec(blocks={
+            "runtime": {"hardware_tier": "nano", "load_in_4bit": False}})
+        assert config.build_config(forced_off, dryrun=True).load_in_4bit is False
+        forced_on = self._rec(blocks={"runtime": {"load_in_4bit": True}})
+        assert config.build_config(forced_on, dryrun=True).load_in_4bit is True
+
+    def test_the_smoke_block_reaches_the_build(self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec = self._rec(blocks={
+            "smoke": {"prompt": "Describe a dragon.", "tokens": 99,
+                      "timeout": 601, "script": "mysmoke.py"}})
+        c = config.build_config(rec, dryrun=True)
+        assert c.gguf_smoke_prompt == "Describe a dragon."
+        assert c.gguf_smoke_tokens == 99
+        assert c.gguf_smoke_timeout == 601
+        assert c.gguf_smoke_script == "mysmoke.py"
+
+    def test_the_template_base_hint_picks_the_checkpoint(self, monkeypatch):
+        """template: dnd used to resolve to a CODER base - the hint exists so
+        a lore MoE gets the plain Qwen2.5 family instead."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        c = config.build_config(self._rec(template="dnd"), dryrun=True)
+        assert c.base == "Qwen/Qwen2.5-0.5B-Instruct", c.base
+
+    def test_an_env_base_model_is_honoured_as_is(self, monkeypatch):
+        """MSMOE_BASE_MODEL naming a non-instruct checkpoint used to be
+        discarded with no warning and replaced by the size's coder."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        monkeypatch.setenv("MSMOE_BASE_MODEL",
+                           "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+        c = config.build_config(self._rec(), dryrun=True)
+        assert c.base == "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+
+    def test_examples_for_prefers_the_source_then_the_run_default(
+            self, monkeypatch):
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec = self._rec(blocks={
+            "experts": [{"name": "shell",
+                         "source": {"kind": "synth", "examples": 2000}},
+                        {"name": "lore",
+                         "source": {"kind": "synth"}}]})
+        c = config.build_config(rec, dryrun=True)
+        assert config.examples_for(rec, c, "shell") == 2000
+        assert config.examples_for(rec, c, "lore") == c.num_agent_samples

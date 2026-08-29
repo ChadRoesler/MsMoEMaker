@@ -44,6 +44,11 @@ class _Runtime:
     alloc_conf = ""
 
 
+class _Roots:
+    data = ""
+    output = ""
+
+
 class _Expert:
     def __init__(self, name):
         self.name = name
@@ -56,6 +61,7 @@ class FakeRecipe:
     budget = _Budget()
     moe = _MoE()
     runtime = _Runtime()
+    roots = _Roots()
 
     def __init__(self, experts):
         self.experts = [_Expert(e) for e in experts]
@@ -117,6 +123,49 @@ def test_a_clean_run_exits_zero_and_writes_a_manifest(lab):
     assert written is not None
     assert written.ok is True
     assert written.finished is not None
+
+
+def test_run_builder_applies_and_restores_the_translation_env(tmp_path, monkeypatch):
+    """runtime.alloc_conf must reach os.environ on the IN-PACKAGE path too.
+
+    It used to be applied only in run_subprocess - the default path emitted it
+    as env_applied= and never touched os.environ, so the lever measured at
+    106.6 GB reserved versus 8.3 GB was lost silently while being reported
+    under "agreed". And the application must be REVERSED afterwards: one
+    Runner in a long-lived process must not leak into the next run.
+    """
+    import os
+    from ms_moe_maker.config.levers import translate
+    from ms_moe_maker.run.builder import BuildResult
+    observed = {}
+
+    def fake_run_pipeline(recipe, **kw):
+        observed["during"] = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+        observed["direct"] = os.environ.get("MSMOE_DIRECT_LOAD")
+        out = BuildResult()
+        out.ok = True
+        out.message = "done"
+        return out
+
+    monkeypatch.setattr("ms_moe_maker.run.builder.run_pipeline",
+                        fake_run_pipeline)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    monkeypatch.delenv("MSMOE_DIRECT_LOAD", raising=False)
+
+    recipe = FakeRecipe(["python", "csharp"])
+    recipe.runtime.alloc_conf = "expandable_segments:True"
+    recipe.runtime.direct_load = True
+    ev = Events(enabled=False)
+    runner = Runner(recipe, None, translate(recipe), ev, cwd=tmp_path,
+                    dryrun=True)
+    code = runner.run()
+    assert code == 0
+    assert observed["during"] == "expandable_segments:True", (
+        "the translation env must be live while the builder runs")
+    assert observed["direct"] == "1"
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in os.environ, (
+        "the applied env must be restored after the run")
+    assert "MSMOE_DIRECT_LOAD" not in os.environ
 
 
 def test_every_stage_reaches_a_terminal_state(lab):

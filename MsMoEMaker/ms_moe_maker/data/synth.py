@@ -51,7 +51,9 @@ STACK_REPO = "HuggingFaceCode/stack-v3-train"
 
 def collect_corpus(config, languages: Optional[List[str]] = None,
                    sources: Optional[Dict[str, Any]] = None,
-                   callback=None) -> Dict[str, str]:
+                   callback=None,
+                   token_budgets: Optional[Dict[str, int]] = None,
+                   shard_caps: Optional[Dict[str, int]] = None) -> Dict[str, str]:
     """Pull all expert corpora into DATA_ROOT/{safe_name}_code.jsonl.
 
     Accepts Source info from the recipe so each expert can use its own
@@ -148,12 +150,23 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
     # ── 2. Handle kind=stack sources ──────────────────────────────────────
     stack_languages = []
     stack_names: Dict[str, str] = {}   # scanned LANGUAGE -> the EXPERT that wants it
+    stack_caps: Dict[str, int] = {}
+    stack_targets: Dict[str, int] = {}
     for expert_name, src in sources.items():
         kind = getattr(src, 'kind', '') if hasattr(src, 'kind') else src.get('kind', '')
         if kind == "stack":
             lang = getattr(src, 'language', None) or src.get('language', expert_name)
             stack_languages.append(lang)
             stack_names[lang] = expert_name
+            # PER-SOURCE KNOBS, finally threaded. Source.max_shards narrows the
+            # scan window for this expert; Expert.tokens overrides the token
+            # budget it hunts for. Both ride in from the recipe via builder.
+            asked_cap = (shard_caps or {}).get(expert_name)
+            if asked_cap and int(asked_cap) > 0:
+                stack_caps[lang] = int(asked_cap)
+            asked_tok = (token_budgets or {}).get(expert_name)
+            if asked_tok and int(asked_tok) > 0:
+                stack_targets[lang] = int(asked_tok)
 
     # ── 3. Fall-through languages (not covered by sources) ────────────────
     # ONLY expert names that have NO source. The old line was
@@ -167,7 +180,8 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
         # Stack: scan shards filtered by the specified language(s)
         print(f"\nShard scan for stack sources: {stack_languages}")
         scanned = _collect_from_shards(stack_languages, config, callback,
-                                       names=stack_names)
+                                       names=stack_names, caps=stack_caps,
+                                       targets=stack_targets)
         results.update(scanned)
 
     if remaining_languages:
@@ -640,7 +654,9 @@ def _line_reuse(docs: List[Dict[str, Any]], sample: int = 300) -> float:
 
 def _collect_from_shards(languages: List[str], config,
                          callback=None,
-                         names: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+                         names: Optional[Dict[str, str]] = None,
+                         caps: Optional[Dict[str, int]] = None,
+                         targets: Optional[Dict[str, int]] = None) -> Dict[str, str]:
     """Adaptive shard scan — fetch stack-v3-train shards until every language is satisfied.
 
     THE LANGUAGE IS WHAT GETS SCANNED; THE EXPERT IS WHAT GETS KEYED AND FILED.
@@ -658,6 +674,12 @@ def _collect_from_shards(languages: List[str], config,
     from collections import Counter
 
     cap = min(config.max_shards, 1000)  # safe cap
+    # Per-language windows and budgets: source.max_shards / expert.tokens,
+    # both of which default to the run-wide values when the recipe is silent.
+    cap_for = {l: min(config.max_shards, int(caps[l])) for l in languages
+               if l in caps and int(caps[l]) > 0} if caps else {}
+    target_for = {l: int(targets[l]) for l in languages
+                  if l in targets and int(targets[l]) > 0} if targets else {}
     names = names or {}
     safe_map = {l: cfg.safe_name(names.get(l, l)) for l in languages}
 
@@ -712,7 +734,8 @@ def _collect_from_shards(languages: List[str], config,
     schema_checked = False
 
     for shard_no, fname in enumerate(shard_files[:cap], 1):
-        hunting = [l for l in languages if l not in done]
+        hunting = [l for l in languages
+                   if l not in done and shard_no <= cap_for.get(l, cap)]
         print(f"\n--- shard {shard_no}/{cap}  (still hunting: {hunting})")
         local = hf_hub_download(repo_id, fname, repo_type="dataset",
                                 cache_dir=config.shard_cache)
@@ -815,7 +838,8 @@ def _collect_from_shards(languages: List[str], config,
                 # A floor that cannot steer the loop is not a floor, it is a
                 # late assertion. Both now gate `done`.
                 est_tok = chars[lang] / config.chars_per_token_est
-                have_tokens = est_tok >= config.collect_token_target
+                have_tokens = est_tok >= target_for.get(lang,
+                                                        config.collect_token_target)
                 have_docs = len(buckets[lang]) >= config.min_samples_per_expert
                 if have_tokens and have_docs:
                     done.add(lang)
@@ -886,7 +910,10 @@ def _collect_from_shards(languages: List[str], config,
         detail = []
         for l, n in starved.items():
             tok = chars[l] / config.chars_per_token_est
-            detail.append(f"{l}: {n} docs (~{tok/1e6:.1f}M est. tokens)")
+            extra = ""
+            if cap_for.get(l, cap) < cap:
+                extra = f" (retired by source.max_shards={cap_for[l]})"
+            detail.append(f"{l}: {n} docs (~{tok/1e6:.1f}M est. tokens){extra}")
         raise RuntimeError(
             f"corpus.min_samples is {config.min_samples_per_expert} docs and "
             f"these did not reach it after {shards_used} shard(s) — "
@@ -938,16 +965,22 @@ def _collect_from_shards(languages: List[str], config,
 
 def generate_agent_traces(config, callback=None,
                           expert_name: str = "agentcore",
-                          teacher_model: Optional[str] = None) -> Optional[str]:
+                          teacher_model: Optional[str] = None,
+                          n: Optional[int] = None) -> Optional[str]:
     """Generate MCP agent traces for the tools expert.
 
     Uses rejection sampling: a teacher model generates tool calls, which are
     validated against a freshly-generated tool surface.  Server-agnostic by
     default (fresh synthetic surface each example).
 
+    `n` is the trace count for THIS expert (source.examples, via builder's
+    examples_for); None = the run's resolved synth default.
+
     Returns path to the final JSONL, or None if generation was skipped.
     """
     import sys
+
+    target = n if n is not None else config.num_agent_samples
 
     out_path = f"{config.data_root}/{expert_name}_code.jsonl"
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -1000,7 +1033,7 @@ def generate_agent_traces(config, callback=None,
     if os.path.exists(partial_path):
         with open(partial_path) as f:
             kept = sum(1 for line in f if line.strip())
-        if kept >= config.num_agent_samples:
+        if kept >= target:
             os.replace(partial_path, out_path)
             print(f"   resumed a complete .partial ({kept}) → {out_path}")
             if callback:
@@ -1035,8 +1068,8 @@ def generate_agent_traces(config, callback=None,
 
     sink = open(partial_path, "a", buffering=1)
     try:
-        while kept < config.num_agent_samples:
-            n = min(teacher.batch_size, (config.num_agent_samples - kept) * 2)
+        while kept < target:
+            n = min(teacher.batch_size, (target - kept) * 2)
             batch_specs = _agent_batch_specs(n, real_surface, system_prompt, rnd)
             prompts = [teacher_tokenizer.apply_chat_template(
                            m, tokenize=False, add_generation_prompt=True)
@@ -1064,15 +1097,15 @@ def generate_agent_traces(config, callback=None,
                             + base_tokenizer.eos_token)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
                 kept += 1
-                if kept >= config.num_agent_samples:
+                if kept >= target:
                     break
 
             # Progress and accept rate
             session = kept - t_kept0
             rate = session / max(time.time() - t0, 1e-9)
             acc = 100.0 * session / max(attempted, 1)
-            eta = (config.num_agent_samples - kept) / max(rate, 1e-9) / 60
-            print(f"   kept {kept}/{config.num_agent_samples}  "
+            eta = (target - kept) / max(rate, 1e-9) / 60
+            print(f"   kept {kept}/{target}  "
                   f"(accept {acc:.0f}% of {attempted}, {rate:.1f}/s, ETA {eta:.0f} min)")
 
             # Tripwire: broken teacher
@@ -1138,7 +1171,8 @@ def _load_templates(path: Optional[str] = None) -> List[str]:
 
 def generate_reasoning_traces(config, expert_name, callback=None,
                               teacher_model: Optional[str] = None,
-                              templates_path: Optional[str] = None) -> Optional[str]:
+                              templates_path: Optional[str] = None,
+                              n: Optional[int] = None) -> Optional[str]:
     """Generate reasoning traces for one specialist — the R1-distill recipe.
 
     A reasoning teacher writes its NATIVE thinking delimiters then an answer,
@@ -1164,7 +1198,8 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     teacher_key = _reasoning.style_for_base(
         teacher_model or config.teacher_model, "reasoning", styles, families)
     teacher_style = styles.get(teacher_key) or target
-    n = config.num_agent_samples
+    if n is None:
+        n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_reasoning.jsonl"
     templates = _load_templates(templates_path)
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -1298,7 +1333,8 @@ def generate_reasoning_traces(config, expert_name, callback=None,
 
 
 def generate_domain_traces(config, expert_name, callback=None,
-                           teacher_model=None, templates_path=None) -> Optional[str]:
+                           teacher_model=None, templates_path=None,
+                           n: Optional[int] = None) -> Optional[str]:
     """Generate plain domain text for a synth expert (no reasoning, no tools).
 
     The third synth shape: `kind: synth` that is neither the tools expert nor
@@ -1307,7 +1343,8 @@ def generate_domain_traces(config, expert_name, callback=None,
     """
     from ..config.pipeline import DISPLAY_LANG
 
-    n = config.num_agent_samples
+    if n is None:
+        n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_code.jsonl"
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         print(f"[skip] domain traces already present at {out_path}")

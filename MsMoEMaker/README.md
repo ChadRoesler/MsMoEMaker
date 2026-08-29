@@ -495,9 +495,9 @@ token forever.
 | `smoke.tokens` | 48 | Tokens to generate when checking the GGUF is alive. |
 | `smoke.timeout` | 300 | Seconds before the smoke test gives up. |
 | `smoke.prompt` | "Write a function that works." | What to ask it. |
-| `smoke.script` | — | Replace the smoke test entirely. |
-| `roots.data` | `{size}/corpus` | Where corpora land. |
-| `roots.output` | `{size}/train` | Where checkpoints and the export land. |
+| `smoke.script` | — | Replace the smoke test entirely (script gets the GGUF path as argv[1]; exit 0 = pass). |
+| `roots.data` | `msmoe_data` | Where corpora land. `{size}` substitutes the resolved size. |
+| `roots.output` | `msmoe_run_{size}` | Where checkpoints and the export land. |
 
 Keep the `{size}` in `roots.output`. Without it every rung of the ladder writes
 to the same directory and the 3B run quietly eats the 0.5B one.

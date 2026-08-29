@@ -45,6 +45,22 @@ def _cmd_smoke(args):
         # while the build searched the llama.cpp tree, so an ordinary checkout
         # worked during a build and not for the command whose whole job is to
         # run it.
+        #
+        # smoke.script REPLACES the built-in entirely, same contract as the
+        # build's export smoke: the script gets the GGUF path as argv[1], and
+        # its exit code IS the verdict.
+        script = getattr(rec.smoke, "script", "") or ""
+        if script.strip():
+            import subprocess
+            script = script.strip()
+            print(f"   smoke.script: {script} {gguf_path}")
+            r = subprocess.run([sys.executable, script, gguf_path],
+                               capture_output=True, text=True, timeout=3600)
+            print((r.stdout or "").strip())
+            if r.stderr:
+                print((r.stderr or "").strip(), file=sys.stderr)
+            return 0 if r.returncode == 0 else 2
+
         ok = smoke_gguf(
             gguf_path,
             tokens=args.tokens or rec.smoke.tokens,

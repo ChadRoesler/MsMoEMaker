@@ -54,8 +54,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 # care. Kept as data so `--describe` can report the whole schema without the
 # caller knowing any kind names.
 KNOWN_FIELDS = ("repo", "split", "text_field", "language", "max_shards",
-                "teacher", "generator", "examples", "path", "glob", "ref",
-                "subdir")
+                "teacher", "examples", "templates", "reasoning", "path", "glob",
+                "ref", "subdir")
 
 
 @dataclass(frozen=True)

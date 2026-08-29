@@ -175,7 +175,8 @@ def test_source_kind_decides_the_collector_not_the_expert_name(monkeypatch):
         calls["hf"].append(repo)
         return out_path
 
-    def fake_shards(languages, config, callback=None, names=None):
+    def fake_shards(languages, config, callback=None, names=None,
+                    caps=None, targets=None):
         calls["shards"].append(list(languages))
         calls["names"].append(dict(names or {}))
         from ms_moe_maker.config import pipeline as cfg_mod
@@ -272,3 +273,42 @@ def test_every_unsourced_expert_is_scanned_not_just_the_first(monkeypatch):
 
     assert seen["languages"] == ["monster_manual", "lore", "dm_guide"]
     assert sorted(results) == ["dm_guide", "lore", "monster_manual"]
+
+
+def test_per_source_max_shards_and_token_budget_reach_the_scan(monkeypatch):
+    """Source.max_shards and Expert.tokens were declared, validated, and then
+    overwritten by the run-wide values. Both now ride through collect_corpus
+    into the shard scan, keyed by the scanned language."""
+    import types
+
+    from ms_moe_maker.config.recipe import Source
+    from ms_moe_maker.data import synth as d
+
+    seen = {}
+
+    def fake_shards(languages, config, callback=None, names=None,
+                    caps=None, targets=None):
+        seen["languages"] = list(languages)
+        seen["caps"] = dict(caps or {})
+        seen["targets"] = dict(targets or {})
+        return {n: f"stack:{l}" for l, n in (names or {}).items()}
+
+    monkeypatch.setattr(d, "_collect_from_shards", fake_shards)
+    config = types.SimpleNamespace(data_root="test_data", force=False)
+
+    d.collect_corpus(
+        config,
+        languages=["python", "powershell"],
+        sources={
+            "python": Source(kind="stack", language="Python", max_shards=12),
+            "powershell": Source(kind="stack", language="PowerShell"),
+        },
+        token_budgets={"python": 5_000_000},
+        shard_caps={"python": 12})
+
+    assert seen["caps"] == {"Python": 12}, (
+        "source.max_shards must narrow the scan window for that expert")
+    assert seen["targets"] == {"Python": 5_000_000}, (
+        "expert.tokens must override the token budget for that expert")
+    assert "PowerShell" not in seen["caps"]
+    assert "PowerShell" not in seen["targets"]

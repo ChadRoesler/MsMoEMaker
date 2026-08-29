@@ -38,15 +38,12 @@ PKG = pathlib.Path(ms_moe_maker.__file__).resolve().parent
 # and prefer wiring the field up to adding it here — an entry is a promise that
 # a knob doing nothing is intended.
 ALLOWED_UNREAD: dict = {
-    # "Block.field": "why it is intentionally not consumed",
-    #
-    # Empty, and that is the goal. An entry here is a promise that a knob doing
-    # nothing is INTENDED — prefer wiring the field up, or deleting it.
-    # budget.doc_ceiling lived here for exactly one evening before being
-    # removed from the schema outright: its job (stopping the corpus demand
-    # running away) was already done, and done better, by the derived-floor
-    # check in recipe.py, which refuses at validate time and names three ways
-    # out instead of silently clamping.
+    # "Block.field": "why it is legitimately not consumed",
+    "Recipe.tools_expert": (
+        "consumed by parse() itself when injecting the tools expert - it "
+        "turns the flag into a real expert on the list, and nothing "
+        "downstream reads the raw flag; tools_expert_name is the derived "
+        "value the pipeline reads"),
 }
 
 
@@ -60,17 +57,57 @@ def _schema_fields():
 
 
 def _consumers():
-    """Everything in the package except the schema that declares the fields."""
+    """Everything in the package that can READ a recipe object.
+
+    recipe.py itself is INCLUDED: it holds validate(), which reads rec.gates.*,
+    rec.schema_version and friends. The old bare-identifier matcher had to
+    exclude the file because field DECLARATIONS matched; the recipe-object
+    pattern does not match declarations, so the file is back in - and a field
+    read only by the parser's own validation finally counts as read.
+    """
     out = {}
     for path in PKG.rglob("*.py"):
-        if path.parent == PKG / "config" and path.name == "recipe.py":
-            continue
         out[str(path.relative_to(PKG))] = path.read_text(
             encoding="utf-8", errors="replace")
     for path in PKG.rglob("*.yaml"):
         out[str(path.relative_to(PKG))] = path.read_text(
             encoding="utf-8", errors="replace")
     return out
+
+
+def _read_pattern(field: str) -> re.Pattern:
+    """A READ of a recipe field, not a bare mention.
+
+    The old check matched the bare identifier anywhere, so a field mentioned
+    only in PipelineConfig's own definition, a KNOWN_FIELDS string tuple, or a
+    docstring "passed" the guard while being unreachable from a recipe -
+    Roots.data, MoE.shared_expert_gate_fill, Runtime.load_in_4bit,
+    Source.max_shards, Source.examples, Source.generator, Expert.tokens and
+    SmokeSpec.script all sailed through it. ALLOWED_UNREAD was empty, which
+    read as proof the class was closed. It wasn't.
+
+    A read now has to go THROUGH a recipe-shaped object:
+
+        rec.moe.shared_expert_gate_fill        recipe.<block>.<field>
+        getattr(recipe.budget, "warmup_floor", ...)
+        src.max_shards                         source.<field>
+        e.tokens                               expert.<field>
+
+    Hardcoding a value in build_config as `PipelineConfig(...) field=0.02` or
+    reading `config.field` downstream no longer counts: the recipe's field must
+    be the thing being read.
+    """
+    name = re.escape(field)
+    block = r"(?:rec|recipe|b|rt|bud|moe|_corpus|_abl|roots|gates)"
+    leaf = r"(?:src|source|expert)"
+    ident = r"[A-Za-z_]\w*"
+    return re.compile(
+        rf"\b{block}\s*\.\s*(?:{ident}\s*\.\s*)*{name}\b"
+        rf"|\bgetattr\(\s*{block}\s*(?:\.\s*{ident})?\s*,\s*[\"']{name}[\"']"
+        rf"|\b_corpus_knob\(\s*[\"']{name}[\"']"
+        rf"|\b{leaf}\s*\.\s*(?:{ident}\s*\.\s*)*{name}\b"
+        rf"|\bgetattr\(\s*{leaf}\s*,\s*[\"']{name}[\"']"
+        rf"|\be\s*\.\s*{name}\b")
 
 
 def test_every_recipe_field_is_read_by_something():
@@ -81,7 +118,7 @@ def test_every_recipe_field_is_read_by_something():
     for cls, field, line in _schema_fields():
         if f"{cls}.{field}" in ALLOWED_UNREAD:
             continue
-        pat = re.compile(r"\b" + re.escape(field) + r"\b")
+        pat = _read_pattern(field)
         if not any(pat.search(text) for text in consumers.values()):
             unread.append(f"{cls}.{field}  (recipe.py:{line})")
 
@@ -103,6 +140,35 @@ def test_the_finder_actually_finds_fields():
     for expected in ("Budget.target_steps", "Corpus.max_samples",
                      "MoE.experts_per_tok"):
         assert expected in names, f"{expected} not found by the field finder"
+
+
+def test_the_read_pattern_rejects_a_bare_mention():
+    """A lint nobody has seen fail is a lint nobody should trust.
+
+    The trio that let twelve dead knobs through: the field is DEFINED, its
+    name sits in a KNOWN_FIELDS string tuple, and the only reads are off a
+    non-recipe object (`config.X`). None of that may count as a read."""
+    consumers = {
+        "config/pipeline.py": "KNOWN_FIELDS = ('max_shards',)\n"
+                              "shared_expert_gate_fill=0.02\n",
+        "moe/stitch.py": "config.shared_expert_gate_fill\n"
+                         "x = cfg.max_shards\n",
+    }
+    for field in ("max_shards", "shared_expert_gate_fill"):
+        pat = _read_pattern(field)
+        assert not any(pat.search(t) for t in consumers.values()), (
+            f"{field}: a bare mention must not count as a read")
+
+
+def test_the_read_pattern_accepts_a_recipe_object_read():
+    pat = _read_pattern("max_shards")
+    assert any(pat.search(t) for t in [
+        "src = e.source\nif getattr(src, 'max_shards', 0): ...",
+        "cap = e.source.max_shards",
+        "x = rec.moe.shared_expert_gate_fill",
+        "getattr(rt, 'direct_load', False)",
+        "roots = resolve_roots(size, dryrun, recipe.roots)",
+    ])
 
 
 def test_the_allowlist_has_no_stale_entries():

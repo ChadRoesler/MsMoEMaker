@@ -115,7 +115,8 @@ def templates_for(recipe, expert_name: str) -> str:
     """The question-templates path for one synth expert ('' = generic default)."""
     for e in getattr(recipe, "experts", None) or []:
         if getattr(e, "name", "") == expert_name:
-            return getattr(getattr(e, "source", None), "templates", "") or ""
+            src = getattr(e, "source", None)
+            return getattr(src, "templates", "") or ""
     return ""
 
 
@@ -137,6 +138,20 @@ def teacher_for(recipe, config, expert_name: str) -> str:
                 return config.reasoning_teacher or config.teacher_model
             break
     return config.teacher_model
+
+
+def examples_for(recipe, config, expert_name: str) -> int:
+    """The trace count for one GENERATED expert: source.examples wins, else the
+    run's resolved synth default. `examples` was declared, validated, and never
+    read — same family as `teacher` above, fixed the same way."""
+    for e in getattr(recipe, "experts", None) or []:
+        if getattr(e, "name", "") == expert_name:
+            src = getattr(e, "source", None)
+            asked = getattr(src, "examples", -1) if src else -1
+            if asked is not None and asked > 0:
+                return int(asked)
+            break
+    return config.num_agent_samples
 
 
 # ── what a BUILD is, as opposed to what a RECIPE is ───────────────────────────
@@ -168,7 +183,7 @@ _FINGERPRINT_EXCLUDE: frozenset = frozenset({
     "teacher_max_memory", "teacher_batch", "vllm_batch", "vllm_gpu_util",
     # The smoke test inspects the artifact; it does not build it.
     "gguf_smoke_prompt", "gguf_smoke_tokens", "gguf_smoke_timeout",
-    "gguf_degenerate_run",
+    "gguf_smoke_script", "gguf_degenerate_run",
 })
 
 
@@ -565,6 +580,8 @@ class PipelineConfig:
     gguf_smoke_prompt: str = ""
     gguf_smoke_tokens: int = 48
     gguf_smoke_timeout: int = 300
+    # smoke.script: replace the built-in llama-cli smoke entirely. '' = built-in.
+    gguf_smoke_script: str = ""
     gguf_degenerate_run: int = 32
 
     # HF cache
@@ -619,16 +636,34 @@ def _env_bool(key: str, default: bool) -> bool:
     return v.lower() in ("1", "true", "yes")
 
 
-def resolve_roots(size: str, dryrun: bool) -> Dict[str, str]:
+def resolve_roots(size: str, dryrun: bool,
+                  roots: Optional[Any] = None) -> Dict[str, str]:
     """Where a run's data and outputs live, relative to cwd.
 
-    Named after this tool, not after the project it was carved out of. A user
-    who pip-installs ms-moe-maker and runs it in their own directory should
-    not find a folder called `fraunkenstein_agent_3B` in it.
+    The recipe's `roots:` block wins when it says something; `{size}` in either
+    template is substituted with the resolved size. Otherwise the historical
+    defaults: named after this tool, not after the project it was carved out
+    of - a user who pip-installs ms-moe-maker and runs it in their own
+    directory should not find a folder called `fraunkenstein_agent_3B` in it.
+
+    THE RECIPE BLOCK WAS DEAD. resolve_roots hardcoded msmoe_data /
+    msmoe_run_{size} while recipe.roots only fed the HF cache location, so a
+    recipe asking for its corpora and checkpoints somewhere else got them in
+    cwd anyway - and --plan's free-space preflight measured the wrong volume.
     """
-    if dryrun:
-        return {"data": "msmoe_data", "output": f"msmoe_dryrun_{size}"}
-    return {"data": "msmoe_data", "output": f"msmoe_run_{size}"}
+    asked_data = (getattr(roots, "data", "") or "").strip() if roots else ""
+    asked_out = (getattr(roots, "output", "") or "").strip() if roots else ""
+    if asked_data:
+        data_root = asked_data.format(size=size)
+    else:
+        data_root = "msmoe_data"
+    if asked_out:
+        output_root = asked_out.format(size=size)
+    elif dryrun:
+        output_root = f"msmoe_dryrun_{size}"
+    else:
+        output_root = f"msmoe_run_{size}"
+    return {"data": data_root, "output": output_root}
 
 
 def _resolve_base(recipe, size: str) -> Tuple[str, str]:
@@ -648,15 +683,23 @@ def _resolve_base(recipe, size: str) -> Tuple[str, str]:
             base_model = ablated if ablated else base
         return base_model, safe
 
-    # 2. Env override
+    # 2. The template's base-family hint (e.g. "Qwen/Qwen2.5" from the dnd
+    #    template). Without this, `template: dnd` auto-filled a Coder base -
+    #    a coding checkpoint for a Dungeons & Dragons lookup MoE.
+    hint = getattr(recipe, "_base_hint", "") or ""
+    if hint:
+        base_model = f"{hint.rstrip('/')}-{size}-Instruct"
+        return base_model, base_model
+
+    # 3. Env override. An explicit model id is an explicit answer; honour it
+    #    AS-IS rather than name-sniffing it away. MSMOE_BASE_MODEL naming a
+    #    non-instruct checkpoint (e.g. an R1-distill) used to be discarded and
+    #    silently replaced with the size's coder - with no warning.
     env_base = os.environ.get("MSMOE_BASE_MODEL", "").strip()
     if env_base:
-        safe, ablated = model_sizes(recipe).get(size, ("", ""))
-        if "abliterated" in env_base or "Instruct" in env_base:
-            return env_base, safe
-        return ablated if ablated else env_base, safe
+        return env_base, env_base
 
-    # 3. The size's own default (the abliterated instruct coder, when it exists)
+    # 4. The size's own default (the abliterated instruct coder, when it exists)
     #
     # THE SUBSTRING SNIFF USED TO GATE THIS: `if ablated and ("abliterated" in
     # ablated or "Instruct" in ablated)`. Every entry in the built-in table
@@ -781,7 +824,8 @@ def resolve_run_roots(recipe, dryrun: Optional[bool] = None) -> Dict[str, str]:
     callers deriving one fact independently is how they drift.
     """
     size = _resolve_size(recipe, resolve_tier(recipe))
-    return resolve_roots(size, resolve_dryrun(dryrun))
+    return resolve_roots(size, resolve_dryrun(dryrun),
+                         getattr(recipe, "roots", None))
 
 
 def build_config(recipe, force: bool = False,
@@ -953,9 +997,13 @@ def build_config(recipe, force: bool = False,
     lora_alpha = _knob(recipe.budget.lora_alpha, 32)
     lora_dropout = _knob(recipe.budget.lora_dropout, 0.0)
 
-    # Quantization hint from tier
+    # Quantization hint from tier; the recipe's explicit answer wins in both
+    # directions (see Runtime.load_in_4bit). None = derive from the tier.
     quant = tier_spec.default_quant
-    load_4bit = quant in ("Q4_K_M", "Q4_0", "Q4_1") if tier_name == "nano" else False
+    derived_4bit = (quant in ("Q4_K_M", "Q4_0", "Q4_1")
+                    if tier_name == "nano" else False)
+    load_4bit = (recipe.runtime.load_in_4bit
+                 if recipe.runtime.load_in_4bit is not None else derived_4bit)
 
     # Unsoth / vLLM
     use_unsloth = _env_bool("MSMOE_UNSLOTH", False)
@@ -981,24 +1029,33 @@ def build_config(recipe, force: bool = False,
     # Llama.cpp dir
     llama_cpp_dir = _resolve_llama_cpp(recipe)
 
-    # Smoke timeout
+    # Smoke timeout — env first (legacy lever), then the recipe's smoke block.
     smoke_timeout_str = os.environ.get("MSMOE_SMOKE_TIMEOUT", "")
-    smoke_timeout = int(smoke_timeout_str) if smoke_timeout_str else 300
+    smoke_timeout = (int(smoke_timeout_str) if smoke_timeout_str
+                     else (recipe.smoke.timeout or 300))
 
-    # HF cache
-    hf_home_override = os.environ.get("HF_HOME", "")
-    if not hf_home_override:
-        hf_home_override = os.path.join(
-            os.path.dirname(
-                recipe.roots.output.format(size=size)
-                if "{size}" in recipe.roots.output
-                else recipe.roots.output
-            ),
-            "hf_cache",
-        )
+    # THE SMOKE BLOCK WAS HALF DEAD. cli/smoke honoured prompt/tokens; the
+    # BUILD's export smoke used literals, so a D&D MoE was asked to write a
+    # python function. Resolve once here; smoke.script replaces the built-in
+    # smoke entirely (see export.py).
+    gguf_smoke_prompt = (recipe.smoke.prompt.strip()
+                         or f"Write a {CODE_LANGUAGES[0].lower()} function "
+                            f"that works.")
+    gguf_smoke_tokens = recipe.smoke.tokens or 48
+    gguf_smoke_script = (recipe.smoke.script or "").strip()
 
     # Compute roots
-    roots = resolve_roots(size, dryrun)
+    roots = resolve_roots(size, dryrun, recipe.roots)
+
+    # HF cache. Lives next to the output template the recipe named - or, when
+    # the recipe named nothing, next to the historical default, so a run's
+    # cache location did not silently move when roots: stopped being dead.
+    hf_home_override = os.environ.get("HF_HOME", "")
+    if not hf_home_override:
+        out_tpl = recipe.roots.output or f"{{size}}/train"
+        out_tpl = out_tpl.format(size=size) if "{size}" in out_tpl else out_tpl
+        hf_home_override = os.path.join(
+            os.path.dirname(out_tpl) or ".", "hf_cache")
 
     # Resolve the held-out fraction once, so the gate's held-out split and the
     # router's `.train` split derive from the same number as eval's.
@@ -1109,13 +1166,14 @@ def build_config(recipe, force: bool = False,
         router_init=recipe.moe.router_init,
         router_init_std=recipe.moe.router_init_std,
         shared_expert_width=recipe.moe.shared_expert_width,
-        shared_expert_gate_fill=0.02,
+        shared_expert_gate_fill=recipe.moe.shared_expert_gate_fill,
         mlp_only_layers=mlp_only_layers,
         # GGUF
         llama_cpp_dir=llama_cpp_dir,
-        gguf_smoke_prompt=f"Write a {CODE_LANGUAGES[0].lower()} function that works.",
-        gguf_smoke_tokens=48,
+        gguf_smoke_prompt=gguf_smoke_prompt,
+        gguf_smoke_tokens=gguf_smoke_tokens,
         gguf_smoke_timeout=smoke_timeout,
+        gguf_smoke_script=gguf_smoke_script,
         gguf_degenerate_run=32,
         # HF
         hf_home=hf_home_override,

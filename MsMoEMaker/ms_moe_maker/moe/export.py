@@ -165,6 +165,13 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
         print(f"\n[skip] GGUF already converted "
               f"({os.path.getsize(gguf_path) / 1e9:.2f} GB)")
 
+    # smoke.script REPLACES THE BUILT-IN SMOKE ENTIRELY. The script receives
+    # the GGUF path as argv[1]; exit 0 = pass, anything else = fail with its
+    # last output lines. llama-cli is neither required nor consulted on this
+    # path - "replace" means replace.
+    if getattr(config, "gguf_smoke_script", ""):
+        return _run_custom_smoke(config, gguf_path, smoke_log)
+
     # Find llama-cli
     cli = resolve_llama_binary(config.llama_cpp_dir, "llama-cli")
     if not os.path.exists(cli):
@@ -307,6 +314,34 @@ def export_gguf(config, final_dir: str) -> Optional[str]:
                  f"log={smoke_log}\n")
 
     print(f"\n   try it:  {cli} -m {gguf_path} -ngl 99")
+    return gguf_path
+
+
+def _run_custom_smoke(config, gguf_path: str, smoke_log: str) -> Optional[str]:
+    """smoke.script — the user's own proof that the GGUF generates.
+
+    Replaces the llama-cli smoke entirely: the script gets the GGUF path as
+    argv[1], and its exit code IS the verdict. Same smokepass marker as the
+    built-in, so export_is_done() and resume behave identically either way.
+    """
+    import subprocess
+
+    script = config.gguf_smoke_script
+    print(f"   smoke.script: {script} {gguf_path}")
+    try:
+        r = subprocess.run([sys.executable, script, gguf_path],
+                           capture_output=True, text=True, timeout=3600)
+    except Exception as exc:
+        raise RuntimeError(f"smoke.script {script!r} failed to run: {exc}")
+    with open(smoke_log, "w", encoding="utf-8") as fh:
+        fh.write((r.stdout or "") + "\n" + (r.stderr or ""))
+    if r.returncode != 0:
+        tail = "\n".join((r.stderr or r.stdout).splitlines()[-25:])
+        raise RuntimeError(
+            f"smoke.script {script!r} failed (exit {r.returncode}):\n{tail}")
+    print("   smoke test PASSED — the user's own script proved it")
+    with open(gguf_path + ".smokepass.txt", "w", encoding="utf-8") as fh:
+        fh.write(f"custom script {script}\n")
     return gguf_path
 
 

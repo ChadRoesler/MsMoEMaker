@@ -323,6 +323,19 @@ class Runner:
         """
         from . import builder as bld_mod
 
+        # THE ENV HALF OF translate() USED TO BE SUBPROCESS-ONLY. run_subprocess
+        # puts it in the child's environment; this path emitted it as
+        # env_applied= and never touched os.environ - so the recipe's
+        # runtime.alloc_conf, the lever measured at 106.6 GB reserved versus
+        # 8.3 GB for the same weights, was lost silently on the default path
+        # while being reported under "agreed". Apply it HERE, BEFORE any import
+        # that can initialise torch, and restore afterwards so one Runner in a
+        # long-lived process (tests) cannot leak into the next run.
+        prev_env = {}
+        for key, value in self.translation.env.items():
+            prev_env[key] = os.environ.get(key)
+            os.environ[key] = value
+
         # Connect builder stage events to manifest bookkeeping
         def _on_stage(stage_id, status, note=""):
             self._set(stage_id, status, note=note)
@@ -378,6 +391,13 @@ class Runner:
             self.ev.say(traceback.format_exc().rstrip())
             self.ev.say(f"\n  manifest: {self.run_dir / mf.MANIFEST_NAME}")
             ok = False
+
+        finally:
+            for key, value in prev_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
         self.manifest.finished = time.time()
         self.manifest.ok = ok

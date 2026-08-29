@@ -61,11 +61,16 @@ class Source:
     text_field: str = "code"
     # kind=stack
     language: Optional[str] = None
+    # Per-source cap on shards the stack scan may pull for THIS expert. The
+    # run-wide ceiling is corpus.max_shards; this narrows (or widens, below the
+    # ceiling) the window for one source.
     max_shards: int = 80
     # kind=synth
     teacher: Optional[str] = None
-    generator: Optional[str] = None
-    examples: int = 15_000
+    # How many traces to GENERATE for this expert. Overrides corpus.synth_samples
+    # (and its resolved default) for this one source. Unset (-1) means "the run
+    # default".
+    examples: int = -1
     # Question templates for synth: a path to a YAML of prompts, or a bare
     # name (code | dnd | math | culinary | generic) resolving to the packaged
     # *_templates.yaml. Empty = generic_templates.yaml. The prompts are DOMAIN
@@ -186,7 +191,12 @@ class Gates:
 class Runtime:
     """Runtime flags (precision, GPU config, hardware tier)."""
     precision: str = "float16"
-    load_in_4bit: bool = False
+    # None = "derive from the hardware tier" (the nano tier quantises to 4-bit).
+    # An explicit True or False wins in BOTH directions: a nano box can run one
+    # build in float16, and a big box can opt into 4-bit without editing its
+    # tier. Bool-or-None, because False is a real answer that must not read as
+    # "you did not say".
+    load_in_4bit: Optional[bool] = None
     direct_load: bool = False
     alloc_conf: str = ""
     hardware_tier: str = "xavier"  # nano | xavier | spark
@@ -316,9 +326,18 @@ class SmokeSpec:
 
 @dataclass
 class Roots:
-    """Output directory templates."""
-    data: str = "{size}/corpus"
-    output: str = "{size}/train"
+    """Output directory templates.
+
+    Empty = the tool's historical defaults (msmoe_data / msmoe_run_{size}).
+    Set one and `{size}` is substituted with the resolved size, e.g.
+    `data: corpora/{size}`. THE DEFAULTS USED TO BE `{size}/corpus` and
+    `{size}/train` here while resolve_roots hardcoded msmoe_data - a recipe
+    that never mentioned roots got neither, and a recipe that set roots got
+    the hardcoded answer anyway. Empty means "you did not say", which is the
+    only way a real default and a silent one can coexist.
+    """
+    data: str = ""
+    output: str = ""
 
 
 @dataclass
@@ -549,6 +568,10 @@ def parse(data: Dict[str, Any],
     # instance attribute rather than a dataclass field so recipe_id() (asdict)
     # is not polluted with a value derivable from `experts`.
     rec.tools_expert_name = tools_name
+    # The template's base-family hint (apply_template writes it; parse exempts
+    # underscore keys from typo warnings so it can travel silently). config's
+    # _resolve_base turns it into the concrete checkpoint for the run's size.
+    rec._base_hint = str(data.get("_base_hint") or "").strip()
     # Wire template tier → runtime hardware_tier
     t = data.get("default_tier") or data.get("tier")
     if t and t in ("nano", "xavier", "spark"):
@@ -912,9 +935,11 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
                      "at full speed and emits one token forever.")
 
     # -- roots --------------------------------------------------------------
-    if rec.roots.data == rec.roots.output:
+    # Both empty = the tool's defaults (msmoe_data / msmoe_run_{size}), which
+    # differ by construction - only compare what the recipe actually SAID.
+    if rec.roots.data and rec.roots.output and rec.roots.data == rec.roots.output:
         errs.append("roots.data and roots.output must differ")
-    if "{size}" not in rec.roots.output:
+    if rec.roots.output and "{size}" not in rec.roots.output:
         warns.append("roots.output has no {size} - every rung of the ladder "
                      "will write to the same directory and _done() will skip "
                      "training on the wrong-sized specialists it finds there")

@@ -142,6 +142,7 @@
     <Content Include="README.md" />
     <Content Include="recipe.example.yaml" />
     <Content Include="recipe.flow-0.5B.yaml" />
+    <Content Include="recipe.gauntlet-0.5B.yaml" />
     <Content Include="recipe.rung-0.5B.yaml" />
     <Content Include="SECURITY.md" />
   </ItemGroup>
