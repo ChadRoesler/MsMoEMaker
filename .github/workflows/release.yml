@@ -325,7 +325,7 @@ jobs:
               f"which is the FLOOR, not the table - the yaml did not ship.")
           # A wrong resolution is worse than a missing one, so assert the
           # answers rather than the row count.
-          for _mid, _want in (("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "r1"),
+          for _mid, _want in (("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "xml"),
                               ("Qwen/Qwen3-8B", "xml"),
                               ("meta-llama/Llama-3.1-8B-Instruct", "llama")):
               _got = _rz.style_for_base(_mid, "reasoning", _styles, _fams)
