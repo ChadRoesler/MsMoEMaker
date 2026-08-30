@@ -201,7 +201,7 @@ jobs:
           # in one company's house style that every other check in the package
           # reported as healthy.
           assert set(d["commands"]) == {
-              "init", "build", "corpus", "smoke", "eval", "validate",
+              "init", "build", "corpus", "smoke", "eval", "validate", "export",
               "describe"}, d
           # EVAL MODES ARE ALSO A CONTRACT, and were not being checked at all.
           # A consumer asking for --mode routing has to keep getting routing,
