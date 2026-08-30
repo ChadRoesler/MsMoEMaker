@@ -307,9 +307,7 @@ def _collect_hf(repo: str, text_field: str, split: str,
               f"(min {config.min_samples_per_expert})")
         return None
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        for item in kept:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    _atomic_write_jsonl(out_path, kept)
 
     print(f"   [{lang}] {len(kept)} samples, ~{kept_chars/config.chars_per_token_est/1e6:.1f}M "
           f"est. tokens → {out_path}  ({stop_reason})")
@@ -502,9 +500,7 @@ def _collect_gh(repo: str, glob_pattern: str, ref: Optional[str],
               f"'docs/**/*.md', not '**/docs/**/*.md'.")
         return None
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        for item in kept:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    _atomic_write_jsonl(out_path, kept)
 
     print(f"   [{lang}] {len(kept)} samples from {repo} → {out_path}")
     if callback:
@@ -556,14 +552,28 @@ def _collect_local(path: str, glob_pattern: str, out_path: str,
               f"(min {config.min_samples_per_expert})")
         return None
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        for item in kept:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    _atomic_write_jsonl(out_path, kept)
 
     print(f"   [{lang}] {len(kept)} local samples → {out_path}")
     if callback:
         callback(st.DATA_CORPUS, "running", f"{lang}: {len(kept)} local samples")
     return out_path
+
+
+def _atomic_write_jsonl(out_path: str, rows: List[Dict[str, Any]]) -> None:
+    """Write a corpus file so a reader sees either nothing or the whole thing.
+
+    A crash mid-write used to leave a truncated non-empty file that the next
+    run skipped on existence alone, training on a half-written corpus with a
+    possibly half-written final JSON line. Partial + fsync + rename.
+    """
+    tmp_path = out_path + ".partial"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        for item in rows:
+            fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, out_path)
 
 
 def _repo_label(repo: Dict[str, Any], fallback: str = "") -> str:
@@ -683,15 +693,32 @@ def _collect_from_shards(languages: List[str], config,
     names = names or {}
     safe_map = {l: cfg.safe_name(names.get(l, l)) for l in languages}
 
-    # Check if everything is already on disk
-    existing = {l: f"{config.data_root}/{safe_map[l]}_code.jsonl" for l in languages}
-    if not config.force and all(os.path.exists(p) and os.path.getsize(p) > 0 for p in existing.values()):
+    # Check if everything is already on disk - AND MEETS THE FLOOR. The
+    # min_samples floor used to be enforced only on the collect path, so a
+    # truncated or tiny existing corpus was skipped and trained on anyway.
+    # A file below the floor is treated as absent: that language re-collects.
+    ready = {}
+    for l in languages:
+        p = f"{config.data_root}/{safe_map[l]}_code.jsonl"
+        if config.force or not os.path.exists(p) or os.path.getsize(p) <= 0:
+            continue
+        with open(p) as fh:
+            n = sum(1 for _ in fh)
+        if n >= config.min_samples_per_expert:
+            ready[l] = p
+        else:
+            print(f"   [{l}] existing corpus has {n} samples - below the "
+                  f"{config.min_samples_per_expert} floor, re-collecting")
+    if not config.force and set(ready) == set(languages):
         print("[skip] code datasets already built:")
-        for l, p in existing.items():
+        for l, p in ready.items():
             with open(p) as fh:
                 n = sum(1 for _ in fh)
             print(f"          {l:12} {n:>7} samples  ({p})")
-        return {safe_map[l]: p for l, p in existing.items()}
+        return {safe_map[l]: p for l, p in ready.items()}
+    elif ready:
+        print(f"   reusing {len(ready)} existing corpora; collecting the rest")
+        languages = [l for l in languages if l not in ready]
 
     repo_id = STACK_REPO
     all_files = list_repo_files(repo_id, repo_type="dataset")
@@ -938,14 +965,22 @@ def _collect_from_shards(languages: List[str], config,
               f"you care about, lower min_samples; it is a floor against "
               f"training on scraps, not a way to ask for more data.")
 
-    # Write JSONL
+    # Write JSONL - ATOMICALLY. The whole scan lived in RAM until this loop,
+    # and a crash mid-write used to leave a truncated non-empty file that the
+    # next run skipped on existence alone. Write a .partial, fsync, then
+    # os.replace so a reader sees either the old file or the complete new one,
+    # never a half-written final line.
     paths = {}
     for lang in languages:
         safe = safe_map[lang]
         out_path = f"{config.data_root}/{safe}_code.jsonl"
-        with open(out_path, "w", encoding="utf-8") as fh:
+        tmp_path = out_path + ".partial"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             for s_ in buckets[lang][:config.num_code_samples]:
                 fh.write(json.dumps(s_, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, out_path)
         print(f"Saved {safe} → {out_path} ({len(buckets[lang][:config.num_code_samples])} samples)")
         # Measure the file we just wrote, not the buckets we just held. Same
         # module `validate` and `ms-moe-maker corpus` use, so a reader never
@@ -960,6 +995,9 @@ def _collect_from_shards(languages: List[str], config,
             callback(st.DATA_CORPUS, "running", f"{lang}: {len(buckets[lang])} docs")
         paths[safe] = out_path
         buckets[lang].clear()  # free memory
+
+    # The corpora we reused from disk join the fresh ones; both are complete.
+    paths.update({safe_map[l]: p for l, p in ready.items()})
 
     return paths
 

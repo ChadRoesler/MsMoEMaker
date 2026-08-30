@@ -83,7 +83,11 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     from ..moe import stitch as stitch_mod
     from ..train import router as router_mod
     from ..moe import export as export_mod
-    import torch
+    # NO torch HERE. It used to be imported at the top of run_pipeline, which
+    # made preflight's own "torch is not installed - pip install ms-moe-maker
+    # [train]" FAIL+remedy UNREACHABLE on the in-package path: the bare
+    # ModuleNotFoundError fired first. torch is imported where it is first
+    # needed, in the fine-tune loop below - after preflight has had its say.
 
     result = BuildResult()
     cb = callback or StageCallback()
@@ -212,6 +216,31 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     if not code_paths:
         result.failed_stage = stages.DATA_CORPUS
         result.message = "No corpora were collected"
+        cb.stage(stages.DATA_CORPUS, "failed", result.message)
+        return result
+
+    # A HALF-COLLECTED CORPUS IS A FAILED CORPUS, SAID AT STAGE 1. The old
+    # guard only caught the empty dict; a missing text column, an absent
+    # dataset library, or falling short of corpus.min_samples each silently
+    # dropped ONE expert, and the build died hours later in the fine-tune
+    # loop with "No data path for expert X". Generated experts (synth /
+    # reasoning) get their corpora in stage 2, so they are not expected here.
+    _generated_names = {
+        e.name for e in recipe.experts
+        if e.name in expert_names
+        and getattr(getattr(e, "source", None), "kind", "") == "synth"
+    }
+    _missing = [n for n in expert_names
+                if n not in _generated_names
+                and cfg_module.safe_name(n) not in code_paths]
+    if _missing:
+        result.failed_stage = stages.DATA_CORPUS
+        result.message = (
+            f"corpus collection missed {len(_missing)} expert(s): "
+            f"{', '.join(_missing)}. The collector returned no corpus for "
+            f"them - a missing text column, a dataset library that is not "
+            f"installed, or fewer rows than corpus.min_samples. Fix the "
+            f"source or lower corpus.min_samples, then re-run.")
         cb.stage(stages.DATA_CORPUS, "failed", result.message)
         return result
 
@@ -427,6 +456,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         # nothing else. Keep it that way; a `del` here is always wrong.
         import gc
         gc.collect()
+        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -453,8 +483,14 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
             if gate_mode == "auto":
                 data_root = Path(config.data_root)
                 for name in specialist_dirs:
+                    # The reasoning-trace corpus lives at {name}_reasoning.jsonl
+                    # - it was invisible to this scan, so two reasoning experts
+                    # left the cross-domain loss UNMEASURABLE: the one block
+                    # the README says can tell whether the router has a
+                    # gradient at all.
                     for cand in (data_root / f"{name}.jsonl",
-                                 data_root / f"{name}_code.jsonl"):
+                                 data_root / f"{name}_code.jsonl",
+                                 data_root / f"{name}_reasoning.jsonl"):
                         if cand.is_file():
                             _, hp = eval_mod._load_or_split(
                                 str(cand), config.eval_held_out_fraction)
@@ -470,6 +506,12 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
                 cb.stage(stages.GATE_EXPERTS, "done",
                          f"{len(gate.findings)} finding(s) - see the report; "
                          f"building anyway")
+            elif gate.status == experts_mod.UNMEASURABLE:
+                # EVERY block failed to measure: "experts look routable" would
+                # be the module's own docstring failure - a check that
+                # vanished reading as one that passed.
+                cb.stage(stages.GATE_EXPERTS, "skipped",
+                         f"gate unmeasurable: {', '.join(gate.unmeasured)}")
             else:
                 cb.stage(stages.GATE_EXPERTS, "done", "experts look routable")
         except Exception as exc:                      # never fail the build
@@ -515,6 +557,18 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         return result
 
     # ── Stage 5: Train router ─────────────────────────────────────────────
+    # A FRESH STITCH INVALIDATES THE TRAINED ROUTER. router_is_done only
+    # checked for a config.json, so a restitched skeleton was verified and
+    # then DISCARDED - the router trained on the previous skeleton's tensors
+    # kept skipping, and export/eval ran the old router on new weights.
+    if not stitch_was_present:
+        _old = router_mod.router_dir(config)
+        if os.path.isdir(_old):
+            print(f"   restitched skeleton - discarding the old trained "
+                  f"router at {_old} (it was trained on the previous "
+                  f"skeleton's tensors)")
+            shutil.rmtree(_old, ignore_errors=True)
+
     cb.stage(stages.ROUTER, "running", "training router")
     print(f"\n{'=' * 60}")
     print(f"Stage 5: Training router")
@@ -546,7 +600,11 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     export_was_present = export_mod.export_is_done(config)
     gguf_path = export_mod.export_gguf(config, router_dir)
     if gguf_path is None:
-        cb.stage(stages.EXPORT_GGUF, "warning", "GGUF export skipped (no llama.cpp)")
+        # WARNED, not DONE: nothing was converted and nothing was proven.
+        # "warning" was out-of-vocabulary for the manifest; "warned" is now a
+        # real terminal status the runner must not stamp over.
+        cb.stage(stages.EXPORT_GGUF, mf.WARNED,
+                 "GGUF export skipped (no llama.cpp)")
         result.stages_completed.append(stages.EXPORT_GGUF)
         result.artifacts[stages.EXPORT_GGUF] = "skipped (no llama.cpp)"
     elif gguf_path:

@@ -82,11 +82,16 @@ DONE = "done"
 SKIPPED = "skipped"     # already present on disk; the pipeline's _done() fired
 FAILED = "failed"
 REFUSED = "refused"     # never attempted - see levers.py and the refusal list
+# Completed without the full result the stage exists for: no llama.cpp means
+# the export stage reports "converted nothing" rather than "done" - a viewer
+# must not paint a GGUF that was never attempted. The runner is no longer
+# allowed to overwrite a terminal status with `done` (see Runner._finish_current).
+WARNED = "warned"
 
-STATUSES = (PENDING, RUNNING, DONE, SKIPPED, FAILED, REFUSED)
+STATUSES = (PENDING, RUNNING, DONE, SKIPPED, FAILED, REFUSED, WARNED)
 
 # Statuses that mean "this will not change again without a new run".
-TERMINAL = (DONE, SKIPPED, FAILED, REFUSED)
+TERMINAL = (DONE, SKIPPED, FAILED, REFUSED, WARNED)
 
 
 @dataclass

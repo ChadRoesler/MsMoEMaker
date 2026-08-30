@@ -125,6 +125,46 @@ def test_a_clean_run_exits_zero_and_writes_a_manifest(lab):
     assert written.finished is not None
 
 
+def test_a_terminal_status_the_builder_earned_is_not_stamped_over(tmp_path):
+    """The runner used to stamp `done` over the export stage's real terminal
+    status on success - so Theatre painted "Export GGUF: done" when no GGUF
+    existed and none was attempted. A terminal status the stage already
+    earned wins; only FAILED may overwrite it."""
+    recipe = FakeRecipe(["python", "csharp"])
+    ev = Events(enabled=False)
+    runner = Runner(recipe, None, Translation(), ev, cwd=tmp_path, dryrun=True)
+    runner._set(st.EXPORT_GGUF, mf.RUNNING)
+    runner._set(st.EXPORT_GGUF, mf.WARNED, note="skipped (no llama.cpp)")
+    runner._finish_current(mf.DONE)
+    assert runner.manifest.stage(st.EXPORT_GGUF).status == mf.WARNED
+    assert "skipped" in (runner.manifest.stage(st.EXPORT_GGUF).note or "")
+
+
+def test_the_in_package_plan_predicts_the_gate_stage(tmp_path):
+    """stages.plan gates= was documented as existing for ONE caller - the
+    legacy subprocess wrapper - but was passed for both paths. The in-package
+    builder DOES emit gate.experts, so the manifest plan was short by one and
+    the ladder grew a rung mid-run."""
+    recipe = FakeRecipe(["python", "csharp"])
+    ev = Events(enabled=False)
+    runner = Runner(recipe, None, Translation(), ev, cwd=tmp_path, dryrun=True)
+    ids = [s.id for s in runner.manifest.stages]
+    assert st.GATE_EXPERTS in ids, ids
+
+
+def test_an_unreadable_manifest_is_drift_not_clean(tmp_path):
+    """drift() used to turn a corrupt/truncated manifest into 'no drift' - the
+    one guard between an edited knob and a mixed-settings model, disabled by
+    its own input. Unknown is not unchanged: fail closed."""
+    recipe = FakeRecipe(["python", "csharp"])
+    ev = Events(enabled=False)
+    runner = Runner(recipe, None, Translation(), ev, cwd=tmp_path, dryrun=True)
+    runner.run_dir.mkdir(parents=True, exist_ok=True)
+    (runner.run_dir / mf.MANIFEST_NAME).write_text("not json", encoding="utf-8")
+    changed, finished = runner.drift()
+    assert changed and any("unreadable" in c for c in changed), changed
+
+
 def test_run_builder_applies_and_restores_the_translation_env(tmp_path, monkeypatch):
     """runtime.alloc_conf must reach os.environ on the IN-PACKAGE path too.
 

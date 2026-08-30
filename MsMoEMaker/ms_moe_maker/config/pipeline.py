@@ -547,6 +547,11 @@ class PipelineConfig:
     target_steps: int = 1200
     expert_token_budget: int = 0
     warmup_steps: int = 60
+    # The warmup SHAPE, so the trainer can recompute warmup against the steps
+    # the corpus actually affords (warmup from target_steps could consume the
+    # whole run - see finetune.py, where the real count is known).
+    warmup_ratio: float = 0.05
+    warmup_floor: int = 10
 
     # Router
     #
@@ -1169,6 +1174,8 @@ def build_config(recipe, force: bool = False,
         target_steps=target_steps,
         expert_token_budget=expert_token_budget,
         warmup_steps=warmup_steps,
+        warmup_ratio=b.warmup_ratio,
+        warmup_floor=b.warmup_floor,
         # Router
         per_repo_cap=per_repo_cap,
         router_mix_total=_mix_total,

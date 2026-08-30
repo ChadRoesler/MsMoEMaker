@@ -122,10 +122,22 @@ def specialist_is_done(config, safe_name: str) -> bool:
 # deriving it twice is how they drift. (Runner and build_config each worked out
 # the run directory independently and disagreed - the manifest went to one
 # folder and every artifact to another. Same trap, so: one function.)
+
+# NOT PRESENCE-ONLY. `merged.save_pretrained` writes config.json FIRST, then
+# multi-GB weight shards, and the tokenizer in a separate call after that - a
+# kill / OOM / disk-full anywhere in that window used to leave a config.json
+# that read as "already trained", so resume SKIPPED the expert and the stitch
+# stitched a directory with no weights in it. All three markers must exist.
     """
     if config.force:
         return False
-    return os.path.exists(f"{specialist_dir(config, safe_name)}/config.json")
+    d = specialist_dir(config, safe_name)
+    if not os.path.exists(os.path.join(d, "config.json")):
+        return False
+    has_weights = (os.path.exists(os.path.join(d, "model.safetensors"))
+                   or os.path.exists(os.path.join(d, "pytorch_model.bin")))
+    has_tokenizer = os.path.exists(os.path.join(d, "tokenizer_config.json"))
+    return has_weights and has_tokenizer
 
 
 def expert_seed(seed: int, safe_name: str) -> int:
@@ -392,6 +404,18 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         config.chars_per_token_est,
     )
 
+    # WARMUP FROM THE STEPS THE RUN WILL ACTUALLY TAKE, not target_steps.
+    # The trim above is the real schedule: a short corpus means fewer steps,
+    # and target_steps-based warmup could spend 25-100% of the run ramping -
+    # at the README's small-run settings the entire run was warmup and the LR
+    # never reached lr_lora. Cap at half the schedule so warmup can never BE
+    # the schedule.
+    planned_steps = max(
+        1, len(dataset) // (config.per_device_batch * config.grad_accum))
+    warmup_steps = min(
+        max(config.warmup_floor, round(config.warmup_ratio * planned_steps)),
+        planned_steps // 2)
+
     # Build trainer
     tmp_dir = f"{config.output_root}/tmp_{safe_name}"
 
@@ -427,7 +451,7 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         seed=seed,
         per_device_train_batch_size=config.per_device_batch,
         gradient_accumulation_steps=config.grad_accum,
-        warmup_steps=config.warmup_steps,
+        warmup_steps=warmup_steps,
         num_train_epochs=1,
         learning_rate=config.lr_lora,
         fp16=not torch.cuda.is_bf16_supported(),

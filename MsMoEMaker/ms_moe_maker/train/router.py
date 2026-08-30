@@ -24,10 +24,19 @@ def router_dir(config) -> str:
 
 
 def router_is_done(config) -> bool:
-    """Is the router-trained MoE already on disk? See finetune.specialist_is_done."""
+    """Is the router-trained MoE already on disk? See finetune.specialist_is_done.
+
+    Same trap, same fix: presence of config.json alone means nothing - the
+    final model's weights must actually be there, or a half-written save
+    would skip the router stage and export a shell.
+    """
     if config.force:
         return False
-    return os.path.exists(os.path.join(router_dir(config), "config.json"))
+    d = router_dir(config)
+    if not os.path.exists(os.path.join(d, "config.json")):
+        return False
+    return (os.path.exists(os.path.join(d, "model.safetensors"))
+            or os.path.exists(os.path.join(d, "pytorch_model.bin")))
 
 
 def train_router(config, final_dir: str, safe_names: List[str],

@@ -184,7 +184,15 @@ class Runner:
             refusals=list(translation.refusals),
             stages=[mf.Stage(id=sid, label=label)
                     for sid, label in st.plan(
-                        experts, synth, gates=False,
+                        experts, synth,
+                        # gates= means "does this path emit gate.experts?".
+                        # The in-package builder does; the legacy subprocess
+                        # pipeline does not. The plan used to say False for
+                        # both, so the manifest's stage list was short by one
+                        # and the gate appeared mid-run as an unpredicted
+                        # stage, growing the ladder a rung.
+                        gates=(self.pipeline is None
+                               or not self.pipeline.is_file()),
                         abliterate=bool(getattr(
                             getattr(recipe, "abliterate", None), "enabled", False)))],
         )
@@ -242,6 +250,17 @@ class Runner:
 
     def _finish_current(self, status: str = mf.DONE, **kw: Any) -> None:
         if self._current:
+            # A TERMINAL STATUS THE STAGE ALREADY EARNED WINS. The builder
+            # reports "warned" for an export it skipped (no llama.cpp) and
+            # "skipped" for a resumed one; this method used to stamp `done`
+            # over both on success, so Theatre painted "Export GGUF: done"
+            # when no GGUF existed and none was attempted. Only a failure may
+            # overwrite a terminal status.
+            stage = self.manifest.stage(self._current)
+            if stage is not None and stage.status in mf.TERMINAL \
+                    and status != mf.FAILED:
+                self._current = None
+                return
             # APPEND to a note rather than replacing it. Losing what the stage
             # had already learned is a real loss: a GGUF stage that recorded
             # "converted 3.78 GB - smoke test pending" and then died would have
@@ -278,13 +297,42 @@ class Runner:
         more than it costs.
         """
         if not self.manifest.build_id:
-            return [], []
+            # The CURRENT run could not be fingerprinted - there is no basis
+            # for a comparison, which is the same as "we cannot prove resume
+            # is safe". Fail CLOSED: report the unknown and let --force decide.
+            try:
+                prev = mf.read(self.run_dir)
+            except Exception:
+                prev = None
+            if prev is None:
+                return [], []
+            finished = [s.id for s in prev.stages
+                        if s.status in (mf.DONE, mf.SKIPPED)]
+            return (["this run's settings could not be fingerprinted, so "
+                     "resume cannot be verified against the previous build"],
+                    finished or ["unknown"])
         try:
             prev = mf.read(self.run_dir)
+        except mf.UnreadableManifest:
+            # FAIL CLOSED. A manifest we cannot read (corrupt JSON, truncated
+            # by the disk-full preflight warns about) used to read as "no
+            # drift" - the one guard between an edited knob and a
+            # mixed-settings model, disabled by its own input.
+            return (["the previous manifest is unreadable (corrupt or "
+                     "truncated) - refusing to guess about resume"],
+                    ["unreadable"])
         except Exception:
             return [], []
-        if prev is None or not prev.build_id:
+        if prev is None:
             return [], []
+        if not prev.build_id:
+            # Every run directory written before build ids existed: its
+            # settings are unknowable, which is not the same as "unchanged".
+            finished = [s.id for s in prev.stages
+                        if s.status in (mf.DONE, mf.SKIPPED)]
+            return (["this run predates build ids - its settings are "
+                     "unknown, so resume cannot be verified"],
+                    finished or ["unknown"])
         if prev.build_id == self.manifest.build_id:
             return [], []
         finished = [s.id for s in prev.stages if s.status in (mf.DONE, mf.SKIPPED)]
@@ -352,6 +400,18 @@ class Runner:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._set(st.PREFLIGHT, mf.RUNNING)
 
+        # THE WIRE CONTRACT ON THE DEFAULT PATH. Under --json, stdout belongs
+        # to the event stream and NOTHING else may write to it - but the
+        # in-package builder and its data/train stages print prose to stdout
+        # (43 bare print()s). run_subprocess funnels the child correctly;
+        # this path did neither, so `build r.yaml --json | jq` got
+        # `============` and `[cfg] batch=4x2` interleaved with events. Swap
+        # stdout to stderr for the duration; Events keeps its own reference to
+        # the real stdout, so the stream itself is untouched.
+        _real_stdout = sys.stdout
+        if self.ev.enabled:
+            sys.stdout = sys.stderr
+
         try:
             result = bld_mod.run_pipeline(
                 self.recipe,
@@ -393,6 +453,7 @@ class Runner:
             ok = False
 
         finally:
+            sys.stdout = _real_stdout
             for key, value in prev_env.items():
                 if value is None:
                     os.environ.pop(key, None)

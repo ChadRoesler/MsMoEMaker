@@ -229,9 +229,19 @@ def _check_datasets(pf: Preflight, recipe, offline: bool = False) -> None:
 
 
 def _check_roots(pf: Preflight, config) -> None:
-    """Writable, and enough room. Both are cheap to ask and awful to discover."""
+    """Writable, and enough room. Both are cheap to ask and awful to discover.
+
+    THE CORPUS VOLUMES COUNT TOO. This used to check data_root and
+    output_root only, while a 45 GB shard scan fills shard_cache and the base
+    weights land in hf_home - preflight passed green and stage 1 filled the
+    volume, leaving the half-written corpus 4.7's skip path then trusted.
+    """
     for label, path in (("data root", config.data_root),
-                        ("output root", config.output_root)):
+                        ("output root", config.output_root),
+                        ("shard cache", getattr(config, "shard_cache", "")),
+                        ("hf cache", getattr(config, "hf_home", ""))):
+        if not path:
+            continue
         # PROBE THE NEAREST EXISTING PARENT, do not create the directory.
         # Preflight runs under `--plan` too, and a command whose whole promise
         # is "resolve everything, run nothing" must not leave run directories
@@ -269,13 +279,24 @@ def _check_roots(pf: Preflight, config) -> None:
         # Rough floor. A specialist per expert plus the stitched MoE plus a
         # GGUF is many times the base model, and running out mid-stitch leaves
         # a half-written checkpoint that _done() may then treat as finished.
-        need = _estimated_gb(config)
+        # The shard cache gets the corpus estimate instead: each shard is
+        # ~0.57 GB and max_shards caps how many the scan may pull.
+        if label == "shard cache":
+            need = getattr(config, "max_shards", 0) * 0.57 + 1
+        else:
+            need = _estimated_gb(config)
         if free_gb < need:
+            remedy = ("free space or move the roots to a bigger volume. "
+                      "Running out mid-stitch can leave a partial checkpoint "
+                      "that looks finished to a resume.")
+            if label == "shard cache":
+                remedy = ("free space, move the roots, or lower "
+                          "corpus.max_shards - each shard is ~0.57 GB and a "
+                          "half-downloaded shard corrupts the next scan's "
+                          "resume.")
             pf.add(label, FAIL,
                    f"{path}: {free_gb:.0f} GB free, ~{need:.0f} GB needed",
-                   "free space or move the roots to a bigger volume. Running "
-                   "out mid-stitch can leave a partial checkpoint that looks "
-                   "finished to a resume.")
+                   remedy)
         else:
             pf.add(label, PASS, f"{path}: {free_gb:.0f} GB free "
                                 f"(~{need:.0f} GB estimated)")

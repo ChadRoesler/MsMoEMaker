@@ -105,6 +105,26 @@ def test_no_bare_callback_is_handed_to_the_trainer():
         "importing transformers at import time, which is why this is a factory")
 
 
+def test_a_half_saved_specialist_does_not_count_as_done(tmp_path):
+    """specialist_is_done used to be presence of config.json alone, which
+    save_pretrained writes BEFORE the multi-GB shards and the tokenizer. A
+    kill/OOM/disk-full in that window left a shell that resume skipped - and
+    the stitch then stitched a directory with no weights in it."""
+    import types
+
+    from ms_moe_maker.train import finetune as f
+
+    cfg = types.SimpleNamespace(force=False, output_root=str(tmp_path))
+    d = tmp_path / f.specialist_dir(cfg, "python")
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}", encoding="utf-8")
+    assert f.specialist_is_done(cfg, "python") is False, (
+        "config.json alone is the half-saved shell")
+    (d / "model.safetensors").write_bytes(b"x")
+    (d / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    assert f.specialist_is_done(cfg, "python") is True
+
+
 def test_finetune_imports_without_transformers():
     """The reason the factory exists at all."""
     import importlib

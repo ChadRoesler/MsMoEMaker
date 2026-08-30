@@ -507,7 +507,21 @@ def _interpret(rep: ExpertsReport) -> None:
         if block.get("status") == UNMEASURABLE:
             rep.unmeasured.append(f"{name}: {block.get('reason', 'unknown')}")
 
-    rep.status = WARN if rep.findings else OK
+    # A GATE THAT MEASURED NOTHING MUST NOT READ AS A PASS. Every block can
+    # be UNMEASURABLE with findings still empty; "experts look routable" was
+    # then printed over nothing - the module docstring's own named failure, a
+    # check that vanished reading as one that passed.
+    def _measured_ok(block) -> bool:
+        return isinstance(block, dict) and block.get("status") == OK
+
+    if rep.findings:
+        rep.status = WARN
+    elif rep.unmeasured and not any(
+            _measured_ok(b)
+            for b in (rep.divergence, rep.pairwise, rep.cross_loss)):
+        rep.status = UNMEASURABLE
+    else:
+        rep.status = OK
 
 
 def run_experts(config,
