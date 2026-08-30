@@ -312,3 +312,26 @@ def test_per_source_max_shards_and_token_budget_reach_the_scan(monkeypatch):
         "expert.tokens must override the token budget for that expert")
     assert "PowerShell" not in seen["caps"]
     assert "PowerShell" not in seen["targets"]
+
+
+def test_a_gh_source_without_a_glob_gets_the_md_default(monkeypatch):
+    """Source.glob used to default to a truthy '**/*.txt', which made the
+    '**/*.md' fallback unreachable - a doc-repo source collected zero files
+    while describe and the README promised markdown."""
+    import types
+
+    from ms_moe_maker.config.recipe import Source
+    from ms_moe_maker.data import synth as d
+
+    seen = {}
+
+    def fake_gh(repo, glob_pat, ref, subdir, out_path, config,
+                callback=None, lang=""):
+        seen["glob"] = glob_pat
+        return out_path
+
+    monkeypatch.setattr(d, "_collect_gh", fake_gh)
+    d.collect_corpus(types.SimpleNamespace(data_root="d", force=False),
+                     languages=["docs"],
+                     sources={"docs": Source(kind="gh", repo="o/r")})
+    assert seen["glob"] == "**/*.md"

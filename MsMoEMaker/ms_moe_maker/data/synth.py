@@ -126,7 +126,7 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
 
         elif kind == "local":
             path = getattr(src, 'path', None) or src.get('path', '')
-            glob_pat = getattr(src, 'glob', '**/*.txt') or src.get('glob', '**/*.txt')
+            glob_pat = getattr(src, 'glob', None) or src.get('glob', '**/*.txt')
             if not path:
                 print(f"   [skip] {expert_name}: no path specified")
                 continue
@@ -721,7 +721,12 @@ def _collect_from_shards(languages: List[str], config,
     #
     # The cap is per repo PER LANGUAGE, so a monorepo that legitimately holds
     # both still contributes to both - it just cannot BE either.
-    per_repo_cap = getattr(config, "per_repo_cap", 0) or 20
+    # 0 means NO cap (a real answer); only "unset" falls back to 20. The old
+    # line was `or 20`, so per_repo_cap: 0 - "one repo may be the whole
+    # corpus" - was silently rewritten to 20.
+    per_repo_cap = getattr(config, "per_repo_cap", None)
+    if per_repo_cap is None:
+        per_repo_cap = 20
 
     buckets = {lang: [] for lang in languages}
     chars = {lang: 0 for lang in languages}
@@ -787,7 +792,7 @@ def _collect_from_shards(languages: List[str], config,
                     continue
                 if f.get("is_vendor"):
                     continue
-                if taken_here[lang] >= per_repo_cap:
+                if per_repo_cap and taken_here[lang] >= per_repo_cap:
                     capped_hits[lang] += 1
                     continue
                 cid = f.get("content_id")

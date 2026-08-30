@@ -109,8 +109,8 @@ def stitch_moe(config, safe_names: List[str]) -> str:
         raise RuntimeError(
             f"specialist {anchor_name!r} is QUANTISED on disk — its weights are "
             f"bitsandbytes-packed, not real matrices, and cannot be stitched. "
-            f"Fix: set load_in_4bit=False, delete the specialist directories, "
-            f"and retrain.")
+            f"Fix: set runtime.load_in_4bit: false in the recipe, delete the "
+            f"specialist directories, and retrain.")
 
     # Remove fields that the MoE config overrides
     for key in ("architectures", "model_type", "num_experts",

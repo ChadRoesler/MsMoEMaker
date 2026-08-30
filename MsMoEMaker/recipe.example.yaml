@@ -55,12 +55,12 @@ experts:
       text_field: text
 
 # ── size ─────────────────────────────────────────────────────────────────────
-# Pick from: 0.5B  1.5B  3B  9B  36B
+# Pick from: 0.5B  1.5B  3B  7B  14B  32B
 #
 # If you omit it or write "auto", the hardware tier picks the default.
 #   nano (3GB)   → 3B    (GGUF Q4_K_M)
-#   xavier (9GB) → 9B    (GGUF Q5_K_M)
-#   spark (36GB) → 36B   (GGUF Q8_0)
+#   xavier (9GB) → 7B    (GGUF Q5_K_M)
+#   spark (36GB) → 32B   (GGUF Q8_0)
 #
 # This recipe defaults to auto → picked from tier.
 

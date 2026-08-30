@@ -25,10 +25,13 @@ def _cmd_eval(args):
     config = build_config(rec, force=args.force)
 
     # The recipe is the floor; --mode overrides it for this one run.
+    # held_out_fraction comes from the RESOLVED config (clamped once, in
+    # build_config) - the raw recipe value used to reach run_eval unclamped,
+    # so the router trained on one split while eval re-split at another.
     spec = {
         "script": rec.eval.script,
         "mode": args.eval_mode or rec.eval.mode,
-        "held_out_fraction": rec.eval.held_out_fraction,
+        "held_out_fraction": config.eval_held_out_fraction,
         "num_samples": rec.eval.num_samples,
         "dead_threshold": rec.eval.dead_threshold,
     }

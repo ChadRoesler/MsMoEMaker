@@ -116,6 +116,6 @@ class TestTiersStayReal:
             assert c.tier == tier
             assert c.size == spec.default_size
             assert c.lora_r == spec.default_lora_r
-            assert (c.load_in_4bit is True) == (
-                spec.default_quant in ("Q4_K_M", "Q4_0", "Q4_1")
-                and tier == "nano")
+            # 4-bit TRAINING is opt-in, never derived from the tier's GGUF
+            # quant - deriving it made the nano floor unfinishable by default.
+            assert c.load_in_4bit is False

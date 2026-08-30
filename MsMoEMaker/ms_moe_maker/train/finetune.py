@@ -269,6 +269,17 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
             "MSMOE_UNSLOTH=1 but unsloth is not installed. "
             "Either pip install unsloth or unset MSMOE_UNSLOTH.")
 
+    # 4-BIT TRAINING FAILS FAST, BEFORE THE EXPENSIVE PART. The merged save
+    # needs unsloth's save_pretrained_merged; the plain path used to discover
+    # that AFTER trainer.train() had already finished - i.e. after the whole
+    # bill had been paid. Refuse up front, with the recipe-level remedy.
+    if config.load_in_4bit and not unsloth_available:
+        raise RuntimeError(
+            "runtime.load_in_4bit=true needs unsloth (its "
+            "save_pretrained_merged produces the mergeable specialist). "
+            "Refusing BEFORE training: set runtime.load_in_4bit: false in the "
+            "recipe, or install unsloth and set MSMOE_UNSLOTH=1.")
+
     # Lazy import TRL
     try:
         from trl import SFTTrainer, SFTConfig
@@ -502,11 +513,16 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
             f"budget above {resumed_at}.")
 
     # Save merged specialist (dense, NOT quantised)
+    # `merged` is bound only in the else branch; initialising it here means
+    # the 4-bit path can reach the shared `del` below without a NameError -
+    # which used to mark a run FAILED with the specialist already on disk.
+    merged = None
     if config.load_in_4bit:
         if not hasattr(model, "save_pretrained_merged"):
             raise RuntimeError(
-                "LOAD_IN_4BIT=True needs unsloth's save_pretrained_merged. "
-                "Set LOAD_IN_4BIT=False and retrain.")
+                "runtime.load_in_4bit=true but this model has no "
+                "save_pretrained_merged (unsloth was not active). Set "
+                "runtime.load_in_4bit: false and retrain.")
         model.save_pretrained_merged(out_dir, tokenizer, save_method="merged_16bit")
     else:
         merged = model.merge_and_unload()

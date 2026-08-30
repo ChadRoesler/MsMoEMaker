@@ -68,7 +68,7 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         "default_eval": {
             "held_out_fraction": 0.1,
             "num_samples": 20,
-            "dead_threshold": 0.3,
+            "dead_threshold": 1.2,
         },
     },
     "dnd": {
@@ -127,7 +127,7 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         "default_eval": {
             "held_out_fraction": 0.1,
             "num_samples": 10,
-            "dead_threshold": 0.4,
+            "dead_threshold": 1.2,
         },
     },
     "math": {
@@ -194,7 +194,7 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         "default_eval": {
             "held_out_fraction": 0.15,
             "num_samples": 20,
-            "dead_threshold": 0.3,
+            "dead_threshold": 1.2,
         },
     },
     "culinary": {
@@ -265,7 +265,7 @@ TEMPLATES: Dict[str, Dict[str, Any]] = {
         "default_eval": {
             "held_out_fraction": 0.1,
             "num_samples": 10,
-            "dead_threshold": 0.35,
+            "dead_threshold": 1.2,
         },
     },
 }
@@ -322,11 +322,15 @@ def apply_template(recipe: Dict[str, Any], template_name: str) -> Dict[str, Any]
     if "experts" not in merged and "default_experts" in tpl:
         merged["experts"] = tpl["default_experts"]
 
-    # Nested blocks — the recipe's own values always win.
+    # Nested blocks — MERGED PER KEY, not clobbered wholesale. `template: code`
+    # plus `budget: {target_steps: 300}` used to drop the template's
+    # max_seq_length 4096 and fall to the dataclass 2048, silently halving
+    # tokens/expert. The template's block is the floor; each recipe key wins
+    # on its own.
     for key in ("budget", "moe", "gates", "runtime", "eval", "smoke"):
         tpl_key = f"default_{key}"
-        if tpl_key in tpl and key not in merged:
-            merged[key] = dict(tpl[tpl_key])
+        if tpl_key in tpl:
+            merged[key] = {**dict(tpl[tpl_key]), **(merged.get(key) or {})}
 
     # default_tier is the hardware tier, which lives at runtime.hardware_tier.
     if "default_tier" in tpl:

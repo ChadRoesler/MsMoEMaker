@@ -36,6 +36,29 @@ def _recipe(**over):
     return rec
 
 
+def test_a_non_qwen_base_is_refused_even_from_env():
+    """validate() only checks recipe.base; an env override or a box `models:`
+    entry swaps in the REAL base unseen. Preflight sees the resolved id, so it
+    refuses before anything expensive starts - the failure the recipe check's
+    own comment exists to prevent, asked of the right id."""
+    out = pf.Preflight()
+    pf._check_base_model(
+        out,
+        types.SimpleNamespace(base="meta-llama/Llama-3.1-8B-Instruct"),
+        offline=True)
+    assert any(c.status == FAIL for c in out.checks), out.checks
+    assert "not a supported MoE architecture" in out.checks[0].detail
+
+
+def test_a_qwen_base_still_passes_the_arch_check():
+    out = pf.Preflight()
+    pf._check_base_model(
+        out,
+        types.SimpleNamespace(base="Qwen/Qwen2.5-Coder-0.5B-Instruct"),
+        offline=True)
+    assert all(c.status != FAIL for c in out.checks), out.checks
+
+
 class TestSeverities:
     """A warning that stops the build is a failure wearing a friendly word."""
 

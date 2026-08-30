@@ -86,7 +86,10 @@ class Source:
     subdir: Optional[str] = None    # narrow to one directory in the repo
     # kind=local
     path: Optional[str] = None
-    glob: str = "**/*.txt"
+    # "" = the KIND's default (**/*.md for gh, **/*.txt for local). A truthy
+    # default here made the gh fallback unreachable, so a doc-repo source with
+    # no explicit glob collected zero files while the docs promised **/*.md.
+    glob: str = ""
 
 
 @dataclass
@@ -191,11 +194,11 @@ class Gates:
 class Runtime:
     """Runtime flags (precision, GPU config, hardware tier)."""
     precision: str = "float16"
-    # None = "derive from the hardware tier" (the nano tier quantises to 4-bit).
-    # An explicit True or False wins in BOTH directions: a nano box can run one
-    # build in float16, and a big box can opt into 4-bit without editing its
-    # tier. Bool-or-None, because False is a real answer that must not read as
-    # "you did not say".
+    # None/False = train in bf16 (the only path that always works). True opts
+    # into 4-bit TRAINING, which needs unsloth (save_pretrained_merged) - the
+    # export quant is a GGUF concern and must not decide the training
+    # precision. Bool-or-None, because False is a real answer that must not
+    # read as "you did not say".
     load_in_4bit: Optional[bool] = None
     direct_load: bool = False
     alloc_conf: str = ""
@@ -519,7 +522,11 @@ def parse(data: Dict[str, Any],
     tools_defaults = dict((defaults or {}).get("tools_expert") or {})
     tools_expert = data.get("tools_expert", False)
     tools_name = ""
-    if tools_expert:
+    # `if tools_expert:` treated `tools_expert: {}` as "off" - an empty
+    # customisation mapping is still a REQUEST for the tools expert, just one
+    # that changes nothing, so it must inject the defaults. A mapping (even an
+    # empty one) or any truthy value asks; False/None/0/"" do not.
+    if tools_expert or isinstance(tools_expert, dict):
         spec = dict(tools_defaults)
         if isinstance(tools_expert, dict):
             spec.update({k: v for k, v in tools_expert.items()
@@ -681,9 +688,15 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
         if rec.abliterate.checkpoint_action not in ("continue", "restart"):
             errs.append(f"abliterate.checkpoint_action must be continue | restart, "
                         f"got {rec.abliterate.checkpoint_action!r}")
-        if rec.abliterate.n_trials == 0:
-            errs.append("abliterate.n_trials must be -1 (default) or a positive "
-                        "integer")
+        if rec.abliterate.n_trials != -1 and rec.abliterate.n_trials < 1:
+            errs.append(f"abliterate.n_trials must be -1 (default) or >= 1, got "
+                        f"{rec.abliterate.n_trials}")
+        if rec.abliterate.seed is not None and rec.abliterate.seed < 0:
+            errs.append(f"abliterate.seed must be >= 0 or unset, got "
+                        f"{rec.abliterate.seed}")
+        if rec.abliterate.trial_index is not None and rec.abliterate.trial_index < 0:
+            errs.append(f"abliterate.trial_index must be >= 0 or unset, got "
+                        f"{rec.abliterate.trial_index}")
 
     # -- base model architecture --------------------------------------------
     #
@@ -773,6 +786,18 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             kind_errs, kind_warns = corpus.check(s.kind, s)
             errs.extend(f"{e.name}: {m}" for m in kind_errs)
             warns.extend(f"{e.name}: {m}" for m in kind_warns)
+
+            # PER-SOURCE NUMBERS, refused rather than silently ignored or
+            # silently clamped.
+            if s.max_shards is not None and s.max_shards < 1:
+                errs.append(f"{e.name}: source.max_shards must be >= 1, got "
+                            f"{s.max_shards}")
+            if s.examples != -1 and s.examples < 1:
+                errs.append(f"{e.name}: source.examples must be -1 (run "
+                            f"default) or >= 1, got {s.examples}")
+            if e.tokens is not None and e.tokens < 1:
+                errs.append(f"{e.name}: expert.tokens must be unset or >= 1, "
+                            f"got {e.tokens}")
 
             if s.kind == "stack" and s.language:
                 warns.append(f"{e.name}: source.kind=stack language {s.language!r} "
@@ -893,13 +918,14 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     # AN IMPOSSIBLE FLOOR, CAUGHT BEFORE THE SCAN RATHER THAN AFTER IT.
     # min_samples is a floor and max_samples is a ceiling; a floor above the
     # ceiling can never be satisfied, and the scan would walk shards until the
-    # cap discovering that.
-    if (rec.corpus.min_samples > 0 and rec.corpus.max_samples > 0
-            and rec.corpus.min_samples > rec.corpus.max_samples):
+    # cap discovering that. An UNSET ceiling is still a ceiling - the run will
+    # use its production default - so the comparison uses the effective cap.
+    _eff_max = rec.corpus.max_samples if rec.corpus.max_samples > 0 else 100_000
+    if rec.corpus.min_samples > 0 and rec.corpus.min_samples > _eff_max:
         errs.append(
-            f"corpus.min_samples ({rec.corpus.min_samples}) is above "
-            f"corpus.max_samples ({rec.corpus.max_samples}) - the floor is "
-            f"higher than the ceiling, so no scan can satisfy it")
+            f"corpus.min_samples ({rec.corpus.min_samples}) is above the "
+            f"effective corpus.max_samples ({_eff_max}) - the floor is higher "
+            f"than the ceiling, so no scan can satisfy it")
 
     # A MIX THE CEILING CANNOT FILL. Same family as the check above, one step
     # further out: corpus.max_samples caps what each expert may collect, and
@@ -907,23 +933,25 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     # `.train` split of exactly that. If the cap is below what the mix needs,
     # the corpus stage passes, every specialist trains, and the router comes up
     # short of quota on every expert - hours later, reported as a gate that
-    # would not learn. Refuse in two seconds on a laptop instead.
-    if rec.corpus.max_samples > 0:
-        from .pipeline import router_doc_need
-        _mix = (rec.corpus.router_mix_total
-                if rec.corpus.router_mix_total > 0 else 16_000)
-        _frac = (rec.router.agent_mix_fraction
-                 if rec.router.agent_mix_fraction >= 0 else 0.15)
-        _need = router_doc_need(rec, _mix, _frac)
-        if _need > rec.corpus.max_samples:
-            errs.append(
-                f"corpus.max_samples ({rec.corpus.max_samples:,}) cannot feed a "
-                f"{_mix:,}-row router mix: each expert would need about "
-                f"{_need:,} collected docs so its share survives the held-out "
-                f"split. Raise corpus.max_samples to {_need:,}+, lower "
-                f"corpus.router_mix_total, or buy the same router steps more "
-                f"cheaply with router.epochs "
-                f"(steps = router_mix_total x epochs / (batch x accum)).")
+    # would not learn. Refuse in two seconds on a laptop instead. An unset cap
+    # uses the production default, so a huge mix with a silent cap is refused
+    # too rather than discovered hours in.
+    from .pipeline import router_doc_need
+    _mix = (rec.corpus.router_mix_total
+            if rec.corpus.router_mix_total > 0 else 16_000)
+    _frac = (rec.router.agent_mix_fraction
+             if rec.router.agent_mix_fraction >= 0 else 0.15)
+    _need = router_doc_need(rec, _mix, _frac)
+    if _need > _eff_max:
+        errs.append(
+            f"corpus.max_samples (effectively {_eff_max:,}"
+            + (" - unset, so the production default applies)" if rec.corpus.max_samples <= 0 else ")")
+            + f" cannot feed a {_mix:,}-row router mix: each expert would "
+            f"need about {_need:,} collected docs so its share survives the "
+            f"held-out split. Raise corpus.max_samples to {_need:,}+, lower "
+            f"corpus.router_mix_total, or buy the same router steps more "
+            f"cheaply with router.epochs "
+            f"(steps = router_mix_total x epochs / (batch x accum)).")
 
     if rec.gates.experts not in ("auto", "cheap", "skip"):
         errs.append(f"gates.experts must be auto | cheap | skip, got "
@@ -933,6 +961,102 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
                      "expensive suite will run unattended on whatever the "
                      "build produced, including a NaN'd model that generates "
                      "at full speed and emits one token forever.")
+
+    # -- numbers that must mean something -------------------------------------
+    #
+    # Values that validate clean and then produce nonsense: a router that
+    # trains zero steps, a token target that is negative, a size that silently
+    # resolves to a different model. Every one of these is refused HERE, on a
+    # laptop, because "it parsed" is not "it means what you meant".
+    from ..box.describe import EVAL_MODES
+    if rec.size not in ("auto", ""):
+        from .pipeline import model_sizes as _model_sizes
+        if rec.size not in _model_sizes(rec):
+            errs.append(
+                f"size {rec.size!r} is not a known size on this box "
+                f"({', '.join(sorted(_model_sizes(rec)))}) - it would "
+                f"silently resolve to the tier default and build a different "
+                f"model than the one written down. Set `size: auto` to take "
+                f"the tier's default on purpose.")
+
+    bud = rec.budget
+    if bud.max_seq_length <= 0:
+        errs.append(f"budget.max_seq_length must be > 0, got {bud.max_seq_length}")
+    if bud.collect_headroom <= 0:
+        errs.append(f"budget.collect_headroom must be > 0 - it scales the "
+                    f"token target, so {bud.collect_headroom} collects a "
+                    f"negative amount")
+    if bud.lora_r != -1 and not (1 <= bud.lora_r <= 256):
+        errs.append(f"budget.lora_r must be -1 (tier default) or 1-256, got "
+                    f"{bud.lora_r} - 0 is not 'you decide', -1 is")
+    if bud.lora_alpha != -1 and bud.lora_alpha < 1:
+        errs.append(f"budget.lora_alpha must be -1 or >= 1, got {bud.lora_alpha}")
+    if bud.lora_dropout != -1 and not (0.0 <= bud.lora_dropout <= 1.0):
+        errs.append(f"budget.lora_dropout must be -1 or in [0, 1], got "
+                    f"{bud.lora_dropout}")
+    for knob, val in (("teacher_max_new", bud.teacher_max_new),
+                      ("reasoning_teacher_max_new",
+                       bud.reasoning_teacher_max_new)):
+        if val != -1 and val < 1:
+            errs.append(f"budget.{knob} must be -1 (default) or >= 1, got {val}")
+
+    r = rec.router
+    if r.batch != -1 and r.batch < 1:
+        errs.append(f"router.batch must be -1 or >= 1, got {r.batch}")
+    if r.batch == 1:
+        warns.append("router.batch=1 means every batch is a single domain - "
+                     "the aux loss sees no mixing. The default is 8.")
+    if r.accum != -1 and r.accum < 1:
+        errs.append(f"router.accum must be -1 or >= 1, got {r.accum}")
+    if r.epochs != -1 and r.epochs <= 0:
+        errs.append(f"router.epochs must be -1 (default) or > 0, got {r.epochs} "
+                    f"- zero epochs is a router that trains zero steps and "
+                    f"reads as a design failure")
+    if r.lr != -1 and r.lr <= 0:
+        errs.append(f"router.lr must be -1 or > 0, got {r.lr}")
+    if r.aux_loss_coef != -1 and r.aux_loss_coef < 0:
+        errs.append(f"router.aux_loss_coef must be -1 or >= 0, got "
+                    f"{r.aux_loss_coef}")
+    if r.agent_mix_fraction != -1 and not (0.0 <= r.agent_mix_fraction <= 1.0):
+        errs.append(f"router.agent_mix_fraction must be -1 or in [0, 1], got "
+                    f"{r.agent_mix_fraction}")
+
+    if m.experts_per_tok < 1:
+        errs.append(f"moe.experts_per_tok must be >= 1, got {m.experts_per_tok}")
+    if m.shared_expert_width < 0:
+        errs.append(f"moe.shared_expert_width must be >= 0, got "
+                    f"{m.shared_expert_width}")
+
+    for knob, val in (("min_samples", rec.corpus.min_samples),
+                      ("max_samples", rec.corpus.max_samples),
+                      ("synth_samples", rec.corpus.synth_samples),
+                      ("router_mix_total", rec.corpus.router_mix_total),
+                      ("max_shards", rec.corpus.max_shards)):
+        if val != -1 and val < 1:
+            errs.append(f"corpus.{knob} must be -1 (default) or >= 1, got {val}")
+    if rec.corpus.per_repo_cap != -1 and rec.corpus.per_repo_cap < 0:
+        errs.append(f"corpus.per_repo_cap must be -1 (default), 0 (no cap), or "
+                    f">= 1, got {rec.corpus.per_repo_cap}")
+
+    if rec.smoke.tokens <= 0:
+        errs.append(f"smoke.tokens must be >= 1, got {rec.smoke.tokens}")
+    if rec.smoke.timeout <= 0:
+        errs.append(f"smoke.timeout must be >= 1, got {rec.smoke.timeout}")
+
+    if rec.eval.mode not in EVAL_MODES:
+        errs.append(f"eval.mode must be one of {', '.join(EVAL_MODES)}, got "
+                    f"{rec.eval.mode!r} - a typo here would otherwise run the "
+                    f"whole build and refuse only at the eval at the end")
+    if not (0.0 < rec.eval.held_out_fraction < 0.5):
+        errs.append(f"eval.held_out_fraction must be in (0, 0.5), got "
+                    f"{rec.eval.held_out_fraction} - at 0.5+ the router's train "
+                    f"split is smaller than the test split, and two numbers for "
+                    f"one fact is exactly what this field exists to kill")
+    if rec.eval.num_samples < 1:
+        errs.append(f"eval.num_samples must be >= 1, got {rec.eval.num_samples}")
+    if rec.eval.dead_threshold <= 0:
+        errs.append(f"eval.dead_threshold must be > 0, got "
+                    f"{rec.eval.dead_threshold}")
 
     # -- roots --------------------------------------------------------------
     # Both empty = the tool's defaults (msmoe_data / msmoe_run_{size}), which

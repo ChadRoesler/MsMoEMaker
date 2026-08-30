@@ -855,6 +855,13 @@ class TestToolsExpert:
         assert rec.tools_expert_name == "mcp"
         assert rec.experts[-1].source.teacher == "X/Y-Instruct"
 
+    def test_an_empty_mapping_still_asks_for_the_tools_expert(self):
+        """`tools_expert: {}` is a REQUEST that customises nothing - `if
+        tools_expert:` treated it as "off" and injected no expert at all."""
+        rec, _ = self._rec(tools_expert={})
+        assert [e.name for e in rec.experts] == ["a", "b", "agentcore"]
+        assert rec.tools_expert_name == "agentcore"
+
     def test_an_existing_expert_of_that_name_is_not_duplicated(self):
         rec, warns = self._rec(tools_expert=True)
         assert [e.name for e in rec.experts] == ["a", "b", "agentcore"]
@@ -1074,12 +1081,16 @@ class TestDeadKnobsAreAlive:
             dryrun=True)
         assert c.shared_expert_gate_fill == 0.07
 
-    def test_load_in_4bit_derives_from_the_tier_when_unset(self, monkeypatch):
+    def test_load_in_4bit_defaults_off_on_every_tier(self, monkeypatch):
+        """4-bit TRAINING is opt-in. The old line derived it from the nano
+        tier's GGUF quant string, which made the floor tier unable to complete
+        a build by default - the export quant must not decide the training
+        precision, and unsloth must be the user's explicit choice."""
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
         c = config.build_config(self._rec(), dryrun=True)  # tier default
         assert c.load_in_4bit is False
         nano = self._rec(blocks={"runtime": {"hardware_tier": "nano"}})
-        assert config.build_config(nano, dryrun=True).load_in_4bit is True
+        assert config.build_config(nano, dryrun=True).load_in_4bit is False
 
     def test_load_in_4bit_explicit_wins_in_both_directions(self, monkeypatch):
         monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
@@ -1127,3 +1138,106 @@ class TestDeadKnobsAreAlive:
         c = config.build_config(rec, dryrun=True)
         assert config.examples_for(rec, c, "shell") == 2000
         assert config.examples_for(rec, c, "lore") == c.num_agent_samples
+
+    def test_reasoning_is_sniffed_from_the_resolved_base(self, monkeypatch):
+        """The base the run ACTUALLY uses decides reasoning - not recipe.base.
+        An env override pointing at an R1 distill used to build with the whole
+        think-block pipeline silently off."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        monkeypatch.setenv("MSMOE_BASE_MODEL",
+                           "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+        c = config.build_config(self._rec(), dryrun=True)
+        assert c.base == "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+        assert c.reasoning is True
+        assert c.reasoning_type == "xml"
+        monkeypatch.delenv("MSMOE_BASE_MODEL", raising=False)
+
+    def test_reasoning_is_sniffed_from_a_box_model_override(self, monkeypatch):
+        """Same failure through the OTHER bypass: a box defaults entry."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec = self._rec()
+        rec.resolved_defaults = {"models": {
+            "0.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"}}
+        c = config.build_config(rec, dryrun=True)
+        assert c.base == "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+        assert c.reasoning is True
+
+
+class TestTier3ValidationRefusals:
+    """Values that used to validate clean at exit 0 and then produce nonsense
+    hours into a build. Each must now be refused on the laptop."""
+
+    @staticmethod
+    def _errs(blocks=None):
+        from ms_moe_maker.config.recipe import parse, validate
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "python",
+                             "source": {"kind": "stack", "language": "Python"}},
+                            {"name": "csharp",
+                             "source": {"kind": "stack", "language": "C#"}}]}
+        for key, value in (blocks or {}).items():
+            body[key] = value
+        rec, _ = parse(body)
+        errs, _ = validate(rec)
+        return errs
+
+    def test_a_silent_recipe_still_validates(self):
+        assert self._errs() == []
+
+    def test_unknown_size_is_refused_not_silently_swapped(self):
+        assert any("size" in e for e in self._errs({"size": "9B"}))
+
+    def test_zero_and_negative_router_knobs_are_refused(self):
+        errs = self._errs({"router": {"batch": 0, "accum": 0, "epochs": 0}})
+        assert any("router.batch" in e for e in errs)
+        assert any("router.accum" in e for e in errs)
+        assert any("router.epochs" in e for e in errs)
+
+    def test_nonsense_budget_numbers_are_refused(self):
+        errs = self._errs({"budget": {"max_seq_length": 0,
+                                      "collect_headroom": -2,
+                                      "lora_r": 0,
+                                      "lora_dropout": -0.5,
+                                      "teacher_max_new": 0}})
+        assert any("max_seq_length" in e for e in errs)
+        assert any("collect_headroom" in e for e in errs)
+        assert any("lora_r" in e for e in errs)
+        assert any("lora_dropout" in e for e in errs)
+        assert any("teacher_max_new" in e for e in errs)
+
+    def test_negative_moe_and_zero_smoke_are_refused(self):
+        errs = self._errs({"moe": {"shared_expert_width": -5,
+                                   "experts_per_tok": 0},
+                           "smoke": {"tokens": 0, "timeout": 0}})
+        assert any("shared_expert_width" in e for e in errs)
+        assert any("experts_per_tok" in e for e in errs)
+        assert any("smoke.tokens" in e for e in errs)
+        assert any("smoke.timeout" in e for e in errs)
+
+    def test_negative_abliterate_knobs_are_refused(self):
+        errs = self._errs({"abliterate": {"n_trials": -5, "seed": -1,
+                                          "trial_index": -1}})
+        assert any("n_trials" in e for e in errs)
+        assert any("abliterate.seed" in e for e in errs)
+        assert any("trial_index" in e for e in errs)
+
+    def test_a_misspelled_eval_mode_is_refused(self):
+        assert any("eval.mode" in e for e in self._errs({"eval": {"mode": "rooting"}}))
+
+    def test_a_huge_held_out_fraction_is_refused(self):
+        assert any("held_out_fraction" in e
+                   for e in self._errs({"eval": {"held_out_fraction": 0.99}}))
+
+    def test_a_mix_the_unset_ceiling_cannot_fill_is_refused(self):
+        """max_samples unset used to skip the mix check entirely, so a 500k mix
+        against the 100k default cap was discovered hours in."""
+        errs = self._errs({"corpus": {"router_mix_total": 500_000}})
+        assert any("router mix" in e for e in errs), errs
+
+    def test_per_repo_cap_zero_means_no_cap(self):
+        assert self._errs({"corpus": {"per_repo_cap": 0}}) == []
+
+    def test_zero_is_not_the_sentinel_for_lora_r(self):
+        """The README says it in bold: -1 means 'you decide', not 0."""
+        assert any("lora_r" in e for e in self._errs({"budget": {"lora_r": 0}}))
+        assert self._errs({"budget": {"lora_r": -1}}) == []

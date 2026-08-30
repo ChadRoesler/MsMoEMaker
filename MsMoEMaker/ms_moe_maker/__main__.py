@@ -252,8 +252,9 @@ DESCRIBE = {
 # the entry point keeps argparse and this dispatch table. _print_eval_report
 # and _defaults_template_body are re-exported because tests (and any external
 # caller) historically imported them from __main__.
-from .cli import (_cmd_build, _cmd_corpus, _cmd_eval, _cmd_init, _cmd_smoke,
-                  _cmd_validate, _print_eval_report, _defaults_template_body)
+from .cli import (_cmd_build, _cmd_corpus, _cmd_eval, _cmd_export, _cmd_init,
+                  _cmd_smoke, _cmd_validate, _print_eval_report,
+                  _defaults_template_body)
 
 
 # The dispatch table, at module scope so it is one definition rather than a
@@ -267,6 +268,7 @@ COMMAND_HANDLERS = {
     "smoke": _cmd_smoke,
     "eval": _cmd_eval,
     "validate": _cmd_validate,
+    "export": _cmd_export,
 }
 
 

@@ -69,28 +69,31 @@ def reasoning_table(recipe=None):
     return styles, families
 
 
-def reasoning_type_of(recipe) -> str:
+def reasoning_type_of(recipe, base_id: Optional[str] = None) -> str:
     """The reasoning STYLE key a base model uses, or '' for a plain base.
 
     base_kind=nonreasoning -> ''; reasoning -> the family's style, else 'xml';
-    auto -> sniff the id against the families table.
+    auto -> sniff the id against the families table. `base_id` is the RESOLVED
+    base - sniffing `recipe.base` instead is how a box default pointing a size
+    at an R1 distill built with the whole think-block pipeline silently off
+    (or on, for a base that _resolve_base then swapped away).
     """
     styles, families = reasoning_table(recipe)
     return _reasoning.style_for_base(
-        getattr(recipe, "base", "") or "",
+        base_id or getattr(recipe, "base", "") or "",
         getattr(recipe, "base_kind", "auto"),
         styles, families)
 
 
-def reasoning_style_of(recipe) -> Optional[ReasoningStyle]:
+def reasoning_style_of(recipe, base_id: Optional[str] = None) -> Optional[ReasoningStyle]:
     """The ReasoningStyle, or None for a non-reasoning base."""
     styles, _ = reasoning_table(recipe)
-    return styles.get(reasoning_type_of(recipe))
+    return styles.get(reasoning_type_of(recipe, base_id))
 
 
-def is_reasoning_base(recipe) -> bool:
+def is_reasoning_base(recipe, base_id: Optional[str] = None) -> bool:
     """Does this recipe's base model want reasoning handling?"""
-    return reasoning_type_of(recipe) != ""
+    return reasoning_type_of(recipe, base_id) != ""
 
 
 def reasoning_style_of_config(config) -> Optional[ReasoningStyle]:
@@ -677,6 +680,18 @@ def _resolve_base(recipe, size: str) -> Tuple[str, str]:
     if recipe.base and recipe.base.strip():
         base = recipe.base.strip()
         safe, ablated = model_sizes(recipe).get(size, ("", ""))
+        # A REASONING-FAMILY ID IS A COMPLETE ANSWER, HONOURED AS-IS. The
+        # instruct/abliterated sniff below substitutes the size's coder for
+        # anything that "does not look complete", which silently swapped an
+        # explicit QwQ / R1-distill for a Coder - and then the build sniffed
+        # reasoning from the original id anyway, so the think-block pipeline
+        # was on while the model that actually trained had never emitted a
+        # think block. If the id sniffs as a reasoning family, it IS the
+        # checkpoint the user named; no substitution.
+        styles, families = reasoning_table(recipe)
+        if _reasoning.style_for_base(base, getattr(recipe, "base_kind", "auto"),
+                                     styles, families):
+            return base, base
         if "abliterated" in base or "Instruct" in base:
             base_model = base
         else:
@@ -855,11 +870,11 @@ def build_config(recipe, force: bool = False,
     # `reasoning: true` expert puts think blocks in a build whose base does not
     # reason, so the tags have to exist in that case too. Falls back to plain
     # xml exactly the way the generator does - one answer, one place.
-    def _resolve_run_style(rec, experts):
+    def _resolve_run_style(rec, experts, base_id):
         styles, families = reasoning_table(rec)
         key = _reasoning.style_for_base(
-            getattr(rec, "base", "") or "", getattr(rec, "base_kind", "auto"),
-            styles, families)
+            base_id or getattr(rec, "base", "") or "",
+            getattr(rec, "base_kind", "auto"), styles, families)
         if not key and experts:
             key = "xml"
         return key, styles.get(key)
@@ -874,7 +889,9 @@ def build_config(recipe, force: bool = False,
         e.name for e in recipe.experts
         if getattr(getattr(e, "source", None), "kind", "") == "synth"
     ]
-    _run_style = _resolve_run_style(recipe, reasoning_experts)
+    _run_style = _resolve_run_style(recipe, reasoning_experts, base_model)
+    # Does the RESOLVED base reason? recipe.base is the raw field; base_model
+    # is what the run will actually train on (env / box / hint resolved).
 
     # Compute budgets from steps
     b = recipe.budget
@@ -987,7 +1004,10 @@ def build_config(recipe, force: bool = False,
     # A knob that appears to do something and does not is worse than a missing
     # one - the missing one at least makes you ask.
     lora_r_env = os.environ.get("MSMOE_LORA_R", "").strip()
-    if recipe.budget.lora_r and recipe.budget.lora_r > 0:
+    # RECIPE FIRST. -1 is the sentinel ("you decide"); any other value is an
+    # explicit answer and is used verbatim - validate() has already refused
+    # the nonsense (0, negatives, > 256), so nothing is silently re-derived.
+    if recipe.budget.lora_r not in (None, -1):
         lora_r = int(recipe.budget.lora_r)
     elif lora_r_env:
         lora_r = int(lora_r_env)
@@ -997,13 +1017,14 @@ def build_config(recipe, force: bool = False,
     lora_alpha = _knob(recipe.budget.lora_alpha, 32)
     lora_dropout = _knob(recipe.budget.lora_dropout, 0.0)
 
-    # Quantization hint from tier; the recipe's explicit answer wins in both
-    # directions (see Runtime.load_in_4bit). None = derive from the tier.
-    quant = tier_spec.default_quant
-    derived_4bit = (quant in ("Q4_K_M", "Q4_0", "Q4_1")
-                    if tier_name == "nano" else False)
-    load_4bit = (recipe.runtime.load_in_4bit
-                 if recipe.runtime.load_in_4bit is not None else derived_4bit)
+    # 4-bit TRAINING is opt-in, never derived. The old line derived it from
+    # the tier's GGUF quant string on nano alone, which made the floor tier
+    # unable to complete a build by default: the 4-bit path needs unsloth's
+    # save_pretrained_merged, and the plain path raised AFTER trainer.train()
+    # had already paid for the expensive part. The export quant must not
+    # decide the training precision - the recipe's explicit answer is the
+    # only answer.
+    load_4bit = bool(recipe.runtime.load_in_4bit)
 
     # Unsoth / vLLM
     use_unsloth = _env_bool("MSMOE_UNSLOTH", False)
@@ -1091,7 +1112,7 @@ def build_config(recipe, force: bool = False,
         abliterate_trial_index=abl_trial,
         abliterate_checkpoint_action=abl_ckpt,
         abliterate_export=abl_export,
-        reasoning=is_reasoning_base(recipe),
+        reasoning=is_reasoning_base(recipe, base_model),
         reasoning_type=_run_style[0],
         reasoning_open=_run_style[1].open if _run_style[1] else "",
         reasoning_close=_run_style[1].close if _run_style[1] else "",

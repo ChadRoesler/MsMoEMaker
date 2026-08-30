@@ -87,6 +87,14 @@ def test_describe_commands_are_current():
     assert set(COMMAND_HANDLERS) == set(_describe.COMMANDS) - {"describe"}
 
 
+def test_export_is_a_real_verb():
+    """The README promised `export` twice while argparse refused it with
+    'invalid choice' - the verb now exists and fails cleanly without a build."""
+    from ms_moe_maker.box import describe as _describe
+    assert "export" in _describe.COMMANDS
+    assert main(["export", "does-not-exist.yaml"]) == 1
+
+
 def test_every_advertised_verb_actually_dispatches(tmp_path, monkeypatch):
     """Checks the table main() USES, not a table that merely exists.
 

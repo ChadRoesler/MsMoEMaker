@@ -104,6 +104,22 @@ class TestApplyTemplate:
             errs, _ = validate(rec)
             assert errs == [], f"template {name!r} does not validate: {errs}"
 
+    def test_a_recipe_budget_merges_into_the_template_block(self):
+        """Per-key merge, not wholesale clobber. `budget: {target_steps: 300}`
+        used to drop the code template's max_seq_length 4096 and fall to the
+        dataclass 2048, silently halving tokens/expert."""
+        merged = template.apply_template(
+            {"template": "code", "budget": {"target_steps": 300}}, "code")
+        assert merged["budget"]["target_steps"] == 300
+        assert merged["budget"]["max_seq_length"] == 4096
+
+    def test_templates_keep_the_dead_expert_check_armed(self):
+        """dead_threshold below 1.0 can never flag anything - enrichment
+        bottoms out at 1.0 (uniform routing). The README default is 1.2."""
+        for name in template.TEMPLATES:
+            tpl = template.TEMPLATES[name]
+            assert tpl["default_eval"]["dead_threshold"] == 1.2, name
+
     def test_recipe_wins_over_template(self):
         recipe = {
             "size": "0.5B",

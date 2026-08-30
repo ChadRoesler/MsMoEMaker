@@ -128,6 +128,27 @@ def _check_base_model(pf: Preflight, config, offline: bool = False) -> None:
                "can fill it")
         return
 
+    # THE ARCHITECTURE GUARD, ON THE RESOLVED BASE. validate() only checks
+    # `recipe.base`; an env override (MSMOE_BASE_MODEL) or a box defaults
+    # entry (`models:`) can swap in a non-Qwen checkpoint that validate never
+    # sees - and the recipe check's own comment names the failure: every
+    # specialist trains, then the stitch dies at stage 4. This is the same
+    # check, asked of the id the run will ACTUALLY use, before anything
+    # expensive starts.
+    from ..config.pipeline import SUPPORTED_BASE_HINTS, SUPPORTED_MOE_ARCHS
+    if os.path.isdir(base):
+        low = os.path.basename(base).lower()
+    else:
+        low = base.lower()
+    if not any(hint in low for hint in SUPPORTED_BASE_HINTS):
+        pf.add("base model", FAIL,
+               f"{base} is not a supported MoE architecture",
+               f"supported today: {', '.join(sorted(SUPPORTED_MOE_ARCHS.values()))}. "
+               f"Point `base:` (or MSMOE_BASE_MODEL / the box's `models:`) at "
+               f"a Qwen2 family checkpoint, or leave it empty for a supported "
+               f"default.")
+        return
+
     if os.path.isdir(base):
         pf.add("base model", PASS, f"local path {base}")
         return
