@@ -93,7 +93,14 @@ class KeywordRate(Scorer):
     def get_score(self, ctx: Context) -> Score:
         match_count = 0
         responses = ctx.get_responses(self.prompts)
-        for prompt, response in zip(self.prompts, responses):
+        if not self.prompts:
+            return Score(value=0.0, rich_display="0/0", md_display="0/0")
+        for i, prompt in enumerate(self.prompts):
+            # A MISSING RESPONSE IS A REFUSAL, NOT A FREE PASS. The old zip
+            # truncated silently, so a short response list deflated the
+            # refusal rate - the optimizer could score better by producing
+            # fewer answers. And the division was unguarded on empty prompts.
+            response = responses[i] if i < len(responses) else ""
             is_match = self._is_match(response)
             if is_match:
                 match_count += 1

@@ -79,18 +79,6 @@ class DatasetSpecification(BaseModel):
         description="System prompt to use with the prompts (overrides global system prompt if set).",
     )
 
-    residual_plot_label: str | None = Field(
-        default=None,
-        description="Label to use for the dataset in plots of residual vectors.",
-        exclude=True,
-    )
-
-    residual_plot_color: str | None = Field(
-        default=None,
-        description="Matplotlib color to use for the dataset in plots of residual vectors.",
-        exclude=True,
-    )
-
 
 class ScorerConfig(BaseModel):
     """
@@ -142,16 +130,15 @@ class ScorerConfig(BaseModel):
         return value
 
 
-class BenchmarkSpecification(BaseModel):
-    task: str = Field(
-        description="Task ID of the benchmark in the Language Model Evaluation Harness."
-    )
+# The headless entry trimmed the interactive TUI, benchmark, upload, chat and
+# reproducibility paths out of the vendored core - the Settings fields that
+# only those paths read went with them (see abliterate.py's module docstring).
+# A field with zero readers accepts settings from TOML/env and does nothing
+# with them, which is the exact "silent knob" shape this package refuses.
 
-    name: str = Field(description="Name of the benchmark for presentation purposes.")
-
-    description: str = Field(
-        description="Description of the benchmark for presentation purposes."
-    )
+# See Settings.from_payload / settings_customise_sources: when the headless
+# subprocess loads its JSON payload, every external settings source is off.
+_PAYLOAD_ONLY = False
 
 
 class Settings(BaseSettings):
@@ -160,34 +147,6 @@ class Settings(BaseSettings):
     model_commit: str | None = Field(
         default=None,
         description="Hugging Face commit hash of the model.",
-    )
-
-    evaluate_model: str | None = Field(
-        default=None,
-        description=(
-            "If this model ID or path is set, then instead of abliterating the main model, "
-            "evaluate this model relative to the main model."
-        ),
-        exclude=True,
-    )
-
-    collect_reproducibles: str | None = Field(
-        default=None,
-        description=(
-            "If this directory path is set, then instead of abliterating a model, "
-            "download all reproduce.json files from public Heretic model repositories "
-            "on Hugging Face, and store them in that directory for archival purposes."
-        ),
-        exclude=True,
-    )
-
-    reproduce: str | None = Field(
-        default=None,
-        description=(
-            "If this path or URL to a reproduce.json file is set, load reproduction information "
-            "from that file, and attempt to reproduce the abliterated model it originated from."
-        ),
-        exclude=True,
     )
 
     dtypes: list[str] = Field(
@@ -298,42 +257,6 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
-    print_debug_information: bool = Field(
-        default=False,
-        description="Whether to print additional information that can help with debugging.",
-        exclude=True,
-    )
-
-    print_residual_geometry: bool = Field(
-        default=False,
-        description="Whether to print detailed information about residuals and residual directions.",
-        exclude=True,
-    )
-
-    plot_residuals: bool = Field(
-        default=False,
-        description="Whether to generate plots showing PaCMAP projections of residual vectors.",
-        exclude=True,
-    )
-
-    residual_plot_path: str = Field(
-        default="plots",
-        description="Base path to save plots of residual vectors to.",
-        exclude=True,
-    )
-
-    residual_plot_title: str = Field(
-        default='PaCMAP Projection of Residual Vectors for "Harmless" and "Harmful" Prompts',
-        description="Title placed above plots of residual vectors.",
-        exclude=True,
-    )
-
-    residual_plot_style: str = Field(
-        default="dark_background",
-        description="Matplotlib style sheet to use for plots of residual vectors.",
-        exclude=True,
-    )
-
     scorers: list[ScorerConfig] = Field(
         default_factory=lambda: [
             ScorerConfig(
@@ -415,68 +338,6 @@ class Settings(BaseSettings):
         exclude=True,
     )
 
-    benchmarks: list[BenchmarkSpecification] = Field(
-        default=[
-            BenchmarkSpecification(
-                task="agieval",
-                name="AGIEval",
-                description="A Human-Centric Benchmark for Evaluating Foundation Models",
-            ),
-            BenchmarkSpecification(
-                task="bbh",
-                name="BIG-Bench Hard (BBH)",
-                description="Challenging BIG-Bench Tasks and Whether Chain-of-Thought Can Solve Them",
-            ),
-            BenchmarkSpecification(
-                task="commonsense_qa",
-                name="CommonsenseQA",
-                description="A Question Answering Challenge Targeting Commonsense Knowledge",
-            ),
-            BenchmarkSpecification(
-                task="eq_bench",
-                name="EQ-Bench",
-                description="An Emotional Intelligence Benchmark for Large Language Models",
-            ),
-            BenchmarkSpecification(
-                task="gsm8k",
-                name="GSM8K",
-                description="Training Verifiers to Solve Math Word Problems",
-            ),
-            BenchmarkSpecification(
-                task="hellaswag",
-                name="HellaSwag",
-                description="Can a Machine Really Finish Your Sentence?",
-            ),
-            BenchmarkSpecification(
-                task="ifeval",
-                name="IFEval",
-                description="Instruction-Following Evaluation for Large Language Models",
-            ),
-            BenchmarkSpecification(
-                task="mmlu",
-                name="MMLU",
-                description="Measuring Massive Multitask Language Understanding",
-            ),
-            BenchmarkSpecification(
-                task="mmlu_pro",
-                name="MMLU-Pro",
-                description="A More Robust and Challenging Multi-Task Language Understanding Benchmark",
-            ),
-            BenchmarkSpecification(
-                task="piqa",
-                name="PIQA",
-                description="Reasoning about Physical Commonsense in Natural Language",
-            ),
-            BenchmarkSpecification(
-                task="winogrande",
-                name="WinoGrande",
-                description="An Adversarial Winograd Schema Challenge at Scale",
-            ),
-        ],
-        description="Benchmarks to offer to the user for evaluating abliterated models.",
-        exclude=True,
-    )
-
     max_shard_size: PositiveInt | str = Field(
         default="5GB",
         description="Maximum size for individual safetensors files generated when exporting a model.",
@@ -497,41 +358,10 @@ class Settings(BaseSettings):
         description="Index (in the sorted Pareto front) of the trial to use, or unset to prompt the user.",
     )
 
-    n_additional_trials: PositiveInt | None = Field(
-        default=None,
-        description="Number of additional trials to run, or unset to prompt the user.",
-    )
-
-    model_action: str | None = Field(
-        default=None,
-        description='Action to take with the decensored model: "save", "upload", or unset to prompt the user.',
-    )
-
     save_directory: str | None = Field(
         default=None,
         description="Directory to save the model to, or unset to prompt the user.",
         exclude=True,
-    )
-
-    upload_repo_id: str | None = Field(
-        default=None,
-        description="Name of the Hugging Face repository to upload the model to, or unset to prompt the user.",
-        exclude=True,
-    )
-
-    upload_repo_private: bool | None = Field(
-        default=None,
-        description="Whether the Hugging Face repository to upload the model to should be private, or unset to prompt the user.",
-    )
-
-    upload_reproducibility_information: str | None = Field(
-        default=None,
-        description='Which reproducibility information to add to the Hugging Face repository: "full", "basic", "none", or unset to prompt the user.',
-    )
-
-    ignore_mismatches: bool | None = Field(
-        default=None,
-        description="Whether to attempt to reproduce the model even if there are environment mismatches, or unset to prompt the user.",
     )
 
     system_prompt: str = Field(
@@ -544,8 +374,6 @@ class Settings(BaseSettings):
             dataset="mlabonne/harmless_alpaca",
             split="train[:400]",
             column="text",
-            residual_plot_label='"Harmless" prompts',
-            residual_plot_color="royalblue",
         ),
         description="Dataset of prompts that tend to not result in refusals (used for calculating refusal directions).",
     )
@@ -555,8 +383,6 @@ class Settings(BaseSettings):
             dataset="mlabonne/harmful_behaviors",
             split="train[:400]",
             column="text",
-            residual_plot_label='"Harmful" prompts',
-            residual_plot_color="darkorange",
         ),
         description="Dataset of prompts that tend to result in refusals (used for calculating refusal directions).",
     )
@@ -567,6 +393,25 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow")
 
     @classmethod
+    def from_payload(cls, data: dict) -> "Settings":
+        """Build Settings from a stage-written JSON payload - PAYLOAD + DEFAULTS ONLY.
+
+        The subprocess contract (see ms_moe_maker.abliterate.stage) is "every
+        field not in the payload is its DEFAULT". The default source chain
+        below let a stray config.toml in the CWD, a .env file, or a HERETIC_*
+        environment variable silently fill the other fields - redefining
+        good_prompts/bad_prompts (the refusal objective itself), scorers,
+        orthogonalize_direction, and row_normalization while the study ran to
+        completion. Payload mode turns every external source off.
+        """
+        global _PAYLOAD_ONLY
+        _PAYLOAD_ONLY = True
+        try:
+            return cls(**data)
+        finally:
+            _PAYLOAD_ONLY = False
+
+    @classmethod
     def settings_customise_sources(
         cls,
         settings_cls: type[BaseSettings],
@@ -575,6 +420,10 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        if _PAYLOAD_ONLY:
+            # The headless subprocess: ONLY what the stage's JSON says, then
+            # defaults. Nothing else may silently redefine the objective.
+            return (init_settings,)
         return (
             init_settings,  # Used during resume - should override *all* other sources.
             CliSettingsSource(

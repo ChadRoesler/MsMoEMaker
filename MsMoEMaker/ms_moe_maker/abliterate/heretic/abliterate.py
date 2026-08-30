@@ -11,6 +11,7 @@
 import math
 import os
 import random
+import shutil
 import time
 import warnings
 from dataclasses import asdict
@@ -101,6 +102,44 @@ def _auto_response_prefix(settings: Settings, model: Model, good_prompts, bad_pr
                 if additional_prefix:
                     settings.response_prefix += additional_prefix
                 break
+
+
+def _pareto_key(objective_names, directions):
+    """A sort key over the Pareto front, PER OBJECTIVE'S OWN DIRECTION.
+
+    The old key sorted ascending on the raw value for every objective, so a
+    scorer with optimization="maximize" had its WORST trial ranked first -
+    and that is the trial restored and exported. A resumed study whose scorer
+    list changed leaves a missing objective; it used to put None in the sort
+    key and die with a TypeError after the whole study had run. A missing
+    value ranks worst instead.
+    """
+    def key(trial):
+        parts = []
+        for i, name in enumerate(objective_names):
+            score = next(
+                (s["score"]["value"] for s in trial.user_attrs.get("scores", [])
+                 if s["name"] == name),
+                None,
+            )
+            if score is None:
+                score = float("inf")
+            direction = directions[i] if i < len(directions) else "minimize"
+            parts.append(score if direction == "minimize" else -score)
+        return tuple(parts)
+    return key
+
+
+def _pick_trial(sorted_trials, trial_index):
+    """The front member to restore. trial_index past the front used to raise
+    IndexError AFTER the whole study had run; clamp it instead."""
+    if trial_index is None:
+        return sorted_trials[0]
+    if trial_index >= len(sorted_trials):
+        print(f"trial_index {trial_index} is past the front of "
+              f"{len(sorted_trials)} trial(s) - using the last one.")
+        return sorted_trials[-1]
+    return sorted_trials[trial_index]
 
 
 def run_abliteration(settings: Settings) -> str:
@@ -282,6 +321,10 @@ def run_abliteration(settings: Settings) -> str:
         study.optimize(
             objective_wrapper,
             n_trials=settings.n_trials - len(study.trials),
+            # A transient CUDA OOM on trial 137 of 200 must not abort the
+            # whole unattended study; the failed trial is recorded and the
+            # study continues. (torch.cuda.OutOfMemoryError is a RuntimeError.)
+            catch=(RuntimeError,),
         )
     except KeyboardInterrupt:
         pass
@@ -296,21 +339,11 @@ def run_abliteration(settings: Settings) -> str:
             "finished. Re-run with checkpoint_action='continue' to resume."
         )
 
+    # SORT THE PARETO FRONT IN EACH OBJECTIVE'S OWN DIRECTION - see
+    # _pareto_key / _pick_trial above (module level, so they are testable).
     sorted_trials = sorted(
-        study.best_trials,
-        key=lambda trial: tuple(
-            next(
-                (score["score"]["value"] for score in trial.user_attrs["scores"] if score["name"] == name),
-                None,
-            )
-            for name in objective_names
-        ),
-    )
-
-    if settings.trial_index is not None:
-        trial = sorted_trials[settings.trial_index]
-    else:
-        trial = sorted_trials[0]
+        study.best_trials, key=_pareto_key(objective_names, directions))
+    trial = _pick_trial(sorted_trials, settings.trial_index)
 
     print(f"Restoring model from trial {trial.user_attrs['index']}...")
     model.reset_model()
@@ -323,17 +356,41 @@ def run_abliteration(settings: Settings) -> str:
         },
     )
 
+    # SAVE ATOMICALLY: write to a staging directory, then rename it into
+    # place. A kill/OOM mid-save used to leave a directory with a valid
+    # config.json and truncated weights, which the stage's done-predicate then
+    # trusted forever. A reader sees either nothing or the complete model.
     save_directory = settings.save_directory
+    staging = save_directory + ".staging"
+    if os.path.exists(staging):
+        shutil.rmtree(staging, ignore_errors=True)
     if settings.export_strategy == ExportStrategy.ADAPTER:
+        # THE ADAPTER ALONE IS NOT A LOADABLE CHECKPOINT: no config.json, no
+        # base weights, no tokenizer. The pipeline repoints config.base at
+        # this directory, so it must always contain a complete merged model -
+        # the adapter files are written first and kept alongside, for anyone
+        # who wants just the delta. (The tokenizer used to live only in the
+        # merge branch, and abliterate_is_done tested config.json, which the
+        # adapter path never wrote - so the study re-ran on every resume.)
         print("Saving LoRA adapter...")
-        model.model.save_pretrained(save_directory, max_shard_size=settings.max_shard_size)
+        model.model.save_pretrained(staging, max_shard_size=settings.max_shard_size)
+        print("Saving merged model alongside (the pipeline loads this)...")
+        merged_model = model.get_merged_model()
+        merged_model.save_pretrained(staging, max_shard_size=settings.max_shard_size)
+        del merged_model
+        empty_cache()
+        model.tokenizer.save_pretrained(staging)
     else:
         print("Saving merged model...")
         merged_model = model.get_merged_model()
-        merged_model.save_pretrained(save_directory, max_shard_size=settings.max_shard_size)
+        merged_model.save_pretrained(staging, max_shard_size=settings.max_shard_size)
         del merged_model
         empty_cache()
-        model.tokenizer.save_pretrained(save_directory)
+        model.tokenizer.save_pretrained(staging)
+
+    if os.path.exists(save_directory):
+        shutil.rmtree(save_directory, ignore_errors=True)
+    os.replace(staging, save_directory)
 
     print(f"Model saved to {save_directory}.")
     return save_directory
@@ -362,7 +419,7 @@ def main(argv=None) -> int:
 
     with open(args.settings, encoding="utf-8") as fh:
         data = json.load(fh)
-    settings = Settings(**data)
+    settings = Settings.from_payload(data)
     run_abliteration(settings)
     return 0
 

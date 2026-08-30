@@ -64,7 +64,7 @@ def wired(tmp_path, monkeypatch, request):
 
     # ---- fake stage modules -------------------------------------------------
     data_mod = types.ModuleType("data")
-    data_mod.collect_corpus = lambda config, languages, sources, callback: dict(corpora)
+    data_mod.collect_corpus = lambda *a, **kw: dict(corpora)
     # RECORDS, and takes **kw for the same reason verify_stitch's fake
     # does: a stub that mirrors today's signature exactly is a stub that
     # turns tomorrow's new argument into a TypeError in a fixture.
@@ -122,6 +122,11 @@ def wired(tmp_path, monkeypatch, request):
 
     router = types.ModuleType("router")
     router.router_is_done = lambda config: False
+    # builder asks for this to delete a router trained on a PREVIOUS skeleton
+    # after a fresh stitch. Point it somewhere that does not exist, so the
+    # rmtree branch is inert here - this fixture is testing plumbing, and a
+    # stub that deletes real directories is a fixture with teeth.
+    router.router_dir = lambda config: str(out_root / "moe_trained_absent")
 
     def _fake_router(config, final_dir, safe_names, expert_corpus_paths):
         seen["router_arg"] = dict(expert_corpus_paths)
@@ -172,8 +177,9 @@ def wired(tmp_path, monkeypatch, request):
             {"name": "csharp", "source": {"kind": "stack", "language": "C#"}}]})
 
     monkeypatch.setattr("ms_moe_maker.config.pipeline.resolve_roots",
-                        lambda size, dryrun: {"data": str(data_root),
-                                              "output": str(out_root)})
+                        lambda size, dryrun, *a, **kw: {
+                            "data": str(data_root),
+                            "output": str(out_root)})
     result = builder.run_pipeline(rec)
     return result, seen, corpora, out_root
 

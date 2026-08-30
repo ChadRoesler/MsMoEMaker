@@ -1012,7 +1012,20 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
         errs.append(f"router.epochs must be -1 (default) or > 0, got {r.epochs} "
                     f"- zero epochs is a router that trains zero steps and "
                     f"reads as a design failure")
-    if r.lr != -1 and r.lr <= 0:
+    # YAML 1.1 IS WHY THIS CHECKS THE TYPE FIRST.
+    # `lr: 3e-4` parses as the STRING '3e-4', not a float - the spec wants a
+    # dot in the mantissa (3.0e-4) or a signed exponent (3e-04 still fails).
+    # _knob then does `value < 0`, catches the TypeError, and silently returns
+    # its default: recipe.flow-0.5B.yaml carried `lr: 3e-4  # was 1e-4` for its
+    # whole life and trained the router at 1e-4 anyway. A knob that cannot be
+    # compared is a knob that was never set, so say so here rather than
+    # discovering it as a crash in validate or, worse, not at all.
+    if isinstance(r.lr, str):
+        errs.append(f"router.lr must be a number, got the string {r.lr!r}. "
+                    f"YAML only reads an exponent as a float when the mantissa "
+                    f"has a decimal point - write {r.lr.replace('e', '.0e', 1)} "
+                    f"if that is what you meant.")
+    elif r.lr != -1 and r.lr <= 0:
         errs.append(f"router.lr must be -1 or > 0, got {r.lr}")
     if r.aux_loss_coef != -1 and r.aux_loss_coef < 0:
         errs.append(f"router.aux_loss_coef must be -1 or >= 0, got "

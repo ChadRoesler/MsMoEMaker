@@ -300,8 +300,20 @@ class Runner:
             # The CURRENT run could not be fingerprinted - there is no basis
             # for a comparison, which is the same as "we cannot prove resume
             # is safe". Fail CLOSED: report the unknown and let --force decide.
+            # UNREADABLE IS NOT ABSENT, ON THIS PATH EITHER.
+            # The fail-closed handler below covers the fingerprinted case; this
+            # branch swallowed UnreadableManifest into `prev = None` and
+            # returned "no drift" - and it is the WORSE case of the two. Here
+            # the current run could not be fingerprinted AND the previous
+            # manifest cannot be read: two unknowns stacked, reported as clean.
+            # A missing file is a genuine first run. A corrupt one is not.
             try:
                 prev = mf.read(self.run_dir)
+            except mf.UnreadableManifest:
+                return (["the previous manifest is unreadable AND this run's "
+                         "settings could not be fingerprinted - resume cannot "
+                         "be verified from either side"],
+                        ["unknown"])
             except Exception:
                 prev = None
             if prev is None:

@@ -119,7 +119,10 @@ router:
   batch: 8
   accum: 1
   aux_loss_coef: 0.02       # was 0.02; collapse is prevented structurally now
-  lr: 3e-4                   # was 1e-4 — 43k params on a short schedule
+  lr: 3.0e-4                 # was 1e-4 — 43k params on a short schedule
+                             # (the dot is needed: YAML reads bare
+                             #  `3e-4` as a STRING and the knob falls back
+                             #  to its 1e-4 default without a word)
 
 runtime:
   hardware_tier: spark

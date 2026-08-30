@@ -22,7 +22,20 @@ def abliterate_dir(config) -> str:
 def abliterate_is_done(config) -> bool:
     if config.force:
         return False
-    return os.path.exists(os.path.join(abliterate_dir(config), "config.json"))
+    # NOT PRESENCE-ONLY. save_pretrained writes config.json before the weight
+    # shards; a child OOM mid-save used to leave a dir with a valid config and
+    # truncated weights that every specialist then LoRA-trained from. All three
+    # markers must exist. (The adapter export never wrote config.json at all -
+    # which is why this predicate was permanently False and the 200-trial
+    # study re-ran on every resume. The child now always writes a merged,
+    # loadable checkpoint, so this predicate is reachable.)
+    d = abliterate_dir(config)
+    if not os.path.exists(os.path.join(d, "config.json")):
+        return False
+    has_weights = (os.path.exists(os.path.join(d, "model.safetensors"))
+                   or os.path.exists(os.path.join(d, "pytorch_model.bin")))
+    return has_weights and os.path.exists(
+        os.path.join(d, "tokenizer_config.json"))
 
 
 def abliterate_base(config) -> str:

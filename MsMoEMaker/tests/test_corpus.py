@@ -241,8 +241,13 @@ def test_the_shard_scan_files_and_keys_by_expert_name(monkeypatch, tmp_path):
 
     (tmp_path / "dotnet_code.jsonl").write_text('{"text": "x"}\n',
                                                 encoding="utf-8")
+    # min_samples_per_expert is read by the already-on-disk branch now: the
+    # floor used to be enforced only when COLLECTING, so a truncated corpus
+    # from a crashed scan was skipped straight back into training. One doc
+    # clears a floor of one, which is what this test wants - it is pinning the
+    # key and the filename, not the floor.
     config = types.SimpleNamespace(data_root=str(tmp_path), force=False,
-                                   max_shards=1)
+                                   max_shards=1, min_samples_per_expert=1)
     got = d._collect_from_shards(["C#"], config, names={"C#": "dotnet"})
     assert got == {"dotnet": str(tmp_path / "dotnet_code.jsonl")}
 

@@ -121,7 +121,11 @@ def _leaks(path):
     return sorted(set(found))
 
 
-MODULES = sorted(p for p in PKG.rglob("*.py") if "heretic" not in p.parts)
+# The vendored heretic core is INCLUDED: this lint exists because the bug
+# class killed a real Spark build, and the vendored modules run in the same
+# process family. They were excluded while the trim was in flight; the region
+# is now guarded like everything else.
+MODULES = sorted(PKG.rglob("*.py"))
 
 
 @pytest.mark.parametrize("path", MODULES, ids=lambda p: p.name)
