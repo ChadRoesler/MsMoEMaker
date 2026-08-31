@@ -92,6 +92,10 @@ def _read_pattern(field: str) -> re.Pattern:
         getattr(recipe.budget, "warmup_floor", ...)
         src.max_shards                         source.<field>
         e.tokens                               expert.<field>
+        _src_get(src, "glob")                  the Source dual-shape reader
+                                               (first arg must be a source-
+                                               shaped name, so a helper call
+                                               on a corpus row does NOT count)
 
     Hardcoding a value in build_config as `PipelineConfig(...) field=0.02` or
     reading `config.field` downstream no longer counts: the recipe's field must
@@ -105,6 +109,7 @@ def _read_pattern(field: str) -> re.Pattern:
         rf"\b{block}\s*\.\s*(?:{ident}\s*\.\s*)*{name}\b"
         rf"|\bgetattr\(\s*{block}\s*(?:\.\s*{ident})?\s*,\s*[\"']{name}[\"']"
         rf"|\b_corpus_knob\(\s*[\"']{name}[\"']"
+        rf"|\b_src_get\(\s*{leaf}\s*,\s*[\"']{name}[\"']"
         rf"|\b{leaf}\s*\.\s*(?:{ident}\s*\.\s*)*{name}\b"
         rf"|\bgetattr\(\s*{leaf}\s*,\s*[\"']{name}[\"']"
         rf"|\be\s*\.\s*{name}\b")
@@ -168,6 +173,24 @@ def test_the_read_pattern_accepts_a_recipe_object_read():
         "x = rec.moe.shared_expert_gate_fill",
         "getattr(rt, 'direct_load', False)",
         "roots = resolve_roots(size, dryrun, recipe.roots)",
+    ])
+
+
+def test_the_read_pattern_accepts_a_src_get_read():
+    """A read through the Source dual-shape reader counts — and only counts
+    when its first argument is a source-shaped name. _src_get was introduced
+    so dataclass and dict sources dispatch through one helper; the moment
+    reads moved behind it, the guard went blind and flagged three live
+    fields. This pins the new branch and its boundary."""
+    pat = _read_pattern("glob")
+    assert any(pat.search(t) for t in [
+        "_src_get(src, 'glob', '')",
+        "_src_get(source, 'glob', '**/*.md')",
+    ])
+    assert not any(pat.search(t) for t in [
+        "_src_get(row, 'glob', '')",
+        "_src_get(entry, 'glob', '**/*.txt')",
+        "src_glob = '**/*.txt'",
     ])
 
 

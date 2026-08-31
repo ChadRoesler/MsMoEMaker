@@ -49,6 +49,21 @@ from ..run import stages as st
 STACK_REPO = "HuggingFaceCode/stack-v3-train"
 
 
+def _src_get(src, key, default=None):
+    """Read one field off a Source, whichever shape it arrived in.
+
+    The real pipeline passes Source dataclasses; old callers and tests pass
+    dicts. The `getattr(src, ...) or src.get(...)` pattern blew up on a
+    dataclass the moment a field's default was FALSY: `glob` defaults to "",
+    the `or` evaluated the dict-only fallback, and a real gauntlet run died
+    at stage 1 with "Source object has no attribute 'get'". One reader, both
+    shapes, no mixed fallbacks.
+    """
+    if isinstance(src, dict):
+        return src.get(key, default)
+    return getattr(src, key, default)
+
+
 def collect_corpus(config, languages: Optional[List[str]] = None,
                    sources: Optional[Dict[str, Any]] = None,
                    callback=None,
@@ -85,24 +100,24 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
 
         # reasoning: true GENERATES reasoning traces instead of scraping. Skip
         # here — generate_reasoning_traces handles it in the synth stage.
-        if getattr(src, 'reasoning', False):
+        if _src_get(src, 'reasoning', False):
             continue
 
         # Skip if already present (unless forced)
         if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            kind = getattr(src, 'kind', '') if hasattr(src, 'kind') else src.get('kind', '')
+            kind = _src_get(src, 'kind', '')
             print(f"[skip] {expert_name} dataset already present at {out_path}")
             if callback:
                 callback(st.DATA_CORPUS, "running", f"{expert_name}: already present")
             results[safe] = out_path
             continue
 
-        kind = getattr(src, 'kind', '') if hasattr(src, 'kind') else src.get('kind', '')
+        kind = _src_get(src, 'kind', '')
 
         if kind == "hf":
-            repo = getattr(src, 'repo', None) or src.get('repo', '')
-            text_field = getattr(src, 'text_field', 'code')
-            split = getattr(src, 'split', 'train')
+            repo = _src_get(src, 'repo', '')
+            text_field = _src_get(src, 'text_field', 'code')
+            split = _src_get(src, 'split', 'train')
             if not repo:
                 print(f"   [skip] {expert_name}: no repo specified")
                 continue
@@ -112,10 +127,10 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
                 results[safe] = out_path
 
         elif kind == "gh":
-            repo = getattr(src, 'repo', None) or src.get('repo', '')
-            glob_pat = getattr(src, 'glob', None) or "**/*.md"
-            ref = getattr(src, 'ref', None)
-            subdir = getattr(src, 'subdir', None)
+            repo = _src_get(src, 'repo', '')
+            glob_pat = _src_get(src, 'glob', '') or "**/*.md"
+            ref = _src_get(src, 'ref', None)
+            subdir = _src_get(src, 'subdir', None)
             if not repo:
                 print(f"   [skip] {expert_name}: no repo specified")
                 continue
@@ -125,8 +140,8 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
                 results[safe] = out_path
 
         elif kind == "local":
-            path = getattr(src, 'path', None) or src.get('path', '')
-            glob_pat = getattr(src, 'glob', None) or src.get('glob', '**/*.txt')
+            path = _src_get(src, 'path', '')
+            glob_pat = _src_get(src, 'glob', '') or "**/*.txt"
             if not path:
                 print(f"   [skip] {expert_name}: no path specified")
                 continue
@@ -153,9 +168,9 @@ def collect_corpus(config, languages: Optional[List[str]] = None,
     stack_caps: Dict[str, int] = {}
     stack_targets: Dict[str, int] = {}
     for expert_name, src in sources.items():
-        kind = getattr(src, 'kind', '') if hasattr(src, 'kind') else src.get('kind', '')
+        kind = _src_get(src, 'kind', '')
         if kind == "stack":
-            lang = getattr(src, 'language', None) or src.get('language', expert_name)
+            lang = _src_get(src, 'language', '') or expert_name
             stack_languages.append(lang)
             stack_names[lang] = expert_name
             # PER-SOURCE KNOBS, finally threaded. Source.max_shards narrows the

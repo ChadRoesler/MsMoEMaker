@@ -1,40 +1,132 @@
+# THE EVERYTHING GAUNTLET - one recipe that exercises every stage, every
+# source kind, all three synth shapes, and every tier-2/3/4/5 knob the
+# pipeline now honours. Validate it, plan it, then run it on the build box.
+#
+#   ms-moe-maker validate recipe.gauntlet-0.5B.yaml   # exit 0, laptop
+#   ms-moe-maker build recipe.gauntlet-0.5B.yaml --plan --offline
+#   ms-moe-maker build recipe.gauntlet-0.5B.yaml --json | jq
+#
+# TWO THINGS ON THE BOX:
+#   * ./gauntlet_notes must exist and hold >= ~4,000 .txt files (preflight
+#     refuses if it is missing; the corpus floor refuses if it is too small).
+#     Generate it:  for i in $(seq 1 5000); do printf 'note %s\n' $i >
+#     gauntlet_notes/note_$i.txt; done
+#   * llama.cpp for the export stage (or accept the warned skip - which now
+#     records WARNED, not done, in the manifest Theatre paints from).
 schema_version: 1
 name: gauntlet-0.5B
 size: 0.5B
-base_kind: nonreasoning       # the base does NOT reason; one expert will anyway
+base_kind: nonreasoning       # the base does NOT reason; two experts will anyway
+
+roots:                        # tier 2: the roots block now actually decides
+  data: gauntlet-data/{size}
+  output: gauntlet-runs/{size}
 
 experts:
+  # kind=stack, with the per-source shard cap (tier 2) and per-expert token
+  # budget (tier 2). The shard scan is shared across both stack experts.
   - name: python
-    source: { kind: stack, language: Python }
+    source: { kind: stack, language: Python, max_shards: 25 }
+    tokens: 12_000_000
   - name: csharp
     source: { kind: stack, language: C# }
-  # R1-distill into ONE specialist, on a base that cannot reason.
+  # kind=hf - the dedicated dataset collector.
   - name: powershell
     source: { kind: hf, repo: SaeedRahmani/codeparrot_github_code_powershell, text_field: code }
+  # kind=gh - the tarball collector; default glob (**/*.md) applies, so this
+  # also exercises the 3.9 sentinel fix.
+  - name: docs
+    source: { kind: gh, repo: mdn/content, glob: "files/**/*.md" }
+  # kind=local - offline notes. Preflight checks this path BEFORE anything
+  # expensive (tier 3/4); see the header for how to fill it.
+  - name: notes
+    source: { kind: local, path: ./gauntlet_notes }
+  # Synth shape #1: R1-distill reasoning traces into ONE specialist, on a
+  # base that cannot reason. Explicit reasoning teacher + the reasoning
+  # teacher's max_new knob (tier 2).
   - name: shell
     source:
       kind: synth
       reasoning: true
       teacher: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
-      
-abliterate: true
-tools_expert: true            # injects `agentcore`; the box supplies its teacher
+  # Synth shape #3: plain domain traces (no think, no tools) with a packaged
+  # question-template file and a per-source trace count (tier 2).
+  - name: lore
+    source:
+      kind: synth
+      teacher: Qwen/Qwen2.5-7B-Instruct
+      templates: dnd
+      examples: 250
+
+# Synth shape #2: the MCP tool-call expert. A mapping (even one that changes
+# nothing but the name) exercises the parse path; the box's defaults fill the
+# teacher.
+tools_expert: { name: agentcore }
+
+abliterate:                   # tier 5: the decensor pass, adapter export
+  enabled: true               #   exercises the "adapter is loadable" fix
+  n_trials: 60                #   a gauntlet-sized study, not 200
+  seed: 42
+  trial_index: 0              #   deterministic: first Pareto-front trial
+  checkpoint_action: continue #   resume the study, never re-run it
+  quantization: none
+  export: adapter
+
 runtime:
   hardware_tier: spark
+  load_in_4bit: false         # explicit False: the Optional sentinel (tier 3)
+  alloc_conf: "expandable_segments:True"   # the 106.6GB lever, applied on the
+                                           # DEFAULT path now (tier 2/4)
+
 budget:
   target_steps: 600           # a shakedown, not a result
+  max_seq_length: 2048
+  lora_r: 64                  # recipe-first rank (tier 3 sentinel fix)
+  lora_alpha: 32
+  lora_dropout: 0.05
+  warmup_ratio: 0.1           # tier 4: warmup now recomputed from REAL steps
+  warmup_floor: 12
+  collect_headroom: 1.5
+  teacher_max_new: 512        # generic teacher ceiling (tier 2)
+  reasoning_teacher_max_new: 4096
+
 corpus:
   min_samples: 300            # will be derived UP; watch it say so
   max_samples: 32000
-  router_mix_total: 32000
+  synth_samples: 500          # the run-wide trace default; source.examples
+                              #   overrides it per expert
+  per_repo_cap: 20
+  router_mix_total: 16000     # half the prod mix: smaller derived floor
+
+router:
+  epochs: 2.0                 # cheapest way to buy router steps
+  batch: 8
+  accum: 1
+  aux_loss_coef: 0.02
+  agent_mix_fraction: 0.15
+
 moe:
   experts_per_tok: 2
   router_init: random
+  router_init_std: 0.03       # tier 2: now flows to stitch AND verify
   norm_topk_prob: true
+  shared_expert_gate_fill: 0.05   # tier 2: was hardcoded 0.02
+  dense_layers: [0, 1]            # keep the first two layers dense
+
 gates:
   experts: auto               # divergence + the cross-domain loss matrix
-  main_evals: skip           # the refusal above says to run `eval` yourself; do that
+                              #   (now fed by {name}_reasoning.jsonl too)
+  main_evals: skip            # run `ms-moe-maker eval` yourself afterwards
+
+smoke:                        # tier 2: the build's smoke honours this block
+  prompt: "Describe a dragon in one sentence."
+  tokens: 32
+  timeout: 120
+  # script: ./smoke_me.py     # optional: replaces llama-cli entirely; the
+                              #   script gets the GGUF path as argv[1]
+
 eval:
   mode: all
   num_samples: 16
+  held_out_fraction: 0.15     # one resolved number everywhere (tier 3)
   dead_threshold: 1.2

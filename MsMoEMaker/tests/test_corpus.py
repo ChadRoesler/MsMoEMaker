@@ -340,3 +340,53 @@ def test_a_gh_source_without_a_glob_gets_the_md_default(monkeypatch):
                      languages=["docs"],
                      sources={"docs": Source(kind="gh", repo="o/r")})
     assert seen["glob"] == "**/*.md"
+
+
+def test_a_local_source_dataclass_dispatches_cleanly(monkeypatch):
+    """THE GAUNTLET BUG. The local branch read `getattr(src, 'glob', None) or
+    src.get('glob', ...)` - with Source.glob defaulting to "" the `or`
+    evaluated the dict-only fallback, and a real run died at stage 1 with
+    "'Source' object has no attribute 'get'". A dataclass source with UNSET
+    optional fields must dispatch exactly like a dict."""
+    import types
+
+    from ms_moe_maker.config.recipe import Source
+    from ms_moe_maker.data import synth as d
+
+    seen = {}
+
+    def fake_local(path, glob_pat, out_path, config, callback=None, lang=""):
+        seen["path"] = path
+        seen["glob"] = glob_pat
+        return out_path
+
+    monkeypatch.setattr(d, "_collect_local", fake_local)
+    d.collect_corpus(types.SimpleNamespace(data_root="d", force=False),
+                     languages=["notes"],
+                     sources={"notes": Source(kind="local", path="./x")})
+    assert seen["path"] == "./x"
+    assert seen["glob"] == "**/*.txt", (
+        "the kind default must apply when the source leaves glob unset")
+
+
+def test_a_hf_source_dataclass_dispatches_cleanly(monkeypatch):
+    """Same bug class on the hf branch: sources are dataclasses in the real
+    pipeline, and no read may assume a dict."""
+    import types
+
+    from ms_moe_maker.config.recipe import Source
+    from ms_moe_maker.data import synth as d
+
+    seen = {}
+
+    def fake_hf(repo, text_field, split, out_path, config,
+                callback=None, lang=""):
+        seen.update(repo=repo, text_field=text_field, split=split)
+        return out_path
+
+    monkeypatch.setattr(d, "_collect_hf", fake_hf)
+    d.collect_corpus(types.SimpleNamespace(data_root="d", force=False),
+                     languages=["powershell"],
+                     sources={"powershell": Source(
+                         kind="hf", repo="o/r", text_field="code")})
+    assert seen == {"repo": "o/r", "text_field": "code", "split": "train"}
