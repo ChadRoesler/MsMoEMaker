@@ -63,6 +63,20 @@ experts:
 # teacher.
 tools_expert: { name: agentcore }
 
+# Synth shape #4: the ROSTER reasoning expert, injected by flag rather than
+# written into `experts:`.
+#
+# BOTH SHAPES ON PURPOSE. The `shell` expert above keeps its `reasoning: true`
+# - that is the DILUTED shape, a domain expert whose token budget goes mostly
+# to English prose, and this recipe is the one place we want it exercised so
+# the two corpora can be diffed side by side. This block is the UNDILUTED
+# shape: its questions are drawn across every other expert's domain (Python,
+# C#, PowerShell, docs, notes, lore - not itself, not agentcore), so it learns
+# the register of deliberation instead of one subject.
+reasoning_expert:
+  name: deliberation
+  examples: 200               # per-expert trace count, like `lore` above
+
 abliterate:                   # tier 5: the decensor pass, adapter export
   enabled: true               #   exercises the "adapter is loadable" fix
   n_trials: 60                #   a gauntlet-sized study, not 200

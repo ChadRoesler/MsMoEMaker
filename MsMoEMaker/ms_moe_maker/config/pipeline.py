@@ -315,6 +315,39 @@ def tools_expert_name_of(recipe) -> str:
     return ""
 
 
+def reasoning_expert_name_of(recipe) -> str:
+    """The name of THE injected reasoning expert, or '' when there is none.
+
+    Mirrors tools_expert_name_of, fallback and all, for the same reason: parse()
+    sets `reasoning_expert_name`, but a Recipe BUILT IN CODE never went through
+    parse, and every test and embedder that constructs one by hand would then
+    silently have no reasoning expert while its recipe dict plainly asked for
+    one.
+
+    Two differences from the tools version, both deliberate. There is no legacy
+    name convention to honour (the flag and the concept arrived together), so
+    the fallback reads the raw flag off the dataclass instead. And it only
+    answers when an expert of that name is actually ON the list - naming an
+    expert that does not exist is how a downstream `name in expert_names` check
+    goes quiet instead of loud.
+    """
+    name = getattr(recipe, "reasoning_expert_name", "")
+    if name:
+        return name
+    flag = getattr(recipe, "reasoning_expert", False)
+    if not (flag or isinstance(flag, dict)):
+        return ""
+    # Local import: recipe.py imports this module (inside validate), so a
+    # module-scope import here closes the loop through data/__init__.
+    from .recipe import DEFAULT_REASONING_EXPERT_NAME
+    want = flag.get("name") if isinstance(flag, dict) else ""
+    want = str(want or DEFAULT_REASONING_EXPERT_NAME).strip()
+    for e in getattr(recipe, "experts", None) or []:
+        if getattr(e, "name", "") == want:
+            return want
+    return ""
+
+
 def held_out_fraction(recipe) -> float:
     """The eval held-out fraction, resolved and clamped in ONE place.
 
@@ -334,6 +367,48 @@ def held_out_fraction(recipe) -> float:
     if 0.0 <= held_out < 0.95:
         return held_out
     return 0.1
+
+
+# ONE NUMBER HERE IS WRONG FOR SOMEBODY, SO THERE ARE TWO.
+#
+# 256 is the cap eval has always had and it is the right size for what eval
+# scores: an answer, or the next chunk of a file. A reasoning run cannot live
+# inside it - the think block alone routinely runs past 256 tokens, so
+# generation stops mid-thought, the answer after `</think>` is never written,
+# and `reasoned` reports "does not reliably reason" about a model that reasons
+# fine. 1024 buys the block AND the answer it exists to justify.
+#
+# Generation time is linear in this number, which is exactly why a
+# non-reasoning run does not get billed for a reasoning run's headroom.
+EVAL_MAX_NEW_TOKENS = 256
+EVAL_MAX_NEW_TOKENS_REASONING = 1024
+
+
+def eval_max_new_tokens(config, requested: int = -1) -> int:
+    """The per-sample generation budget for eval. `-1` = you decide.
+
+    The shape that decides it is whether ANYTHING in this run writes a
+    thinking trace: either the base is a reasoning model (build_config stamps
+    the delimiters onto the config) or an expert generates traces
+    (reasoning_experts). Both spend their first few hundred tokens on the
+    block before they say anything scorable.
+
+    0 and stray negatives fall through to the automatic answer rather than
+    generating nothing. validate() refuses them on the laptop; this is the
+    belt to that pair of braces, because a spec assembled in code does not go
+    through validate() and a budget of 0 scores the empty string against every
+    reference.
+    """
+    try:
+        want = int(requested)
+    except (TypeError, ValueError):
+        want = -1
+    if want > 0:
+        return want
+    reasons = bool(getattr(config, "reasoning_experts", None)) or bool(
+        getattr(config, "reasoning_open", "")
+        and getattr(config, "reasoning_close", ""))
+    return EVAL_MAX_NEW_TOKENS_REASONING if reasons else EVAL_MAX_NEW_TOKENS
 
 
 # ── pipeline constants ─────────────────────────────────────────────────────────
@@ -619,6 +694,14 @@ class PipelineConfig:
     # literal 'agentcore'.
     tools_expert_name: str = ""
 
+    # The name of the INJECTED reasoning expert, or '' when there is none.
+    # Deliberately not the same thing as `reasoning_experts` below, which is
+    # every expert carrying source.reasoning: this is the ONE whose corpus is
+    # built to span the roster, and builder has to tell it apart from a
+    # hand-written `reasoning: true` domain expert, whose corpus must keep
+    # spanning exactly one domain.
+    reasoning_expert_name: str = ""
+
     # Hardware tier
     tier: str = "spark"
 
@@ -870,6 +953,11 @@ def build_config(recipe, force: bool = False,
 
     # The tools/MCP expert's name, resolved once (flag, or legacy 'agentcore').
     tools_expert_name = tools_expert_name_of(recipe)
+
+    # The reasoning expert's name, resolved once, in the same place and for the
+    # same reason: two callers deriving a name separately is two answers to one
+    # question waiting to disagree.
+    reasoning_expert_name = reasoning_expert_name_of(recipe)
 
     # THE RUN'S STYLE, resolved once. `reasoning_type` is about the BASE; a
     # `reasoning: true` expert puts think blocks in a build whose base does not
@@ -1208,6 +1296,7 @@ def build_config(recipe, force: bool = False,
         # Prompts
         expert_names=expert_names,
         tools_expert_name=tools_expert_name,
+        reasoning_expert_name=reasoning_expert_name,
         # Eval / reporting
         eval_held_out_fraction=eval_held_out_fraction,
         floor_raised=floor_raised,

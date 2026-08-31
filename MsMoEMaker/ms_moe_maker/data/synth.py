@@ -1230,7 +1230,9 @@ def _load_templates(path: Optional[str] = None) -> List[str]:
 def generate_reasoning_traces(config, expert_name, callback=None,
                               teacher_model: Optional[str] = None,
                               templates_path: Optional[str] = None,
-                              n: Optional[int] = None) -> Optional[str]:
+                              n: Optional[int] = None,
+                              domains: Optional[List[str]] = None
+                              ) -> Optional[str]:
     """Generate reasoning traces for one specialist — the R1-distill recipe.
 
     A reasoning teacher writes its NATIVE thinking delimiters then an answer,
@@ -1238,6 +1240,13 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     so a non-reasoning base is fine-tuned into reasoning on that ONE domain.
     Rejection sampling keeps only traces whose think block and answer are BOTH
     non-empty.
+
+    `domains` makes the corpus span a ROSTER instead of one subject: hand it the
+    other experts' display names and every question draws a domain AND a
+    template, so the specialist learns the register of deliberation rather than
+    one domain's vocabulary. Leave it None and this behaves exactly as it always
+    has - one domain, template chosen by index - because a hand-written
+    `reasoning: true` expert must not have its corpus quietly change shape.
 
     Returns the JSONL path, or None if generation was skipped.
     """
@@ -1260,6 +1269,12 @@ def generate_reasoning_traces(config, expert_name, callback=None,
         n = config.num_agent_samples
     out_path = f"{config.data_root}/{expert_name}_reasoning.jsonl"
     templates = _load_templates(templates_path)
+    # The expert's own seeded stream - the SAME one the tool-surface generator
+    # draws from, on purpose. A second seeding scheme here would be a second
+    # answer to "did this seed produce this data", which is the failure
+    # _expert_rng exists to close. Unused when `domains` is None, so the
+    # single-domain corpus stays byte-identical.
+    rnd = _expert_rng(config, expert_name)
     if not config.force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         print(f"[skip] reasoning traces already present at {out_path}")
         return out_path
@@ -1298,6 +1313,10 @@ def generate_reasoning_traces(config, expert_name, callback=None,
         teacher = _HFTeacher(config, model=teacher_model,
                              max_new_tokens=config.reasoning_teacher_max_new)
 
+    # THE PROBE STAYS SINGLE-DOMAIN, even for a roster expert. It is asking a
+    # question about the TEACHER - does it emit its own tags - not about the
+    # corpus, so a drawn question would buy nothing and would consume the first
+    # draw of the stream, making the corpus depend on whether a probe ran.
     probe_prompt = teacher.tokenizer.apply_chat_template(
         _reasoning_msgs(tag_system, display, 0, templates), tokenize=False,
         add_generation_prompt=True)
@@ -1341,7 +1360,9 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     try:
         while kept < n:
             batch_n = min(teacher.batch_size, (n - kept) * 2)
-            batch = [_reasoning_msgs(system, display, i, templates) for i in range(batch_n)]
+            batch = [_reasoning_msgs(system, display, i, templates,
+                                     domains, rnd)
+                     for i in range(batch_n)]
             prompts = [teacher.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
             for msgs, text in zip(batch, teacher.complete(prompts)):
@@ -1480,8 +1501,32 @@ def generate_domain_traces(config, expert_name, callback=None,
     return out_path
 
 
-def _reasoning_msgs(system: str, display: str, i: int, templates):
-    task = templates[i % len(templates)].format(domain=display)
+def _reasoning_msgs(system: str, display: str, i: int, templates,
+                    domains: Optional[List[str]] = None, rnd=None):
+    """One (system, user) pair. `domains` turns a one-subject corpus into a
+    roster-spanning one.
+
+    NOT TWO MODULOS, and this is the whole reason this function grew a
+    parameter instead of a second index. The obvious spelling of "span the
+    roster" is `templates[i % T]` beside `domains[i % D]`, and it LOCKS the two
+    together: one counter advances both in lockstep, so the corpus only ever
+    contains lcm(T, D) distinct pairs. With four templates and four domains
+    that is FOUR questions, repeated for the whole run, not sixteen - and
+    nothing in the output looks wrong, because every row is still well formed.
+    So both are drawn INDEPENDENTLY from the expert's seeded stream: real
+    coverage, and still reproducible run to run.
+
+    `domains=None` is the untouched original path - `i` picks the template and
+    the expert's own display name is the only domain.
+    """
+    if domains:
+        # Defaults to the module RNG only so a caller that does not care still
+        # works, exactly as _agent_batch_specs does; the build always passes
+        # the expert's stream.
+        rnd = rnd if rnd is not None else random
+        task = rnd.choice(templates).format(domain=rnd.choice(domains))
+    else:
+        task = templates[i % len(templates)].format(domain=display)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": task},

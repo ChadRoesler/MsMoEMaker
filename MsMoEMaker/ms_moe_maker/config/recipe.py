@@ -37,6 +37,25 @@ from . import defaults as _defaults
 DEFAULT_TOOLS_EXPERT_NAME = _defaults.FLOOR["tools_expert"]["name"]
 DEFAULT_TOOLS_EXPERT_TEACHER = _defaults.FLOOR["tools_expert"]["teacher"]
 
+# The reasoning specialist. `reasoning_expert: true` injects one the same way
+# `tools_expert: true` does - same defaults layer, same mapping override, same
+# "an expert of that name already exists, so USE it" rule.
+#
+# WHY IT IS ITS OWN EXPERT AND NOT `reasoning: true` ON A DOMAIN ONE. A
+# reasoning specialist should learn the REGISTER OF DELIBERATION, not a
+# subject. Bolt `reasoning: true` onto a domain expert (say `shell`) and you
+# spend ~90% of that expert's token budget on English reasoning prose:
+# _trim_to_token_budget counts the whole `text`, and a reasoning row is
+# `<think>...</think>\nanswer`. So the domain expert gets an ORDER OF MAGNITUDE
+# less domain content than its peers for the same GPU hours, its weight-space
+# identity becomes "prose", and the router starts routing prose from every
+# domain to it. Then the trap closes: its held-out set is also reasoning
+# traces, so it posts HIGH enrichment on the routing eval and the corruption
+# reads as health. A number that is wrong in the reassuring direction is the
+# expensive kind. One expert, one job.
+DEFAULT_REASONING_EXPERT_NAME = _defaults.FLOOR["reasoning_expert"]["name"]
+DEFAULT_REASONING_EXPERT_TEACHER = _defaults.FLOOR["reasoning_expert"]["teacher"]
+
 
 @dataclass
 class Source:
@@ -316,6 +335,15 @@ class EvalSpec:
     held_out_fraction: float = 0.1
     num_samples: int = 20
     dead_threshold: float = 1.2    # minimum router enrichment before "dead"
+    # THE GENERATION BUDGET, WHICH WAS A HARDCODED 256 NO RECIPE COULD REACH.
+    # Fine for an answer, fatal for a thinking trace: a `<think>` block alone
+    # routinely runs past 256 tokens, so a reasoning run got cut off
+    # mid-thought, the answer after the close tag was never generated, and the
+    # `reasoned` metric reported "does not reliably reason" about a model that
+    # reasons fine. -1 = you decide, and the decision is made from whether
+    # this run writes traces at all - see pipeline.eval_max_new_tokens, because
+    # one number here is wrong for somebody.
+    max_new_tokens: int = -1
 
 
 @dataclass
@@ -387,6 +415,10 @@ class Recipe:
     # bool | mapping. When truthy, a tools (MCP) expert is added to `experts`:
     # `true` uses the defaults, a mapping customises name/teacher/etc.
     tools_expert: Any = False
+    # bool | mapping, the same shape and the same rules. When truthy a REASONING
+    # expert is added to `experts` with `kind: synth` AND `reasoning: true` -
+    # that source shape is what routes it to generate_reasoning_traces.
+    reasoning_expert: Any = False
 
     @property
     def tokens_per_step(self) -> int:
@@ -430,7 +462,7 @@ class Recipe:
 _KNOWN_TOP = {
     "name", "base", "base_kind", "experts", "schema_version", "size", "budget",
     "moe", "gates", "runtime", "roots", "corpus", "router", "eval", "smoke",
-    "template", "tools_expert", "abliterate",
+    "template", "tools_expert", "reasoning_expert", "abliterate",
 }
 
 
@@ -551,6 +583,44 @@ def parse(data: Dict[str, Any],
         # recipes keep their meaning without requiring the flag.
         tools_name = DEFAULT_TOOLS_EXPERT_NAME
 
+    # -- the reasoning expert ----------------------------------------------
+    #
+    # The same on-ramp as `tools_expert`, deliberately identical down to the
+    # empty-mapping rule, because two flags that look alike and behave
+    # differently is worse than either behaviour on its own.
+    #
+    # The one thing that is NOT the same: the injected source carries
+    # `reasoning: true` as well as `kind: synth`. Both are fixed rather than
+    # passed through, for the same reason `kind` is fixed above - a
+    # `reasoning_expert:` whose source could be talked out of reasoning is a
+    # block that silently means nothing.
+    #
+    # There is deliberately no legacy-name branch here (the flag and the
+    # concept arrived together, so no recipe predates it), which is why an
+    # expert that merely has `reasoning: true` on it is NOT the reasoning
+    # expert - it is a domain expert that thinks, and it keeps behaving
+    # exactly as it did.
+    reasoning_defaults = dict((defaults or {}).get("reasoning_expert") or {})
+    reasoning_expert = data.get("reasoning_expert", False)
+    reasoning_name = ""
+    if reasoning_expert or isinstance(reasoning_expert, dict):
+        spec = dict(reasoning_defaults)
+        if isinstance(reasoning_expert, dict):
+            spec.update({k: v for k, v in reasoning_expert.items()
+                         if not (isinstance(v, (int, float))
+                                 and not isinstance(v, bool) and v == -1)})
+        reasoning_name = str(spec.get("name")
+                             or DEFAULT_REASONING_EXPERT_NAME).strip()
+        if not any(e.name == reasoning_name for e in experts):
+            src = {"kind": "synth", "reasoning": True,
+                   "teacher": (spec.get("teacher")
+                               or DEFAULT_REASONING_EXPERT_TEACHER)}
+            src.update({k: v for k, v in spec.items()
+                        if k not in ("name", "kind", "reasoning")})
+            experts.append(Expert(
+                name=reasoning_name,
+                source=_build(Source, src, "reasoning_expert", warnings)))
+
     rec = Recipe(
         name=data.get("name") or "",
         base=data.get("base") or "",
@@ -570,11 +640,15 @@ def parse(data: Dict[str, Any],
         abliterate=_build_abliterate(data.get("abliterate"), warnings),
         template=data.get("template", ""),
         tools_expert=tools_expert,
+        reasoning_expert=reasoning_expert,
     )
     # The tools expert's NAME, as resolved by the injection above. A plain
     # instance attribute rather than a dataclass field so recipe_id() (asdict)
     # is not polluted with a value derivable from `experts`.
     rec.tools_expert_name = tools_name
+    # Same treatment for the same reason: derivable from `experts`, so it stays
+    # OFF the dataclass and out of asdict() - and therefore out of recipe_id().
+    rec.reasoning_expert_name = reasoning_name
     # The template's base-family hint (apply_template writes it; parse exempts
     # underscore keys from typo warnings so it can travel silently). config's
     # _resolve_base turns it into the concrete checkpoint for the run's size.
@@ -752,6 +826,26 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
             f"will report UNMEASURABLE. Use experts_per_tok=1 AND "
             f"norm_topk_prob=false for a 2-expert MoE, or add a third expert "
             f"and keep top-2.")
+
+    # -- the two injected specialists must not be the same expert -----------
+    #
+    # Each injection USES an existing expert of its name rather than
+    # duplicating it, which is right in isolation and a silent collapse when
+    # both names are the same word: one expert, two jobs. Downstream then asks
+    # it BOTH "are you the tools expert" (router quota, MCP formatting) and
+    # "are you the reasoning expert" (trace generation), and builder writes a
+    # tool-call corpus and a think-block corpus for the same slot - whichever
+    # generator runs last wins, by ordering rather than by decision. Refuse it
+    # here, where it costs a second.
+    _tools_n = getattr(rec, "tools_expert_name", "")
+    _reason_n = getattr(rec, "reasoning_expert_name", "")
+    if _tools_n and _tools_n == _reason_n:
+        errs.append(
+            f"tools_expert and reasoning_expert are both named {_tools_n!r}, "
+            f"so they are ONE expert with two jobs: it would be handed tool "
+            f"traces and reasoning traces for the same corpus slot and only "
+            f"one would survive. Give one of them its own `name:` - the "
+            f"reasoning expert defaults to {DEFAULT_REASONING_EXPERT_NAME!r}.")
 
     # -- experts ------------------------------------------------------------
     if not rec.experts:
@@ -1070,6 +1164,15 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     if rec.eval.dead_threshold <= 0:
         errs.append(f"eval.dead_threshold must be > 0, got "
                     f"{rec.eval.dead_threshold}")
+    # -1 IS THE SENTINEL, 0 IS A MISTAKE. Same rule the README sets in bold and
+    # the same shape corpus.per_repo_cap uses: the sentinel is spelled -1, and
+    # 0 here would generate nothing and score the empty string against every
+    # reference - a full eval reporting zeros that look like a model failure.
+    if rec.eval.max_new_tokens != -1 and rec.eval.max_new_tokens < 1:
+        errs.append(f"eval.max_new_tokens must be -1 (you decide: 256, or "
+                    f"1024 when the run writes thinking traces) or >= 1, got "
+                    f"{rec.eval.max_new_tokens} - 0 generates nothing and "
+                    f"would score the empty string against every reference")
 
     # -- roots --------------------------------------------------------------
     # Both empty = the tool's defaults (msmoe_data / msmoe_run_{size}), which

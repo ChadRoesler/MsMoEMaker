@@ -115,8 +115,15 @@ def specialist_dir(config, safe_name: str) -> str:
     return f"{config.output_root}/" + st.FINETUNE_ARTIFACT.format(expert=safe_name)
 
 
-def specialist_is_done(config, safe_name: str) -> bool:
+def specialist_is_done(config, safe_name: str, retrain: bool = False) -> bool:
     """Has this expert already been trained?
+
+# `retrain` IS THE PER-EXPERT --force, and it is what `--only <expert>` pulls.
+# The flags used to be all-or-nothing: --force redid all N experts, and the
+# only way to redo ONE was to delete its directory by hand - which retrained
+# it and then had the stitch skip, because the stitch only compared names.
+# The caller says which experts it named; the predicate stays the single
+# source of the skip decision.
 # ONE PREDICATE, TWO CALLERS. The skip condition lives here and nowhere else,
 # because the stage function and the orchestrator both need the answer and
 # deriving it twice is how they drift. (Runner and build_config each worked out
@@ -129,7 +136,7 @@ def specialist_is_done(config, safe_name: str) -> bool:
 # that read as "already trained", so resume SKIPPED the expert and the stitch
 # stitched a directory with no weights in it. All three markers must exist.
     """
-    if config.force:
+    if config.force or retrain:
         return False
     d = specialist_dir(config, safe_name)
     if not os.path.exists(os.path.join(d, "config.json")):
@@ -223,7 +230,8 @@ def clear_checkpoints(tmp_dir: str) -> list:
 
 
 def fine_tune_specialist(config, safe_name: str, data_path: str,
-                         expert_display: Optional[str] = None) -> str:
+                         expert_display: Optional[str] = None,
+                         retrain: bool = False) -> str:
     """LoRA fine-tune one specialist expert.
 
     Resumes from checkpoint if a previous run was interrupted.  Saves the
@@ -235,7 +243,7 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
     import torch
 
     out_dir = specialist_dir(config, safe_name)
-    if specialist_is_done(config, safe_name):
+    if specialist_is_done(config, safe_name, retrain):
         print(f"Specialist {safe_name} already trained at {out_dir}, skipping.")
         return out_dir
 
@@ -435,10 +443,15 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
     # merge_and_unload() saves the base weights with an untouched LoRA, and the
     # builder records "finetune.X -> done, saved". An untrained expert,
     # reported trained, then stitched into the MoE.
-    if config.force:
+    # `retrain` gets the same treatment as --force and for the same reason:
+    # --only <expert> means retrain that expert, and a leftover checkpoint
+    # would quietly turn it back into a resume - the exact trap described
+    # above, just entered through the other flag.
+    if config.force or retrain:
         gone = clear_checkpoints(tmp_dir)
         if gone:
-            print(f"   --force: discarded {len(gone)} stale checkpoint(s) in "
+            _why = "--force" if config.force else f"--only {safe_name}"
+            print(f"   {_why}: discarded {len(gone)} stale checkpoint(s) in "
                   f"{tmp_dir} ({', '.join(gone)}). Forcing means retraining, "
                   f"not resuming.")
 

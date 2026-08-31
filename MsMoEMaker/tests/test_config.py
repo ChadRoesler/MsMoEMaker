@@ -884,6 +884,130 @@ class TestToolsExpert:
         assert "agentcore" in c.expert_names
 
 
+class TestReasoningExpert:
+    """`reasoning_expert` is the on-ramp for the DELIBERATION specialist.
+
+    It mirrors `tools_expert` structurally on purpose. What it is NOT is
+    `reasoning: true` on a domain expert: that spends most of a domain
+    expert's token budget on English prose (a reasoning row is the think block
+    plus the answer, and the budget counts the whole row), turns its
+    weight-space identity into "prose" so the router sends prose from every
+    domain to it - and then posts HIGH enrichment, because its held-out set is
+    reasoning traces too. The corruption reads as health. One expert, one job.
+    """
+
+    def _rec(self, reasoning_expert=False, extra_experts=(), tools_expert=False):
+        from ms_moe_maker.config.recipe import parse
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                            {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}]}
+        body["experts"].extend(extra_experts)
+        if reasoning_expert is not False:
+            body["reasoning_expert"] = reasoning_expert
+        if tools_expert is not False:
+            body["tools_expert"] = tools_expert
+        return parse(body)
+
+    def test_true_injects_a_default_reasoning_expert(self):
+        rec, _ = self._rec(reasoning_expert=True)
+        assert [e.name for e in rec.experts] == ["a", "b", "deliberation"]
+        assert rec.reasoning_expert_name == "deliberation"
+
+    def test_the_injected_source_is_synth_AND_reasoning(self):
+        """`kind: synth` alone routes to generate_domain_traces - plain answers,
+        no think block. `reasoning: true` is what sends it to
+        generate_reasoning_traces, so it is not decoration."""
+        rec, _ = self._rec(reasoning_expert=True)
+        src = rec.experts[-1].source
+        assert src.kind == "synth"
+        assert src.reasoning is True
+        assert src.teacher  # a reasoning-capable default was filled in
+
+    def test_an_empty_mapping_still_asks_for_the_reasoning_expert(self):
+        """The `tools_expert: {}` bug, pinned before it can be reintroduced:
+        `if reasoning_expert:` reads an empty customisation mapping as "off"
+        when it is a REQUEST that happens to change nothing."""
+        rec, _ = self._rec(reasoning_expert={})
+        assert [e.name for e in rec.experts] == ["a", "b", "deliberation"]
+        assert rec.reasoning_expert_name == "deliberation"
+
+    def test_a_mapping_overrides_key_by_key(self):
+        rec, _ = self._rec(reasoning_expert={"name": "thinky",
+                                             "teacher": "X/Y-Distill"})
+        assert [e.name for e in rec.experts] == ["a", "b", "thinky"]
+        assert rec.reasoning_expert_name == "thinky"
+        assert rec.experts[-1].source.teacher == "X/Y-Distill"
+
+    def test_minus_one_is_dropped_as_the_you_decide_sentinel(self):
+        rec, _ = self._rec(reasoning_expert={"examples": -1})
+        assert rec.experts[-1].source.examples == -1, (
+            "-1 must fall through to the source default, not be written as an "
+            "explicit -1 by the injection")
+
+    def test_an_existing_expert_of_that_name_is_used_not_duplicated(self):
+        """The recipe already spells the expert out; the flag must MARK it, not
+        append a second one - two experts with one name makes the expert index
+        stamped into config.json ambiguous."""
+        mine = {"name": "deliberation",
+                "source": {"kind": "synth", "reasoning": True,
+                           "teacher": "mine/Distill-7B"}}
+        rec, _ = self._rec(reasoning_expert=True, extra_experts=[mine])
+        assert [e.name for e in rec.experts] == ["a", "b", "deliberation"]
+        assert rec.reasoning_expert_name == "deliberation"
+        assert rec.experts[-1].source.teacher == "mine/Distill-7B", (
+            "the recipe's own expert must not be overwritten by the defaults")
+
+    def test_the_flag_is_off_by_default(self):
+        rec, _ = self._rec()
+        assert [e.name for e in rec.experts] == ["a", "b"]
+        assert rec.reasoning_expert_name == ""
+
+    def test_the_injected_expert_lands_in_config_reasoning_experts(self,
+                                                                   monkeypatch):
+        """`reasoning_experts` is what builder loops over to generate traces.
+        Injecting an expert that never reaches that list is a specialist with
+        no corpus, which dies in the fine-tune loop hours later."""
+        monkeypatch.delenv("MSMOE_DRYRUN", raising=False)
+        rec, _ = self._rec(reasoning_expert=True)
+        c = config.build_config(rec, dryrun=False)
+        assert c.reasoning_expert_name == "deliberation"
+        assert "deliberation" in c.expert_names
+        assert "deliberation" in c.reasoning_experts
+
+    def test_a_recipe_built_in_code_still_resolves_the_name(self):
+        """The fallback in reasoning_expert_name_of: a Recipe constructed by
+        hand never went through parse, so `reasoning_expert_name` is unset and
+        the raw flag is all there is."""
+        from ms_moe_maker.config import pipeline as P
+        rec, _ = self._rec(reasoning_expert=True)
+        del rec.reasoning_expert_name
+        assert P.reasoning_expert_name_of(rec) == "deliberation"
+
+    def test_the_fallback_does_not_name_an_expert_that_is_not_there(self):
+        from ms_moe_maker.config import pipeline as P
+        import types
+        rec = types.SimpleNamespace(reasoning_expert=True, experts=[])
+        assert P.reasoning_expert_name_of(rec) == ""
+
+    def test_colliding_with_the_tools_expert_is_an_error(self):
+        """Both injections USE an existing expert of their name, so one shared
+        name is one expert with two jobs - handed a tool-call corpus and a
+        think-block corpus for the same slot, last writer wins."""
+        from ms_moe_maker.config.recipe import validate
+        rec, _ = self._rec(tools_expert={"name": "shared"},
+                           reasoning_expert={"name": "shared"})
+        errs, _ = validate(rec)
+        assert any("two jobs" in e for e in errs), errs
+
+    def test_the_two_experts_coexist_when_named_apart(self):
+        rec, _ = self._rec(tools_expert=True, reasoning_expert=True)
+        from ms_moe_maker.config.recipe import validate
+        errs, _ = validate(rec)
+        assert [e.name for e in rec.experts] == ["a", "b", "agentcore",
+                                                 "deliberation"]
+        assert not [e for e in errs if "two jobs" in e], errs
+
+
 class TestBaseKind:
     """base_kind resolves to config.reasoning, so downstream can alter prompt /
     eval handling based on whether the base emits a thinking trace."""
@@ -1163,6 +1287,51 @@ class TestDeadKnobsAreAlive:
         assert c.reasoning is True
 
 
+class TestTheEvalGenerationBudget:
+    """`-1` = you decide, and the decision is made from the run's SHAPE.
+
+    A hardcoded 256 was fine for an answer and fatal for a thinking trace: the
+    block alone routinely runs past it, so a reasoning eval was cut off before
+    it ever reached the answer and `reasoned` reported "does not reliably
+    reason" about a model that reasons fine. One default cannot be honest for
+    both, so there are two and the run picks.
+    """
+
+    class _Cfg:
+        reasoning_experts = ()
+        reasoning_open = ""
+        reasoning_close = ""
+
+    class _Reasoning:
+        reasoning_experts = ("deliberation",)
+        reasoning_open = "<think>"
+        reasoning_close = "</think>"
+
+    class _ReasoningBase:
+        """A reasoning BASE with no reasoning expert still writes traces."""
+        reasoning_experts = ()
+        reasoning_open = "<think>"
+        reasoning_close = "</think>"
+
+    def test_auto_is_the_old_cap_for_a_plain_run(self):
+        assert config.eval_max_new_tokens(self._Cfg(), -1) == 256
+
+    def test_auto_is_roomier_when_the_run_reasons(self):
+        assert config.eval_max_new_tokens(self._Reasoning(), -1) == 1024
+        assert config.eval_max_new_tokens(self._ReasoningBase(), -1) == 1024
+
+    def test_an_explicit_number_wins_either_way(self):
+        assert config.eval_max_new_tokens(self._Cfg(), 900) == 900
+        assert config.eval_max_new_tokens(self._Reasoning(), 64) == 64
+
+    def test_zero_and_junk_fall_through_to_auto_not_to_nothing(self):
+        """validate() refuses these on the laptop; a spec assembled in code
+        does not go through validate(), and a budget of 0 generates nothing."""
+        assert config.eval_max_new_tokens(self._Cfg(), 0) == 256
+        assert config.eval_max_new_tokens(self._Cfg(), None) == 256
+        assert config.eval_max_new_tokens(self._Reasoning(), 0) == 1024
+
+
 class TestTier3ValidationRefusals:
     """Values that used to validate clean at exit 0 and then produce nonsense
     hours into a build. Each must now be refused on the laptop."""
@@ -1227,6 +1396,17 @@ class TestTier3ValidationRefusals:
     def test_a_huge_held_out_fraction_is_refused(self):
         assert any("held_out_fraction" in e
                    for e in self._errs({"eval": {"held_out_fraction": 0.99}}))
+
+    def test_zero_is_not_the_sentinel_for_max_new_tokens(self):
+        """-1 means "you decide"; 0 means "generate nothing and score the
+        empty string against every reference", which is a full eval printing
+        zeros that read like a model failure."""
+        assert self._errs({"eval": {"max_new_tokens": -1}}) == []
+        assert self._errs({"eval": {"max_new_tokens": 1024}}) == []
+        assert any("max_new_tokens" in e
+                   for e in self._errs({"eval": {"max_new_tokens": 0}}))
+        assert any("max_new_tokens" in e
+                   for e in self._errs({"eval": {"max_new_tokens": -2}}))
 
     def test_a_mix_the_unset_ceiling_cannot_fill_is_refused(self):
         """max_samples unset used to skip the mix check entirely, so a 500k mix

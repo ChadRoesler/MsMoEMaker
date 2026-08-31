@@ -24,7 +24,16 @@ from ..run import stages as st
 
 import json
 import os
-from typing import Dict, List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
+
+
+# The provenance stamp: WHICH specialists this skeleton was spliced from,
+# written ONLY after a stitch actually completed. Same shape as export's
+# ".smokepass.txt" - a proof artifact kept separate from the thing it proves,
+# so a half-written or hand-copied skeleton cannot inherit a claim it never
+# earned.
+PROVENANCE = ".specialists.json"
 
 
 def stitch_dir(config) -> str:
@@ -46,6 +55,20 @@ def stitch_is_done(config) -> bool:
     the artifact this recipe describes and the skip has to decline - order
     matters as much as membership, because it IS the expert axis of the
     router's gate matrix.
+
+    AND THE NAMES ARE STILL NOT ENOUGH. Same lesson, one step further out, and
+    this one lands on the README's headline claim: "because each expert does
+    exactly one thing, you can retrain ONE and re-splice without touching the
+    others." Do exactly that - delete specialist_shell, re-run - and shell
+    retrained for hours, the expert NAMES were unchanged, this returned True,
+    the stitch was skipped, and the skeleton holding the OLD shell FFN went
+    on to router training and export. You paid for the retrain and shipped
+    the previous model, and the build reported success.
+
+    So the skeleton also stamps WHAT IT WAS SPLICED FROM (see
+    write_provenance), and the skip declines when any of those specialists is
+    newer than, or missing from, that stamp. A skeleton with no readable stamp
+    fails CLOSED - see provenance_is_current.
     """
     if config.force:
         return False
@@ -54,16 +77,25 @@ def stitch_is_done(config) -> bool:
         return False
 
     want = list(getattr(config, "expert_names", []) or [])
-    if not want:
-        return True
-    try:
-        with open(cfg_path, encoding="utf-8") as fh:
-            have = list(json.load(fh).get("expert_names") or [])
-    except (OSError, ValueError):
-        return True          # unreadable: let the stitch decide, not the skip
+    have: List[str] = []
+    if want:
+        try:
+            with open(cfg_path, encoding="utf-8") as fh:
+                have = list(json.load(fh).get("expert_names") or [])
+        except (OSError, ValueError):
+            # Unreadable config.json: the NAME question has no answer here, so
+            # fall through to the provenance check rather than returning True.
+            # "I could not check" must never leave by the same door as "I
+            # checked and it was fine".
+            have = []
     if have and have != want:
         print(f"[restitch] skeleton on disk was built for {have}, recipe says "
               f"{want} - the gate axis would not match the names. Restitching.")
+        return False
+
+    fresh, why = provenance_is_current(stitch_dir(config), config.output_root)
+    if not fresh:
+        print(f"[restitch] {why}. Restitching.")
         return False
     return True
 
@@ -72,6 +104,135 @@ def _specialist_dir(output_root: str, expert: str) -> str:
     """Where fine-tune put this expert. Quoted from stages, never spelled out,
     so the name lives in exactly one place."""
     return f"{output_root}/" + st.FINETUNE_ARTIFACT.format(expert=expert)
+
+
+def provenance_path(out_dir: str) -> str:
+    """Where the stamp lives. One place, so a rename cannot half-land."""
+    return os.path.join(out_dir, PROVENANCE)
+
+
+def specialist_fingerprint(output_root: str,
+                           expert: str) -> Optional[Dict[str, float]]:
+    """Cheap identity of one specialist directory: file count, total bytes,
+    newest mtime. None when the directory is not there at all.
+
+    MTIMES, NOT A CONTENT HASH, AND THAT IS A DELIBERATE TRADE.
+
+    stitch_is_done() runs on every resume, twice per build, before anything is
+    loaded. Hashing means reading every specialist end to end - a gigabyte per
+    expert at 0.5B, fifteen at 7B - so on a five-expert recipe the *skip
+    check* would cost minutes of disk every time you asked "is it done yet".
+    A stat() is free, and it catches the failure that actually happens:
+    fine_tune_specialist rewrites these files, so a retrain always moves the
+    mtime forward.
+
+    What it does NOT catch: a restore that PRESERVES times (cp -p, rsync -a,
+    tar x) dropping a DIFFERENT specialist in under the old timestamps. That
+    one is invisible here, and --force / --only is the answer to it. Every
+    other lie an mtime tells - git checkout, a plain copy, a touch - moves the
+    time FORWARD, which costs a restitch and never ships a stale model. The
+    trade is biased on purpose: cheap and occasionally over-eager beats
+    expensive, and both beat silently wrong.
+    """
+    d = _specialist_dir(output_root, expert)
+    try:
+        entries = list(os.scandir(d))
+    except OSError:
+        return None
+    files = 0
+    total = 0
+    newest = 0.0
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            stat = entry.stat()
+        except OSError:
+            return None
+        files += 1
+        total += stat.st_size
+        newest = max(newest, stat.st_mtime)
+    # Rounded so the value survives the JSON round-trip as the same float it
+    # will be compared against on the next run.
+    return {"files": files, "bytes": total, "mtime": round(newest, 6)}
+
+
+def write_provenance(out_dir: str, output_root: str,
+                     expert_names: List[str]) -> Dict[str, object]:
+    """Stamp what this skeleton was spliced from.
+
+    Called ONLY after a stitch completed, for exactly the reason the smoke
+    pass is written only after every check passed: a stamp is a claim, and a
+    claim made before the work is the bug. Written via a temp file and
+    os.replace so a kill mid-write leaves the OLD stamp or none - never half
+    of one, which would read as "unreadable" and cost a restitch nobody
+    needed.
+    """
+    stamp = {
+        "version": 1,
+        "stitched_at": round(time.time(), 6),
+        "experts": {n: specialist_fingerprint(output_root, n)
+                    for n in expert_names},
+    }
+    tmp = provenance_path(out_dir) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(stamp, fh, indent=2, sort_keys=True)
+    os.replace(tmp, provenance_path(out_dir))
+    return stamp
+
+
+def provenance_is_current(out_dir: str, output_root: str) -> Tuple[bool, str]:
+    """Are the specialists on disk still the ones this skeleton holds?
+
+    Returns (ok, why_not) - the reason is half the point, because "restitching"
+    with no cause named is the kind of surprise that gets a guard deleted.
+
+    FAILS CLOSED. No stamp, an unreadable stamp, a stamp with no experts map:
+    every one of those means "I could not check", and this codebase has paid
+    twice for letting that leave by the same door as "I checked and it was
+    fine" - the manifest drift guard that turned unreadable into no-drift, and
+    the config-only verify_stitch that waved through an MoE of N identical
+    anchors. A needless restitch costs minutes. Shipping the previous model
+    costs the whole run, silently.
+
+    The names come from the STAMP, not the recipe: the recipe-vs-disk name
+    question is answered above in stitch_is_done, and this one is strictly
+    "what did I splice, and is it still that".
+    """
+    path = provenance_path(out_dir)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            stamp = json.load(fh)
+    except OSError:
+        return False, (
+            f"the skeleton at {out_dir} carries no provenance stamp "
+            f"({PROVENANCE}) - nothing on disk says which specialists it was "
+            f"spliced from, so it cannot be shown to be current")
+    except ValueError:
+        return False, f"the provenance stamp at {path} is corrupt"
+    experts = stamp.get("experts") if isinstance(stamp, dict) else None
+    if not isinstance(experts, dict):
+        return False, (f"the provenance stamp at {path} names no specialists "
+                       f"- it cannot answer what this skeleton holds")
+    for name in sorted(experts):
+        was = experts[name]
+        if not isinstance(was, dict):
+            return False, (f"the provenance stamp at {path} has no usable "
+                           f"fingerprint for specialist {name!r}")
+        now = specialist_fingerprint(output_root, name)
+        if now is None:
+            return False, (
+                f"specialist {name!r} is gone from {output_root}, but the "
+                f"skeleton still holds a copy of its FFN - retrain it and the "
+                f"skeleton would keep the old weights")
+        for key in ("files", "bytes", "mtime"):
+            if now.get(key) != was.get(key):
+                return False, (
+                    f"specialist {name!r} changed since the stitch "
+                    f"({key}: {was.get(key)} -> {now.get(key)}) - it was "
+                    f"retrained or replaced, and the skeleton on disk still "
+                    f"holds its OLD FFN")
+    return True, ""
 
 
 def stitch_moe(config, safe_names: List[str]) -> str:
@@ -170,6 +331,11 @@ def stitch_moe(config, safe_names: List[str]) -> str:
         num_layers=config_dict.get("num_hidden_layers", 32),
         tokenizer_src=anchor_dir,
     )
+
+    # THE STAMP GOES LAST, AFTER the stitch it describes. This is what makes
+    # "retrain one expert and re-splice" safe: the next run compares the
+    # specialists on disk against this, and a retrained one no longer matches.
+    write_provenance(out_dir, config.output_root, list(safe_names))
 
     print(f"MoE skeleton saved to {out_dir}")
     return out_dir

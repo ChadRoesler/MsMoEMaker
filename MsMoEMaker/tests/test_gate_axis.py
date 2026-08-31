@@ -1,5 +1,6 @@
 """The gate axis belongs to the model, not the recipe."""
 import json
+import os
 
 from ms_moe_maker.moe import stitch as st_mod
 from ms_moe_maker.eval.harness import run_eval
@@ -23,6 +24,17 @@ class _Cfg:
             d.mkdir(parents=True, exist_ok=True)
             (d / "config.json").write_text(
                 json.dumps({"expert_names": on_disk}), encoding="utf-8")
+            # A REAL SKELETON ALSO SAYS WHAT IT WAS SPLICED FROM. Without the
+            # provenance stamp stitch_is_done declines (fail closed), which
+            # would make every test in this file pass for the wrong reason.
+            # Build the whole artifact, then ask the name question.
+            for n in on_disk:
+                sd = st_mod._specialist_dir(str(tmp / "run"), n)
+                os.makedirs(sd, exist_ok=True)
+                with open(os.path.join(sd, "config.json"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write("{}")
+            st_mod.write_provenance(str(d), str(tmp / "run"), list(on_disk))
         if moe_names is not None:
             d = tmp / "run" / "moe_trained"
             d.mkdir(parents=True, exist_ok=True)

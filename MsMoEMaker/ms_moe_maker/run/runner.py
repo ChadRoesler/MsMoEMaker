@@ -41,7 +41,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..data import corpus
 from . import manifest as mf
@@ -131,7 +131,7 @@ class Runner:
     def __init__(self, recipe: Any, pipeline: Path, translation: Translation,
                  events: Events, cwd: Optional[Path] = None,
                  dryrun: bool = False, python: Optional[str] = None,
-                 builder: bool = False) -> None:
+                 builder: bool = False, only: Sequence[str] = ()) -> None:
         self.recipe = recipe
         self.pipeline = Path(pipeline) if pipeline else None
         self.builder = builder
@@ -139,6 +139,10 @@ class Runner:
         self.ev = events
         self.cwd = Path(cwd or (self.pipeline.parent if self.pipeline else Path.cwd()))
         self.dryrun = dryrun
+        # The experts --only named. Validated by the caller (cli/build.py) so
+        # a typo never reaches a run; carried here because the Runner is what
+        # decides which of the two build paths gets it.
+        self.only = tuple(only or ())
         # WHICH INTERPRETER RUNS THE PIPELINE. Defaults to ours, and that
         # default was a bug for exactly as long as it was the only option.
         #
@@ -430,6 +434,7 @@ class Runner:
                 force=self.translation.force,
                 dryrun=self.dryrun,
                 callback=bld_mod.StageCallback(notify=_on_stage),
+                only=self.only,
             )
 
             ok = result.ok
@@ -488,6 +493,20 @@ class Runner:
 
     def run_subprocess(self) -> int:
         """Legacy: fork the pipeline as a subprocess (wrap-then-carve)."""
+        # --only CANNOT CROSS THIS BOUNDARY. The forked script has no
+        # per-expert force and no way to be told about one, so passing the
+        # flag here would retrain nothing and report success - which is the
+        # exact failure --only exists to delete. Refuse it out loud instead.
+        if self.only:
+            msg = ("--only is not supported on the legacy --pipeline path: "
+                   "the forked script has no per-expert force, so the named "
+                   "expert(s) would not retrain and the build would still "
+                   "report success. Drop --pipeline to use the in-package "
+                   "builder.")
+            self.ev.say(f"REFUSED: {msg}")
+            self.ev.error(stage="build", message=msg)
+            self.ev.done(ok=False, errors=1, warnings=0)
+            return 1
         env = dict(os.environ)
         env.update(self.translation.env)
         if self.dryrun:

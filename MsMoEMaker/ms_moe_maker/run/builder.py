@@ -21,7 +21,7 @@ import sys
 import time
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..config import pipeline as cfg_module
 from . import manifest as mf
@@ -64,8 +64,45 @@ class StageCallback:
             self.notify(name, status, note)
 
 
+def resolve_only(requested: Optional[Sequence[str]],
+                 expert_names: Sequence[str]) -> Tuple[Tuple[str, ...],
+                                                       Tuple[str, ...]]:
+    """Turn raw --only values into (validated names, unknown names).
+
+    Accepts both spellings - repeated flags and comma-separated lists - on
+    purpose: `--only python --only shell` is what a script generates,
+    `--only python,shell` is what a person types, and refusing either is a
+    papercut with no upside.
+
+    A TYPO MUST NOT BECOME A NO-OP. `--only shel` matching nothing and then
+    building "successfully" is the same failure this whole change is about:
+    hours spent, nothing retrained, success reported. So unknown names come
+    back to the caller to be refused out loud, with the real list to hand.
+
+    Case is forgiven and canonicalised (recipes name experts in whatever case
+    the author liked); order follows the user's, deduplicated.
+    """
+    wanted: List[str] = []
+    for chunk in requested or ():
+        for part in str(chunk).split(","):
+            part = part.strip()
+            if part and part not in wanted:
+                wanted.append(part)
+    by_lower = {str(n).lower(): n for n in expert_names}
+    names: List[str] = []
+    unknown: List[str] = []
+    for w in wanted:
+        real = w if w in expert_names else by_lower.get(w.lower())
+        if real is None:
+            unknown.append(w)
+        elif real not in names:
+            names.append(real)
+    return tuple(names), tuple(unknown)
+
+
 def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
-                 callback: Optional[StageCallback] = None) -> BuildResult:
+                 callback: Optional[StageCallback] = None,
+                 only: Sequence[str] = ()) -> BuildResult:
     """Execute the full Ms.MoE pipeline.
 
     Args:
@@ -73,6 +110,10 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         force: Redo stages whose artifacts exist.
         dryrun: Run on the smallest rung for structural testing.
         callback: StageCallback for progress reporting.
+        only: Retrain exactly these experts and let every other stage
+              self-skip. This is the README's "retrain one and re-splice"
+              made runnable; the stitch declines on its own once the
+              specialist changes under it (see stitch.provenance_is_current).
 
     Returns:
         BuildResult with outcomes.
@@ -98,6 +139,18 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     # (recipe → env → search); there is no post-hoc override, because
     # PipelineConfig is frozen and an assignment to it raised FrozenInstanceError.
     config = cfg_module.build_config(recipe, force=force, dryrun=dryrun)
+
+    # NAMES CHECKED BEFORE A SINGLE DIRECTORY IS MADE. The CLI validates too,
+    # but this is the library entry point and a bad name here would otherwise
+    # cost a full build to discover it forced nothing.
+    only, _unknown = resolve_only(only, config.expert_names)
+    if _unknown:
+        result.failed_stage = "build"
+        result.message = (
+            f"--only named {', '.join(repr(u) for u in _unknown)}, which is "
+            f"not in this recipe. Experts are: "
+            f"{', '.join(config.expert_names)}")
+        return result
 
     # Create output directories
     os.makedirs(config.data_root, exist_ok=True)
@@ -318,12 +371,48 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
             if spath:
                 synth_paths[sname] = spath
 
+        # THE ROSTER, AND ONLY FOR THE ROSTER EXPERT.
+        #
+        # The injected `reasoning_expert:` exists to learn the REGISTER of
+        # deliberation, so its questions are drawn across every OTHER expert's
+        # domain rather than one subject. Two exclusions, both load-bearing:
+        # itself (its own display name is not a subject, and a "deliberation"
+        # domain inside a reasoning prompt is noise), and the tools expert
+        # (its domain is tool-calling protocol - nobody reasons about JSON-RPC
+        # in prose, and the traces would come back as tool calls).
+        #
+        # A hand-written `reasoning: true` expert gets domains=None and
+        # therefore exactly today's behaviour. It was written to be a domain
+        # expert that thinks; changing what it generates underneath a recipe
+        # nobody edited would be a silent corpus change, and a corpus change
+        # you cannot see is the one you cannot debug.
+        roster_name = config.reasoning_expert_name
+        roster_domains: List[str] = []
+        if roster_name and roster_name in expert_names:
+            roster_domains = [
+                cfg_module.DISPLAY_LANG.get(n, n.replace("_", " ").title())
+                for n in expert_names
+                if n != roster_name and n != tools_name
+            ]
+            if not roster_domains:
+                print(f"   WARNING: {roster_name} is the only subject-bearing "
+                      f"expert on this roster, so its corpus CANNOT span "
+                      f"domains - it falls back to single-domain questions "
+                      f"keyed on its own name. A reasoning specialist trained "
+                      f"on one domain's questions learns that domain's "
+                      f"vocabulary along with the register, which is exactly "
+                      f"the dilution this expert exists to avoid. Add the "
+                      f"domain experts you actually want, or drop "
+                      f"`reasoning_expert:`.")
+
         for rname in config.reasoning_experts:
             rpath = data_mod.generate_reasoning_traces(
                 config, rname, callback=cb.stage,
                 teacher_model=cfg_module.teacher_for(recipe, config, rname),
                 templates_path=cfg_module.templates_for(recipe, rname),
-                n=cfg_module.examples_for(recipe, config, rname))
+                n=cfg_module.examples_for(recipe, config, rname),
+                domains=(roster_domains
+                         if rname == roster_name and roster_domains else None))
             if rpath:
                 reasoning_paths[rname] = rpath
 
@@ -391,7 +480,16 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         # manifest.py has had SKIPPED the whole time, with the comment
         # "already present on disk; the pipeline's _done() fired". The
         # vocabulary was never the missing part.
-        was_present = finetune_mod.specialist_is_done(config, safe_name)
+        # --only <expert> IS THE THESIS AS A FLAG. Named here means "this one
+        # is stale, the rest are fine" - the middle ground between --force
+        # (retrain all N) and deleting a directory by hand, which used to
+        # retrain one and then have the stitch throw the result away.
+        retrain = safe_name in only
+        if retrain:
+            print(f"      --only {safe_name}: retraining this expert; the "
+                  f"others self-skip and the stitch will pick this one up")
+        was_present = finetune_mod.specialist_is_done(config, safe_name,
+                                                     retrain=retrain)
         # The ORIGINAL corpus path, deliberately - not the training split.
         # train_router() appends ".train" to whatever it is handed, so storing
         # the split here would send it looking for "X.jsonl.train.train",
@@ -431,6 +529,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         out_dir = finetune_mod.fine_tune_specialist(
             config, safe_name, train_path,
             expert_display=DISPLAY_LANG.get(safe_name, safe_name),
+            retrain=retrain,
         )
         specialist_dirs[safe_name] = out_dir
         cb.stage(f"finetune.{safe_name}",
@@ -590,6 +689,29 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
              f"router-trained → {router_dir}")
     result.stages_completed.append(stages.ROUTER)
     result.artifacts[stages.ROUTER] = router_dir
+
+    # A FRESHLY TRAINED ROUTER INVALIDATES THE GGUF, and this is the last link
+    # in the same chain. A restitch discards the old router (above); a new
+    # router means the exported GGUF was converted from weights that no longer
+    # exist - but export_is_done() only asks "is there a .gguf with a
+    # .smokepass.txt beside it", both of which survive. Retrain one expert and
+    # the build would restitch, retrain the router, then print "[skip] GGUF
+    # export already done" and hand you the PREVIOUS model as the artifact.
+    #
+    # The proof goes with the file: a smoke pass belongs to the bytes it was
+    # run against, and keeping either one would leave something on disk that
+    # claims to be this build and is not.
+    if not router_was_present:
+        _stale = export_mod.gguf_path_for(config)
+        _proof = _stale + ".smokepass.txt"
+        if os.path.exists(_stale) or os.path.exists(_proof):
+            print(f"   newly trained router - discarding the GGUF at {_stale} "
+                  f"and its smoke pass (both describe the previous router)")
+            for _p in (_stale, _proof):
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
 
     # ── Stage 6: Export GGUF ──────────────────────────────────────────────
     cb.stage(stages.EXPORT_GGUF, "running", "exporting GGUF")

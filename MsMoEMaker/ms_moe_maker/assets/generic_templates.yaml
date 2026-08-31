@@ -1,7 +1,67 @@
 # Generic, domain-agnostic prompts. {domain} is substituted with the expert's
-# display name. The default when a synth expert names no `templates:` file.
+# display name. The default when a synth expert names no `templates:` file,
+# and therefore what the injected `reasoning_expert:` draws from.
+#
+# WHY THIS FILE IS LONG, AND WHY THE SHAPES VARY MORE THAN THE WORDS.
+# It used to hold four prompts. A 15,000-row corpus built from four templates
+# holds four distinct user messages, ~3,750 copies each - and the held-out
+# slice eval scores against is then byte-identical to thousands of training
+# rows, so `--mode quality` measures memorisation and reports it as skill.
+# The roster reasoning expert multiplies templates by domains, which helps,
+# but templates are the limiting factor: T x D distinct prompts, and T was 4.
+#
+# Rewording the same question twenty ways would raise the count and not the
+# DIVERSITY - twenty paraphrases of "explain X" still teach one move. So these
+# are grouped by the shape of thinking each demands: teach, compare, diagnose,
+# work under a constraint, critique, plan, find the edge, decide when the
+# obvious answer is wrong. That is the spread a reasoning specialist needs,
+# because the register it should learn is deliberation, not a domain.
+#
+# Keep them domain-neutral. {domain} may be "Python", "C#", "Markdown",
+# "Monster Manual" or "Word Problems", and the roster expert will substitute
+# all of them into the same prompt. Anything that only parses for code makes
+# the lore rows nonsense - put those in code_templates.yaml instead.
 Prompts:
+  # -- teach / explain --------------------------------------------------
   - "Explain the idiomatic way to handle a {domain} task."
   - "A junior asks how to approach a {domain} problem. Reason it out."
+  - "Explain a {domain} concept to someone competent who has never met it before, and say what they will get wrong first."
+  - "Someone has learned {domain} by copying examples and never had it explained. Fill in the model they are missing."
+  - "Walk through a {domain} decision the way you would if you were thinking out loud beside someone."
+
+  # -- compare / choose -------------------------------------------------
   - "Compare two {domain} approaches and pick one."
+  - "Two people disagree about the right way to do a {domain} task. Steelman both, then decide."
+  - "Give a {domain} recommendation, then argue against your own recommendation and say whether it survives."
+  - "There is a popular {domain} answer and a better one. Explain why the popular one is popular before you replace it."
+
+  # -- diagnose / debug -------------------------------------------------
   - "Something is broken in a {domain} context. Think it through, then fix it."
+  - "A {domain} result looks correct and is not. Work out how you would notice."
+  - "A {domain} approach worked yesterday and fails today with nothing changed. Reason about what actually changed."
+  - "You are handed a failing {domain} situation with almost no information. Say what you would check first, second, third, and why in that order."
+  - "Something in {domain} works but nobody knows why. Work out whether that is fine."
+
+  # -- work under a constraint ------------------------------------------
+  - "Solve a {domain} problem without the tool you would normally reach for. Say what you lose."
+  - "Do a {domain} task under a constraint that makes the obvious approach unavailable, and reason to a second-best."
+  - "You have half the time you would want for a {domain} task. Decide what to cut and defend the cut."
+  - "Handle a {domain} task where the requirements contradict each other. Resolve the contradiction before you answer."
+
+  # -- critique ---------------------------------------------------------
+  - "Critique a {domain} approach that is not wrong, just worse than it looks."
+  - "Here is a {domain} decision that was made for a bad reason and happens to be right. Separate the two."
+  - "Explain what a {domain} rule of thumb is really protecting against, and when it stops applying."
+
+  # -- plan / estimate --------------------------------------------------
+  - "Plan a {domain} task end to end and say where you expect to be wrong."
+  - "Break a large {domain} problem into pieces that can be checked independently."
+  - "Estimate what a {domain} task will cost and show the reasoning, including what you are uncertain about."
+
+  # -- edges, failure modes, and knowing when to stop --------------------
+  - "Give the {domain} answer, then find the case where it breaks."
+  - "Describe a {domain} edge case that most answers ignore, and reason about whether it matters."
+  - "Reason about the failure mode of a {domain} approach that fails silently rather than loudly."
+  - "Say when the obvious {domain} answer is the wrong one, and what makes this one of those times."
+  - "Decide whether a {domain} problem is worth solving properly or worth solving cheaply, and justify the call."
+  - "Simplify a {domain} solution as far as it will go, and say where you stopped and why."

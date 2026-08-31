@@ -105,6 +105,43 @@ class TestContentOnlyBlocks:
         assert [e.name for e in rec.experts] == ["a", "b"]
         assert getattr(rec, "tools_expert_name", "") == ""
 
+    def test_defaults_alone_do_not_add_a_reasoning_expert(self, tmp_path):
+        """The same property for the second content block, asserted rather than
+        assumed. The packaged defaults.yaml ships a `reasoning_expert:` entry
+        precisely so `reasoning_expert: true` has content to fill in - and a
+        block that supplies content must never be the thing that REQUESTS it,
+        or every recipe on the box grows a second specialist and its teacher
+        hours."""
+        box = _write(tmp_path, "box.yaml",
+                     "reasoning_expert:\n  name: thinky\n"
+                     "  teacher: box/Distill-7B\n")
+        rec_path = _write(tmp_path, "r.json", json.dumps({
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                        {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}],
+        }))
+        rec, _ = R.load(rec_path, defaults_path=box,
+                        include_user_defaults=False)
+        assert [e.name for e in rec.experts] == ["a", "b"]
+        assert getattr(rec, "reasoning_expert_name", "") == ""
+
+    def test_asking_for_the_reasoning_expert_fills_it_from_the_box(self, tmp_path):
+        box = _write(tmp_path, "box.yaml",
+                     "reasoning_expert:\n  name: thinky\n"
+                     "  teacher: box/Distill-7B\n")
+        rec_path = _write(tmp_path, "r.json", json.dumps({
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "reasoning_expert": True,
+            "experts": [{"name": "a", "source": {"kind": "hf", "repo": "o/d"}},
+                        {"name": "b", "source": {"kind": "hf", "repo": "o/e"}}],
+        }))
+        rec, _ = R.load(rec_path, defaults_path=box,
+                        include_user_defaults=False)
+        assert rec.reasoning_expert_name == "thinky"
+        src = next(e for e in rec.experts if e.name == "thinky").source
+        assert (src.kind, src.reasoning, src.teacher) == (
+            "synth", True, "box/Distill-7B")
+
     def test_asking_for_one_fills_it_from_the_box(self, tmp_path):
         box = _write(tmp_path, "box.yaml",
                      "tools_expert:\n  name: toolsy\n"

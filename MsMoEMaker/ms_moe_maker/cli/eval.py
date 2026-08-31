@@ -34,6 +34,11 @@ def _cmd_eval(args):
         "held_out_fraction": config.eval_held_out_fraction,
         "num_samples": rec.eval.num_samples,
         "dead_threshold": rec.eval.dead_threshold,
+        # -1 = you decide; run_eval resolves it from whether this run writes
+        # thinking traces (pipeline.eval_max_new_tokens). Passed RAW, not
+        # resolved here, so the sentinel survives to the one place that knows
+        # the run's shape.
+        "max_new_tokens": rec.eval.max_new_tokens,
     }
 
     print(f"\nEvaluation - mode={spec['mode']}"
@@ -188,6 +193,34 @@ def _print_eval_report(report):
             print(f"    mean gate confidence {conf:.3f} "
                   f"(uniform would be {unif:.3f}, top-{k} maximum is "
                   f"{ceiling:.3f}){note}")
+
+        # DOES THE GATE HAND OFF AT `</think>`? The pooled table above cannot
+        # say - it averages the whole sequence, so a relay and a duet print the
+        # same row. THE DELTA IS THE FINDING, so the delta gets a column of its
+        # own rather than leaving the reader to subtract two share tables.
+        # Absent whenever nothing sampled had a closed think block.
+        segs = routing.get("think_segments") or {}
+        for src, seg in sorted(segs.items()):
+            print(f"\n  ROUTING INSIDE vs AFTER <think> — {src} "
+                  f"({seg.get('samples', 0)} sampled rows with a closed block)")
+            print(f"    {'expert':16} {'in think':>9} {'after':>9} {'delta':>9}")
+            print(f"    {'-'*16} {'-'*9} {'-'*9} {'-'*9}")
+            for name in sorted(seg.get("delta") or {}):
+                print(f"    {name:16} {seg['think'][name]:>9.3f} "
+                      f"{seg['after'][name]:>9.3f} {seg['delta'][name]:>+9.3f}")
+            if seg.get("verdict") == "relay":
+                print(f"    -> RELAY: {seg['swing_to']} takes "
+                      f"{seg['swing']:+.3f} more of the selection slots")
+                print(f"       inside the block than after it; "
+                      f"{seg['yields_to']} picks it up on the other side.")
+            elif seg.get("verdict") == "duet":
+                print("    -> DUET: nothing swings more than 0.05 of the "
+                      "slots at the tag boundary — routing does not hand off "
+                      "at </think>.")
+        for src, why in sorted((routing.get("think_segment_errors") or {}).items()):
+            print(f"    (no think-block segmentation for {src}: {why} — a "
+                  f"missing row here is a tokenizer limit, not an absence of "
+                  f"think blocks)")
     elif routing.get("status") == "unmeasurable":
         print(f"\n  Router discrimination: UNMEASURABLE - {routing.get('reason')}")
 
@@ -206,37 +239,56 @@ def _print_eval_report(report):
             return (f"{r.scored_samples}/{r.attempted_samples}"
                     if r.attempted_samples else "-")
 
+        # `reasoned` IS A QUALITY COLUMN, NOT A FOOTNOTE. It lived in a
+        # separate block under the table, which is where a number goes to be
+        # read on its own - and on its own it says nothing. It only becomes a
+        # diagnosis beside the routing enrichment, so it sits in the same row
+        # as the scores it qualifies. '-' rather than 0.00 because a
+        # non-reasoning run did not score zero, it was never asked.
+        def _r(r):
+            return f"{r.reasoned:8.2f}" if r.reasoned >= 0 else f"{'-':>8}"
+
+        def _flags(r):
+            out = "  ! thin sample" if _thin(r) else ""
+            if 0 <= r.reasoned <= 0.5:
+                out += "  ! does not reliably reason"
+            return out
+
         print("\n  Generation quality (held-out, real generation)")
         print(f"  {'expert':18} {'exact':>7} {'rouge1':>7} {'bleu':>7} "
-              f"{'scored':>9}  status")
-        print(f"  {'-'*18} {'-'*7} {'-'*7} {'-'*7} {'-'*9}  {'-'*12}")
+              f"{'reasoned':>8} {'scored':>9}  status")
+        print(f"  {'-'*18} {'-'*7} {'-'*7} {'-'*7} {'-'*8} {'-'*9}  {'-'*12}")
         thin_rows = []
         for name, r in sorted(quality.items()):
             print(f"  {name:18} {r.exact_match:>7.3f} {r.rouge1:>7.3f} "
-                  f"{r.bleu:>7.3f} {_n(r):>9}  {r.status}"
-                  f"{'  ! thin sample' if _thin(r) else ''}")
+                  f"{r.bleu:>7.3f} {_r(r)} {_n(r):>9}  {r.status}"
+                  f"{_flags(r)}")
             if _thin(r):
                 thin_rows.append(name)
             moe = report.stages.get(f"moe/{name}")
             if moe is not None:
                 print(f"  {'  L moe here':18} {moe.exact_match:>7.3f} "
                       f"{moe.rouge1:>7.3f} {moe.bleu:>7.3f} "
-                      f"{_n(moe):>9}  {moe.status}"
-                      f"{'  ! thin sample' if _thin(moe) else ''}")
+                      f"{_r(moe)} {_n(moe):>9}  {moe.status}"
+                      f"{_flags(moe)}")
         if thin_rows:
             print(f"    ! {', '.join(thin_rows)}: most rows drawn could not be "
                   f"scored (a `text` row needs 4+ lines to split into a "
                   f"prompt and a reference). Not comparable with a full row.")
 
-        # SCORED ON THE ANSWER, NOT THE THINKING. When the base is a reasoning
-        # model, say separately how often it actually emitted a think block —
-        # "reasons but wrong" and "never reasons" are different failures.
-        reasoned_rows = {n: r for n, r in sorted(quality.items())
-                         if r.reasoned >= 0}
-        if reasoned_rows:
-            print("\n  Reasoning (fraction of outputs that emitted a think block)")
-            for name, r in reasoned_rows.items():
-                flag = "" if r.reasoned > 0.5 else "   <-- does not reliably reason"
-                print(f"    {name:16} {r.reasoned:>6.2f}{flag}")
+        # SCORED ON THE ANSWER, NOT THE THINKING — and `reasoned` says how
+        # often there was a thinking block to separate out at all. Say what the
+        # column MEANS and what it is read against, because the number alone
+        # supports the wrong conclusion: low reasoned looks like a bad model,
+        # while low reasoned NEXT TO high routing enrichment is a specific,
+        # predicted failure of putting reasoning in a routed FFN expert. The
+        # harness raises that one as a caveat; this is the legend for it.
+        if any(r.reasoned >= 0 for r in report.stages.values()):
+            print("    reasoned = share of outputs that opened AND closed a "
+                  "think block.")
+            print("      It is the DISCIPLINE check, and it is read against "
+                  "routing: high enrichment")
+            print("      with low reasoned means the register of deliberation "
+                  "without the structure.")
 
     print(f"\n  {report.message}")

@@ -38,10 +38,43 @@ def _cmd_build(args):
 
     from ..config.pipeline import build_config
     from ..config.levers import translate
+    from ..run.builder import resolve_only
     from ..run.runner import Runner
 
     config = build_config(rec, force=args.force, dryrun=args.dryrun)
     translation = translate(rec, force=args.force, dryrun=args.dryrun)
+
+    # --only <expert>: THE MIDDLE GROUND THAT DID NOT EXIST. --force redoes
+    # all N experts; the alternative was deleting one specialist by hand,
+    # which retrained it and then had the stitch skip - so the retrain was
+    # discarded and the previous model shipped. Both are checked BEFORE the
+    # header prints, because both are answerable without touching a disk.
+    only, unknown = resolve_only(getattr(args, "only", None),
+                                 config.expert_names)
+    if unknown:
+        # ACTIONABLE OR NOTHING. `--only shel` is a typo, and a typo that
+        # silently forces no expert is a six-hour build that reports success
+        # and changed nothing. Name what was not recognised, then name the
+        # real list, because the person reading this is one keystroke away.
+        msg = (f"--only named {', '.join(repr(u) for u in unknown)}, which "
+               f"this recipe has no expert for")
+        say(f"\n  {msg}.")
+        say(f"  This recipe's experts are: {', '.join(config.expert_names)}")
+        events.error(stage="build", message=msg)
+        events.done(ok=False, errors=1, warnings=0)
+        return 1
+    if only and args.force:
+        # TWO ANSWERS TO ONE QUESTION. --force says "redo everything",
+        # --only says "redo exactly these"; letting --force win would make
+        # --only a flag that silently does nothing, and letting --only win
+        # would make --force lie. Refuse, and say which one to keep.
+        msg = ("--force and --only contradict each other: --force redoes "
+               "every expert, --only redoes exactly the ones you name. Pick "
+               "one.")
+        say(f"\n  {msg}")
+        events.error(stage="build", message=msg)
+        events.done(ok=False, errors=1, warnings=0)
+        return 1
 
     # TWO IDS, TWO QUESTIONS. recipe_id answers "is this the recipe you sent
     # me"; build_id answers "will my machine build what yours did". They stopped
@@ -66,6 +99,12 @@ def _cmd_build(args):
         pass
     say(f"  base     {config.base}")
     say(f"  experts  {config.expert_names}")
+    if only:
+        # Said out loud for the same reason the corpus volumes are: this is
+        # the difference between a resume and a partial rebuild, and it is
+        # the one thing about this run nobody can reconstruct afterwards.
+        say(f"  only     retraining {', '.join(only)} - every other expert "
+            f"self-skips, then restitch + router + export")
     say(f"  steps    {config.target_steps}  "
         f"batch={config.per_device_batch}x{config.grad_accum}"
         f"  seq={config.max_seq_length}")
@@ -211,6 +250,7 @@ def _cmd_build(args):
         rec, pipeline, translation, events,
         dryrun=args.dryrun,
         python=args.python,
+        only=only,
     )
 
     # RESUMING INTO A DIFFERENT BUILD. Stages self-skip on artifacts found on

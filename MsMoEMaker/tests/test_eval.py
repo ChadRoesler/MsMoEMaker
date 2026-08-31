@@ -1055,3 +1055,274 @@ def test_the_router_mix_prefers_the_train_split():
     assert 'path + ".train"' in src, (
         "the router mix must prefer the .train split so held-out stays held "
         "out")
+
+
+class TestTheGenerationBudgetReachesGeneration:
+    """`max_new_tokens` was a function default no recipe key could reach.
+
+    A `<think>` block alone routinely runs past 256 tokens, so a reasoning eval
+    was cut off mid-thought, never reached the answer, and reported "does not
+    reliably reason" about a model that reasons fine.
+    """
+
+    @staticmethod
+    def _budgets(cfg, spec, monkeypatch):
+        from ms_moe_maker.eval import harness as H
+        seen = []
+
+        def _fake(**kw):
+            seen.append(kw.get("max_new_tokens"))
+            return EvalResult(expert_name=kw["label"], domain=kw["domain"],
+                              status="done", scored_samples=5,
+                              attempted_samples=5)
+
+        monkeypatch.setattr(H, "eval_generation", _fake)
+        H.run_eval(cfg, spec=spec)
+        return seen
+
+    def test_a_plain_run_keeps_the_old_cap(self, tmp_path, monkeypatch):
+        seen = self._budgets(_cfg(tmp_path, with_data=True),
+                             {"mode": "quality"}, monkeypatch)
+        assert seen and set(seen) == {256}
+
+    def test_a_reasoning_run_gets_room_for_the_block_and_the_answer(
+            self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, with_data=True)
+        cfg.reasoning_experts = ["python"]
+        seen = self._budgets(cfg, {"mode": "quality"}, monkeypatch)
+        assert seen and set(seen) == {1024}
+
+    def test_the_recipe_still_wins(self, tmp_path, monkeypatch):
+        cfg = _cfg(tmp_path, with_data=True)
+        cfg.reasoning_experts = ["python"]
+        seen = self._budgets(cfg, {"mode": "quality", "max_new_tokens": 320},
+                             monkeypatch)
+        assert seen and set(seen) == {320}
+
+
+class TestTheThinkBlockSegmenter:
+    """Token offsets, not character offsets — see think_token_segments."""
+
+    STYLE = type("S", (), {"open": "<think>", "close": "</think>"})()
+
+    def test_it_finds_the_block_and_what_follows_it(self):
+        from ms_moe_maker.eval.harness import think_token_segments
+        text = "<think>abc</think>xyz"
+        #        0      7   10      18
+        offsets = [(0, 0), (0, 7), (7, 10), (10, 18), (18, 21)]
+        inside, after = think_token_segments(text, offsets, self.STYLE)
+        assert inside == [(2, 3)], "only the interior counts as thinking"
+        assert after == [(4, 5)]
+
+    def test_the_delimiters_themselves_belong_to_neither_segment(self):
+        from ms_moe_maker.eval.harness import think_token_segments
+        inside, after = think_token_segments(
+            "<think>abc</think>xyz",
+            [(0, 7), (7, 10), (10, 18), (18, 21)], self.STYLE)
+        assert 0 not in [t for a, b in inside for t in range(a, b)]
+        assert 2 not in [t for a, b in after for t in range(a, b)]
+
+    def test_no_block_is_none_not_an_empty_answer(self):
+        from ms_moe_maker.eval.harness import think_token_segments
+        assert think_token_segments("just an answer", [(0, 14)],
+                                    self.STYLE) is None
+        assert think_token_segments("<think>never closed", [(0, 7), (7, 19)],
+                                    self.STYLE) is None
+        assert think_token_segments("<think>a</think>b", [(0, 17)], None) is None
+
+    def test_an_interwoven_trace_pools_every_block(self):
+        """`interwoven` styles emit many blocks around tool calls; 'after' is
+        what follows the LAST close tag, which is what the splitter reads as
+        the answer."""
+        from ms_moe_maker.eval.harness import think_token_segments
+        text = "<think>a</think>b<think>c</think>d"
+        offsets = [(0, 7), (7, 8), (8, 16), (16, 17), (17, 24), (24, 25),
+                   (25, 33), (33, 34)]
+        inside, after = think_token_segments(text, offsets, self.STYLE)
+        flat = [t for a, b in inside for t in range(a, b)]
+        assert flat == [1, 5], "both interiors, and nothing else"
+        assert after == [(7, 8)], "only what follows the last close tag"
+
+
+class TestTheSwingIsTheFinding:
+    """Two share tables make the reader subtract. Report the subtraction."""
+
+    def test_a_relay_names_who_takes_over_on_each_side(self):
+        from ms_moe_maker.eval.harness import summarize_think_swing
+        out = summarize_think_swing({"deliberation": 0.72, "python": 0.28},
+                                    {"deliberation": 0.19, "python": 0.81})
+        assert out["verdict"] == "relay"
+        assert out["swing_to"] == "deliberation"
+        assert out["yields_to"] == "python"
+        assert round(out["swing"], 3) == 0.53
+        assert round(out["delta"]["python"], 3) == -0.53
+
+    def test_a_duet_is_reported_as_a_finding_not_as_silence(self):
+        from ms_moe_maker.eval.harness import summarize_think_swing
+        out = summarize_think_swing({"deliberation": 0.50, "python": 0.50},
+                                    {"deliberation": 0.49, "python": 0.51})
+        assert out["verdict"] == "duet"
+        assert out["swing_to"] == "", "nothing to attribute below min_swing"
+        assert out["delta"]["deliberation"] == pytest.approx(0.01)
+
+    def test_the_segment_shares_use_the_pooled_arithmetic(self):
+        """Slots, not tokens: shares sum to 1.0 and uniform is 1/E, which is
+        the denominator a second copy of this loop already got wrong once."""
+        from ms_moe_maker.eval.harness import _pooled_shares
+        counts = [[6, 2], [4, 4]]      # two layers, two experts
+        totals = [4, 4]                # four tokens per layer
+        shares = _pooled_shares(counts, totals, 2, 2)
+        assert shares == pytest.approx([10 / 16, 6 / 16])
+        assert sum(shares) == pytest.approx(1.0)
+
+
+class TestTheDisciplineDiagnosis:
+    """High enrichment + low `reasoned` has a name, and the reader needs it."""
+
+    def test_it_fires_on_register_without_discipline(self):
+        from ms_moe_maker.eval.harness import reasoning_discipline_caveat
+        msg = reasoning_discipline_caveat(enrichment=2.4, reasoned=0.12,
+                                          capped_fraction=0.0,
+                                          expert="deliberation")
+        assert "deliberation" in msg
+        assert "REGISTER" in msg and "DISCIPLINE" in msg
+        assert "attention" in msg, "say why a routed FFN expert cannot fix it"
+
+    def test_truncation_is_not_indiscipline(self):
+        """A trace cut off by the token budget has no close tag because it was
+        CUT. Calling that a discipline failure would be its own lie."""
+        from ms_moe_maker.eval.harness import reasoning_discipline_caveat
+        assert reasoning_discipline_caveat(enrichment=2.4, reasoned=0.12,
+                                           capped_fraction=0.9) == ""
+
+    def test_it_stays_quiet_when_routing_is_not_working(self):
+        from ms_moe_maker.eval.harness import reasoning_discipline_caveat
+        assert reasoning_discipline_caveat(enrichment=1.01, reasoned=0.12,
+                                           capped_fraction=0.0) == ""
+
+    def test_it_stays_quiet_when_the_model_reasons_fine(self):
+        from ms_moe_maker.eval.harness import reasoning_discipline_caveat
+        assert reasoning_discipline_caveat(enrichment=2.4, reasoned=0.95,
+                                           capped_fraction=0.0) == ""
+        assert reasoning_discipline_caveat(enrichment=2.4, reasoned=-1.0,
+                                           capped_fraction=0.0) == "", (
+            "-1 is 'not a reasoning run', not 'reasoned zero percent'")
+
+
+class TestTheDiagnosisReachesTheReport:
+    """The pure helper is the diagnosis; this is the wiring that fires it."""
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, reasoned, capped):
+        from ms_moe_maker.eval import harness as H
+        cfg = _cfg(tmp_path, with_data=True)
+        cfg.reasoning_experts = ["python"]
+
+        def _fake_gen(**kw):
+            return EvalResult(expert_name=kw["label"], domain=kw["domain"],
+                              status="done", scored_samples=10,
+                              attempted_samples=10, reasoned=reasoned,
+                              capped_generations=capped)
+
+        def _fake_probe(**kw):
+            r = _routing(n_experts=2, top_k=1,
+                         python={"enrichment": 2.4, "own_share": 0.72,
+                                 "marginal_share": 0.50,
+                                 "enrichment_reliable": True,
+                                 "top_competitor": "csharp",
+                                 "top_competitor_share": 0.28,
+                                 "outranked": False},
+                         csharp={"enrichment": 2.0, "own_share": 0.66,
+                                 "marginal_share": 0.50,
+                                 "enrichment_reliable": True,
+                                 "top_competitor": "python",
+                                 "top_competitor_share": 0.34,
+                                 "outranked": False})
+            r["mean_js_bits"] = 0.4
+            return r
+
+        monkeypatch.setattr(H, "eval_generation", _fake_gen)
+        monkeypatch.setattr(H, "probe_router_discrimination", _fake_probe)
+        return H.run_eval(cfg, spec={"mode": "all"})
+
+    def test_register_without_discipline_is_said_out_loud(
+            self, tmp_path, monkeypatch):
+        report = self._run(tmp_path, monkeypatch, reasoned=0.1, capped=0)
+        assert any("REGISTER" in c for c in report.caveats), report.caveats
+
+    def test_a_truncated_run_gets_the_other_caveat_and_only_that_one(
+            self, tmp_path, monkeypatch):
+        report = self._run(tmp_path, monkeypatch, reasoned=0.1, capped=9)
+        assert not any("REGISTER" in c for c in report.caveats), report.caveats
+        assert any("Raise eval.max_new_tokens" in c for c in report.caveats), (
+            report.caveats)
+
+    def test_a_model_that_reasons_gets_neither(self, tmp_path, monkeypatch):
+        report = self._run(tmp_path, monkeypatch, reasoned=0.98, capped=0)
+        assert not any("REGISTER" in c for c in report.caveats)
+        assert not any("Raise eval.max_new_tokens" in c for c in report.caveats)
+
+
+class TestReasonedIsInTheTable:
+    """It existed, in a block under the table where it read as a footnote.
+
+    On its own the number says nothing; it only becomes a diagnosis beside the
+    routing enrichment, so it belongs in the row with the scores it qualifies.
+    """
+
+    def test_the_column_is_printed_and_a_plain_run_shows_a_dash(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.stages["deliberation"] = EvalResult(
+            expert_name="deliberation", domain="deliberation", status="done",
+            rouge1=0.4, bleu=0.3, scored_samples=20, attempted_samples=20,
+            reasoned=0.15)
+        report.stages["python"] = EvalResult(
+            expert_name="python", domain="python", status="done",
+            rouge1=0.4, bleu=0.3, scored_samples=20, attempted_samples=20)
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "reasoned" in out
+        assert "0.15" in out
+        assert "does not reliably reason" in out
+        assert any(ln.strip().startswith("python") and "-" in ln
+                   for ln in out.splitlines()), (
+            "a non-reasoning row was never asked the question; 0.00 would be "
+            "a different claim")
+
+    def test_the_swing_table_prints_the_delta_not_two_columns(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            deliberation={"enrichment": 2.4, "own_share": 0.72,
+                          "others_share": 0.30, "marginal_share": 0.50,
+                          "enrichment_reliable": True,
+                          "top_competitor": "python",
+                          "top_competitor_share": 0.28, "outranked": False})
+        report.routing["think_segments"] = {
+            "deliberation": {
+                "samples": 12,
+                "think": {"deliberation": 0.72, "python": 0.28},
+                "after": {"deliberation": 0.19, "python": 0.81},
+                "delta": {"deliberation": 0.53, "python": -0.53},
+                "swing_to": "deliberation", "yields_to": "python",
+                "swing": 0.53, "verdict": "relay"}}
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "in think" in out and "delta" in out
+        assert "+0.530" in out, "the swing is the finding, so print it"
+        assert "RELAY" in out
+
+    def test_a_run_without_think_blocks_prints_no_swing_table(self, capsys):
+        from ms_moe_maker.__main__ import _print_eval_report
+        report = EvalReport(ok=True)
+        report.routing = _routing(
+            n_experts=2, top_k=1,
+            python={"enrichment": 2.4, "own_share": 0.72,
+                    "others_share": 0.30, "marginal_share": 0.50,
+                    "enrichment_reliable": True, "top_competitor": "csharp",
+                    "top_competitor_share": 0.28, "outranked": False})
+        _print_eval_report(report)
+        out = capsys.readouterr().out
+        assert "in think" not in out and "RELAY" not in out

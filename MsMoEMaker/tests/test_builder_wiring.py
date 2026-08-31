@@ -26,6 +26,17 @@ from ms_moe_maker.run import builder
 from ms_moe_maker.config.recipe import parse
 
 
+# The default shape every test here has always used. Hoisted out of the
+# fixture so a test can re-run the pipeline with different arguments against
+# the same fakes - which is how --only is checked below.
+TWO_EXPERTS = {
+    "schema_version": 1, "name": "t", "size": "0.5B",
+    "corpus": {"min_samples": 1, "max_samples": 50},
+    "experts": [
+        {"name": "python", "source": {"kind": "stack", "language": "Python"}},
+        {"name": "csharp", "source": {"kind": "stack", "language": "C#"}}]}
+
+
 def _base(path):
     """Strip the held-out-excluded suffix builder appends before fine-tuning.
 
@@ -76,6 +87,10 @@ def wired(tmp_path, monkeypatch, request):
 
     def _fake_reasoning(config, expert_name, callback=None, **kw):
         seen.setdefault('reasoning_calls', []).append(expert_name)
+        # WHAT it was handed, not just THAT it was called: `domains` is the
+        # difference between a reasoning specialist that spans the roster and
+        # one that is a second expert on somebody else's subject.
+        seen.setdefault('reasoning_domains', {})[expert_name] = kw.get('domains')
         p = data_root / f'{expert_name}_reasoning.jsonl'
         p.write_text('{"text": "think"}\n', encoding='utf-8')
         return str(p)
@@ -95,9 +110,20 @@ def wired(tmp_path, monkeypatch, request):
     data_mod.generate_domain_traces = _fake_domain
 
     ft = types.ModuleType("finetune")
-    ft.specialist_is_done = lambda config, name: False
 
-    def _fake_finetune(config, safe_name, data_path, expert_display=None):
+    # RECORDS `retrain`, because that is the whole --only contract: the named
+    # expert is treated as forced and every other one keeps its own answer.
+    # A stub that swallowed the kwarg would let the flag stop arriving without
+    # a single test noticing.
+    def _fake_is_done(config, name, retrain=False):
+        seen.setdefault("retrain", {})[name] = retrain
+        return False
+
+    ft.specialist_is_done = _fake_is_done
+
+    def _fake_finetune(config, safe_name, data_path, expert_display=None,
+                       **kw):
+        seen.setdefault("finetune_retrain", {})[safe_name] = kw.get("retrain")
         seen.setdefault("finetune", {})[safe_name] = data_path
         d = out_root / f"specialist_{safe_name}"
         d.mkdir(exist_ok=True)
@@ -137,6 +163,10 @@ def wired(tmp_path, monkeypatch, request):
     export = types.ModuleType("export")
     export.export_is_done = lambda config: False
     export.export_gguf = lambda config, final_dir: str(out_root / "m.gguf")
+    # The builder asks where the GGUF WOULD be so it can throw away one that
+    # belongs to a router it just replaced. Real path, so the test below can
+    # put a stale file there and watch it go.
+    export.gguf_path_for = lambda config: str(out_root / "m.gguf")
 
     torch_stub = types.ModuleType("torch")
     torch_stub.cuda = types.SimpleNamespace(
@@ -169,12 +199,7 @@ def wired(tmp_path, monkeypatch, request):
     pf.render = lambda p: []
     monkeypatch.setattr(_run_pkg, "preflight", pf)
 
-    rec, _ = parse(getattr(request, "param", None) or {
-        "schema_version": 1, "name": "t", "size": "0.5B",
-        "corpus": {"min_samples": 1, "max_samples": 50},
-        "experts": [
-            {"name": "python", "source": {"kind": "stack", "language": "Python"}},
-            {"name": "csharp", "source": {"kind": "stack", "language": "C#"}}]})
+    rec, _ = parse(getattr(request, "param", None) or TWO_EXPERTS)
 
     monkeypatch.setattr("ms_moe_maker.config.pipeline.resolve_roots",
                         lambda size, dryrun, *a, **kw: {
@@ -187,6 +212,86 @@ def wired(tmp_path, monkeypatch, request):
 def test_the_pipeline_completes(wired):
     result, _, _, _ = wired
     assert result.ok, result.message
+
+
+class TestOnlyOneExpert:
+    """`--only <expert>`: the README's "retrain one and re-splice" as a flag.
+
+    Before it, a user had two options: --force (retrain all N experts) or
+    delete one specialist by hand - which retrained it for hours and then had
+    the stitch skip, because the stitch only compared expert names. The
+    retrain was thrown away and the previous model was exported.
+
+    These run against the same fakes as the fixture, so they are testing the
+    PLUMBING: that the flag reaches the one predicate that decides a skip.
+    """
+
+    def test_only_forces_exactly_the_named_expert(self, wired):
+        _, seen, _, _ = wired
+        seen.clear()
+        rec, _w = parse(TWO_EXPERTS)
+        result = builder.run_pipeline(rec, only=["python"])
+        assert result.ok, result.message
+        assert seen["retrain"] == {"python": True, "csharp": False}
+        assert seen["finetune_retrain"] == {"python": True, "csharp": False}, (
+            "the skip predicate and the trainer must agree - a retrain that "
+            "gets past the gate and then resumes a checkpoint is the same "
+            "wasted build in a different place")
+
+    def test_no_only_forces_nothing(self, wired):
+        _, seen, _, _ = wired
+        assert seen["retrain"] == {"python": False, "csharp": False}
+
+    def test_a_typo_fails_before_anything_runs(self, wired):
+        """`--only shel` must not become a no-op that reports success."""
+        _, seen, _, _ = wired
+        seen.clear()
+        rec, _w = parse(TWO_EXPERTS)
+        result = builder.run_pipeline(rec, only=["shel"])
+        assert result.ok is False
+        assert "shel" in result.message
+        assert "python" in result.message and "csharp" in result.message, (
+            "the message has to carry the real names - the reader is one "
+            "keystroke away from the right command")
+        assert "finetune" not in seen, "nothing may run on a bad name"
+
+    def test_comma_and_repeat_are_both_accepted(self):
+        assert builder.resolve_only(["a,b", "c"], ["a", "b", "c"]) == (
+            ("a", "b", "c"), ())
+
+    def test_case_is_forgiven_and_canonicalised(self):
+        assert builder.resolve_only(["Python"], ["python"]) == (("python",), ())
+
+    def test_duplicates_collapse(self):
+        assert builder.resolve_only(["a", "a,b"], ["a", "b"]) == (
+            ("a", "b"), ())
+
+    def test_nothing_asked_is_nothing_forced(self):
+        assert builder.resolve_only(None, ["a"]) == ((), ())
+        assert builder.resolve_only([], ["a"]) == ((), ())
+
+
+def test_a_new_router_discards_the_gguf_it_did_not_produce(wired):
+    """The last link in the invalidation chain.
+
+    A restitch already discarded the trained router. Nothing discarded the
+    GGUF - export_is_done() only asks whether a .gguf and its .smokepass.txt
+    exist, and both survive a retrain. So `--only shell` would restitch,
+    retrain the router, print "[skip] GGUF export already done" and hand back
+    the PREVIOUS model as the artifact of this build.
+    """
+    _, _, _, out_root = wired
+    gguf = out_root / "m.gguf"
+    proof = out_root / "m.gguf.smokepass.txt"
+    gguf.write_bytes(b"the previous router's model")
+    proof.write_text("smoke passed, for other bytes", encoding="utf-8")
+
+    rec, _w = parse(TWO_EXPERTS)
+    assert builder.run_pipeline(rec).ok
+    assert not gguf.exists(), "a GGUF from the old router must not survive"
+    assert not proof.exists(), (
+        "a smoke pass belongs to the bytes it was run against; keeping it "
+        "would let the next resume call this build done")
 
 
 def test_verify_stitch_gets_the_recipe_moe_values(wired):
@@ -369,3 +474,81 @@ def test_a_reasoning_synth_expert_is_not_also_given_tool_traces(wired):
         "tool traces were generated for an expert whose corpus comes from "
         "the reasoning path — that output is discarded")
     assert _base(seen["finetune"]["shell"]).endswith("shell_reasoning.jsonl")
+
+
+@pytest.mark.parametrize("wired", [REASONING_SYNTH_RECIPE], indirect=True)
+def test_a_hand_written_reasoning_expert_still_gets_one_domain(wired):
+    """`reasoning: true` written by hand on a domain expert keeps EXACTLY
+    today's behaviour. It was written to be a domain expert that thinks;
+    spanning its corpus across the roster underneath a recipe nobody edited
+    would be a silent corpus change."""
+    _, seen, _, _ = wired
+    assert seen["reasoning_domains"]["shell"] is None
+
+
+# The injected roster expert: `reasoning_expert:` is a flag, not an entry in
+# `experts:`, and it must arrive at the generator carrying the OTHER experts'
+# domains - itself and the tools expert excluded.
+ROSTER_REASONING_RECIPE = {
+    "schema_version": 1, "name": "t", "size": "0.5B",
+    "corpus": {"min_samples": 1, "max_samples": 50},
+    "reasoning_expert": True,
+    "tools_expert": True,
+    "experts": [
+        {"name": "python", "source": {"kind": "stack", "language": "Python"}},
+        {"name": "csharp", "source": {"kind": "stack", "language": "C#"}},
+    ],
+}
+
+
+@pytest.mark.parametrize("wired", [ROSTER_REASONING_RECIPE], indirect=True)
+def test_the_injected_reasoning_expert_is_handed_the_roster(wired):
+    result, seen, _, _ = wired
+    assert result.ok, result.message
+    assert "deliberation" in seen.get("reasoning_calls", []), (
+        f"the injected reasoning expert never reached the generator: "
+        f"{seen.get('reasoning_calls')}")
+    domains = seen["reasoning_domains"]["deliberation"]
+    assert domains == ["Python", "C#"], (
+        f"roster domains were {domains!r}; it must be the OTHER experts' "
+        f"display names, with itself and the tools expert excluded")
+
+
+@pytest.mark.parametrize("wired", [ROSTER_REASONING_RECIPE], indirect=True)
+def test_the_roster_expert_trains_on_its_own_reasoning_corpus(wired):
+    _, seen, _, _ = wired
+    assert _base(seen["finetune"]["deliberation"]).endswith(
+        "deliberation_reasoning.jsonl")
+
+
+# A roster with nothing on it: the only two experts are the two INJECTED ones,
+# so after excluding itself and the tools expert there is no domain left to
+# draw from. Legal, and it has to degrade to the single-domain corpus rather
+# than hand the generator an empty list (rnd.choice([]) is an IndexError two
+# hours into a build).
+EMPTY_ROSTER_RECIPE = {
+    "schema_version": 1, "name": "t", "size": "0.5B",
+    "corpus": {"min_samples": 1, "max_samples": 50},
+    "reasoning_expert": True,
+    "tools_expert": True,
+    "experts": [],
+}
+
+
+@pytest.mark.parametrize("wired", [EMPTY_ROSTER_RECIPE], indirect=True)
+def test_an_empty_roster_falls_back_instead_of_generating_nothing(capsys, wired):
+    # capsys BEFORE wired, deliberately: fixtures are set up in argument order
+    # and capsys only captures from its own setup onward, so the other way
+    # round the pipeline's whole run lands in the outer capture and
+    # readouterr() returns an empty string that reads exactly like "the
+    # warning was never printed".
+    result, seen, _, _ = wired
+    assert result.ok, result.message
+    assert seen["reasoning_domains"]["deliberation"] is None, (
+        "an empty roster must become domains=None - the old behaviour - not "
+        "an empty list the generator would draw from")
+    out = capsys.readouterr().out
+    assert "CANNOT span" in out, (
+        "the fallback weakens the specialist, so it has to say so: a corpus "
+        "that quietly stopped spanning domains is a result nobody can explain "
+        "afterwards")

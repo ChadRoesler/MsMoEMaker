@@ -11,7 +11,17 @@ because none of them was speculative.
 
 The corollary is what makes it maintainable by one person: because each expert
 does exactly one thing, you can retrain **one** and re-splice without touching
-the others.
+the others:
+
+```bash
+ms-moe-maker build recipe.yaml --only shell
+```
+
+That retrains `shell`, leaves every other specialist alone, and then
+re-stitches, re-trains the router and re-exports — because all three of those
+belong to the expert that changed. Deleting a specialist directory by hand does
+*not* do this: the expert retrains, but the skeleton is only restitched when it
+can tell its specialists moved under it, which is what `--only` guarantees.
 
 > Not a coding model. A coding model shaped like *your* stack.
 
@@ -79,6 +89,15 @@ ms-moe-maker build recipe.yaml --json
 
 # A real build on the smallest rung — cheap, but still a build
 ms-moe-maker build recipe.yaml --dryrun
+
+# Retrain ONE expert and re-splice (repeatable, or comma-separated).
+# Everything else self-skips; the stitch, router and GGUF are redone because
+# they all contain the expert that changed. Not combinable with --force.
+ms-moe-maker build recipe.yaml --only shell
+ms-moe-maker build recipe.yaml --only shell,python
+
+# Redo everything, all N experts included
+ms-moe-maker build recipe.yaml --force
 
 # Smoke-test the GGUF — checks it generates real tokens
 ms-moe-maker smoke recipe.yaml
@@ -459,6 +478,7 @@ shorter scan and you should mean it.
 | `held_out_fraction` | 0.1 | Share of each corpus reserved from training and used to test. |
 | `num_samples` | 20 | Generations per expert for the quality half. |
 | `dead_threshold` | 1.2 | Enrichment below this marks an expert as not meaningfully preferred. |
+| `max_new_tokens` | -1 | Tokens generated per sample. `-1` = you decide: 256, or **1024 when the run writes thinking traces** — a `<think>` block alone routinely runs past 256, so a smaller budget stops mid-thought and `reasoned` reports "does not reliably reason" about a model that reasons fine. |
 | `script` | — | Replaces our eval entirely. Called with `--data-root --output-root --held-out --num-samples`. |
 
 `dead_threshold: 1.2` is deliberately above what a 150-step router produces.
@@ -711,6 +731,21 @@ The pipeline is fully modular. Each stage is an independent Python module. The
 orchestrator (`builder.py`) runs them in order, reports progress via a callback,
 and resumes from where it left off on re-run.
 
+A resume is only safe if a stage can tell that its *inputs* changed, not just
+that its own output exists. So the skeleton records which specialists it was
+spliced from, and the three stages downstream of a specialist fall in order:
+
+| what changed | what is redone |
+|---|---|
+| one specialist retrained (`--only shell`) | stitch → router → GGUF |
+| expert list edited or reordered | stitch → router → GGUF |
+| nothing | nothing; every stage self-skips |
+
+The check is file count, total size and newest mtime per specialist directory —
+cheap enough to run on every resume, which hashing multi-gigabyte weights is
+not. A skeleton with no readable record of its sources is restitched rather
+than trusted.
+
 ## Evaluation
 
 After a build, you can check whether your experts actually diverged:
@@ -768,6 +803,7 @@ eval:
   held_out_fraction: 0.1
   num_samples: 20
   dead_threshold: 1.2       # minimum enrichment before "dead"
+  max_new_tokens: -1        # -1 = 256, or 1024 when the run reasons
 
 smoke:
   tokens: 48

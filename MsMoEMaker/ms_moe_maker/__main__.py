@@ -323,6 +323,20 @@ def main(argv=None):
                     help="real build on the smallest rung (still needs torch)")
     ap.add_argument("--force", action="store_true",
                     help="redo existing artifacts")
+    # THE MISSING MIDDLE. --force redoes all N experts and there was nothing
+    # between that and "delete one specialist by hand" - which retrained the
+    # expert for hours and then had the stitch skip, because the stitch only
+    # compared expert NAMES. The retrain was discarded, the previous model was
+    # exported, and the build said 8/8. --only is the README's "retrain one
+    # and re-splice" as an actual command, and the stitch now declines on its
+    # own when a specialist changes under it.
+    #
+    # Repeatable AND comma-separated: the first is what a script generates,
+    # the second is what a person types.
+    ap.add_argument("--only", action="append", metavar="EXPERT", default=None,
+                    help="build: retrain exactly these experts (repeatable, "
+                         "or comma-separated) and re-splice; every other "
+                         "expert self-skips. Not combinable with --force.")
     # THE FLAG THAT WAS MISSING. _describe.EVENTS declares a JSON Lines wire
     # vocabulary and calls renaming an event a breaking change - but there was
     # no --json argument at all, so argparse rejected it with exit 2. Since

@@ -56,6 +56,10 @@ def _defaults_template_body() -> str:
 #   name: agentcore
 #   teacher: Qwen/Qwen2.5-7B-Instruct
 
+# reasoning_expert:           # what `reasoning_expert: true` gets you
+#   name: deliberation        #   the teacher must ITSELF reason, or every
+#   teacher: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B   # trace is rejected
+
 # ── BOX ONLY ────────────────────────────────────────────────────────────────
 # A recipe may NAME a tier; it may never redefine one, or the same recipe would
 # mean different hardware depending on who ran it.
@@ -172,6 +176,12 @@ def _cmd_init(args):
         "# base: ''              # blank means a supported default for the size",
         "",
         "# tools_expert: true    # add a default MCP/tool-calling expert (kind: synth)",
+        "# reasoning_expert: true  # add a default reasoning specialist. Its corpus",
+        "#                         #   spans the OTHER experts' domains, so it learns",
+        "#                         #   the register of deliberation instead of one",
+        "#                         #   subject. Do NOT put `reasoning: true` on a",
+        "#                         #   domain expert to get this - that spends most",
+        "#                         #   of that expert's token budget on prose.",
         "",
         "# runtime:",
         "#   hardware_tier: xavier   # nano | xavier | spark",

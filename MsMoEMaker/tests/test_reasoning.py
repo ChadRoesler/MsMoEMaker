@@ -221,3 +221,70 @@ class TestTheTagsTravelWithTheRun:
         monkeypatch.setenv(Rz.USER_ENV, box)
         moved = C.build_id(C.build_config(self._rec("Qwen/QwQ-32B"), dryrun=True))
         assert plain != moved
+
+
+class TestTheRosterSpanningCorpus:
+    """The reasoning expert's questions must span the ROSTER, not one subject.
+
+    THE BUG THIS CLASS EXISTS FOR is the one that never crashes: pairing the
+    template index with the domain index (`templates[i % T]` beside
+    `domains[i % D]`) locks the two together, so the corpus holds lcm(T, D)
+    distinct questions instead of T*D. At T=4 and D=4 that is FOUR prompts
+    repeated for a whole run, and every row still looks perfectly well formed -
+    you would only ever find it by counting.
+    """
+
+    T = ("Write a {domain} script.", "Explain {domain} step by step.",
+         "Debug this {domain} problem.", "Design a {domain} solution.")
+    D = ["Python", "C#", "PowerShell", "Bash"]
+
+    def _rng(self, seed=42, expert="deliberation"):
+        import types
+        from ms_moe_maker.data import synth as d
+        return d._expert_rng(types.SimpleNamespace(seed=seed), expert)
+
+    def _prompts(self, n=200, seed=42, expert="deliberation"):
+        from ms_moe_maker.data import synth as d
+        rnd = self._rng(seed, expert)
+        return [d._reasoning_msgs("sys", "Deliberation", i, list(self.T),
+                                  list(self.D), rnd)[1]["content"]
+                for i in range(n)]
+
+    def test_the_draw_is_not_locked_by_two_modulos(self):
+        """THE anti-lock assertion. Under double-modulo this is exactly
+        lcm(4, 4) = 4 distinct prompts; independent draws reach toward 16."""
+        distinct = set(self._prompts())
+        assert len(distinct) > max(len(self.T), len(self.D)), (
+            f"only {len(distinct)} distinct prompts from {len(self.T)} "
+            f"templates x {len(self.D)} domains - the template and the domain "
+            f"are advancing together, which is the double-modulo lock")
+        assert len(distinct) >= 12, (
+            f"{len(distinct)}/16 pairs seen in 200 draws; the corpus is not "
+            f"really spanning the roster")
+
+    def test_the_same_seed_reproduces_the_same_prompts(self):
+        assert self._prompts(60, seed=42) == self._prompts(60, seed=42)
+
+    def test_a_different_seed_does_not(self):
+        assert self._prompts(60, seed=1) != self._prompts(60, seed=2)
+
+    def test_two_experts_do_not_get_identical_prompts(self):
+        assert (self._prompts(60, expert="deliberation")
+                != self._prompts(60, expert="thinky"))
+
+    def test_no_domains_is_byte_identical_to_the_old_behaviour(self):
+        """A hand-written `reasoning: true` expert must generate exactly what
+        it generated before this parameter existed - same template, same index,
+        same single domain."""
+        from ms_moe_maker.data import synth as d
+        tpl = list(self.T)
+        for i in range(12):
+            msgs = d._reasoning_msgs("sys", "Bash", i, tpl)
+            assert msgs[1]["content"] == tpl[i % len(tpl)].format(domain="Bash")
+            assert msgs[0] == {"role": "system", "content": "sys"}
+
+    def test_the_domains_actually_reach_the_prompts(self):
+        seen = set()
+        for text in self._prompts(200):
+            seen.update(dom for dom in self.D if dom in text)
+        assert seen == set(self.D), f"domains never drawn: {set(self.D) - seen}"

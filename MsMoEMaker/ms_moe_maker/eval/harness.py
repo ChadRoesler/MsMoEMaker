@@ -22,6 +22,7 @@ Both are overrideable from the recipe. We provide the floor:
     held_out_fraction: 0.1         # fraction held back from training
     num_samples: 20                # samples per expert
     dead_threshold: 1.2            # min enrichment before an expert is dead
+    max_new_tokens: -1             # -1 = 256, or 1024 when the run reasons
 
 Anything this module cannot measure is reported UNMEASURABLE with a reason.
 Unmeasurable is not pass. See evalrecord.py for the vocabulary.
@@ -76,6 +77,14 @@ class EvalResult:
     # eval split the trace from the answer. Reasons-but-wrong and
     # doesn't-reason-at-all are different outcomes and must not collapse.
     reasoned: float = -1.0
+    # HOW MANY GENERATIONS RAN OUT THE CLOCK instead of stopping on their own.
+    # Here so two identical-looking numbers can be told apart: a low `reasoned`
+    # because the model never closes its think block, and a low `reasoned`
+    # because the budget ended mid-think and there was no close tag left to
+    # find. The first is a finding about the model, the second is a finding
+    # about eval.max_new_tokens, and reporting one as the other is the lie
+    # this field exists to prevent.
+    capped_generations: int = 0
     status: str = "pending"
     """pending | done | failed | skipped."""
     note: str = ""
@@ -522,6 +531,130 @@ def _own_column_p(hits: int, n: int):
                for k in range(hits, n + 1))
 
 
+def _pooled_shares(counts_by_layer, totals_by_layer, n_experts, top_k):
+    """Selection share per expert, pooled over layers. SLOTS, not tokens.
+
+    The denominator is total selection SLOTS - tokens x top_k - which is why
+    the shares sum to 1.0 across experts and uniform routing gives each of
+    them 1/E rather than K/E. Pulled out of the pooled loop so the per-segment
+    numbers below are computed by this arithmetic and not by a second copy of
+    it that can drift; getting that denominator wrong once already turned a
+    healthy expert into a STARVED one.
+    """
+    tot = sum(totals_by_layer) * top_k
+    return [sum(layer[e] for layer in counts_by_layer) / max(tot, 1)
+            for e in range(n_experts)]
+
+
+def think_token_segments(text: str, offsets, style):
+    """Token ranges INSIDE the think block(s) and AFTER the last one.
+
+    Returns (inside, after) as lists of [start, end) TOKEN index pairs, or
+    None when there is no complete block in this text to segment on.
+
+    HOW THE CHARACTERS WERE MAPPED TO TOKENS, because that is the part that
+    can quietly be wrong. reasoning.split() answers "did this reason" in
+    STRINGS - it cannot say where - and re-tokenizing the two halves
+    separately would not line up with the sequence the model actually routed,
+    because a tokenizer merges across any boundary you cut. So the delimiters
+    are found in the SAME string that was tokenized, and char -> token comes
+    from the tokenizer's own `offset_mapping`: the fast tokenizer telling us
+    exactly which characters each token covers. A token belongs to a segment
+    when its span OVERLAPS that segment. Special tokens carry (0, 0), cover no
+    characters, and are skipped rather than being silently filed under the
+    first segment that starts at 0.
+
+    The delimiters come off the run's resolved ReasoningStyle - the same
+    `open`/`close` reasoning.split() reads - so this cannot drift from the
+    table the traces were written with.
+
+    `after` comes back empty when max_len cut the sequence mid-think; that is
+    a truncated probe, not a routing finding, and the caller drops it.
+    """
+    if style is None or not text or not offsets:
+        return None
+    opening = getattr(style, "open", "")
+    closing = getattr(style, "close", "")
+    if not opening or not closing:
+        return None
+
+    # Every complete block, so an `interwoven` style (many blocks around tool
+    # calls) is segmented the same way the splitter reads it: all interiors are
+    # "inside", and "after" is whatever follows the LAST close tag.
+    spans, i = [], 0
+    while True:
+        a = text.find(opening, i)
+        if a == -1:
+            break
+        b = text.find(closing, a + len(opening))
+        if b == -1:
+            break
+        spans.append((a + len(opening), b))
+        i = b + len(closing)
+    if not spans:
+        return None
+    after_start = i
+
+    inside_idx, after_idx = [], []
+    for t, span in enumerate(offsets):
+        try:
+            s0, s1 = int(span[0]), int(span[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if s1 <= s0:
+            continue
+        if any(s0 < end and s1 > start for start, end in spans):
+            inside_idx.append(t)
+        elif s0 >= after_start:
+            after_idx.append(t)
+
+    def _ranges(idx):
+        out = []
+        for t in idx:
+            if out and out[-1][1] == t:
+                out[-1][1] = t + 1
+            else:
+                out.append([t, t + 1])
+        return [tuple(r) for r in out]
+
+    return _ranges(inside_idx), _ranges(after_idx)
+
+
+def summarize_think_swing(think, after, min_swing: float = 0.05):
+    """Relay or duet? The DELTA is the finding, so the delta is what is reported.
+
+    Two share tables printed side by side make the reader do the subtraction,
+    and the subtraction IS the question the reasoning expert exists to raise:
+    if reasoning behaves as a RELAY, the reasoning expert's share should drop
+    the moment `</think>` closes and the domain expert's should rise. If it
+    behaves as a DUET - both contributing throughout - nothing moves and the
+    delta is noise.
+
+    Nobody has measured this; the configuration is new. So this reports the
+    number and names the two readings rather than asserting one of them.
+
+    `min_swing` is a difference in SHARE, not a ratio: below 0.05 of the
+    selection slots there is nothing to attribute to anything.
+    """
+    names = [n for n in think if n in after]
+    delta = {n: think[n] - after[n] for n in names}
+    out = {"think": dict(think), "after": dict(after), "delta": delta,
+           "swing_to": "", "swing": 0.0, "yields_to": "",
+           "verdict": "unmeasured"}
+    if not delta:
+        return out
+    swing_to = max(delta, key=lambda n: delta[n])
+    yields_to = min(delta, key=lambda n: delta[n])
+    out["swing"] = delta[swing_to]
+    if delta[swing_to] >= min_swing:
+        out["verdict"] = "relay"
+        out["swing_to"] = swing_to
+        out["yields_to"] = yields_to
+    else:
+        out["verdict"] = "duet"
+    return out
+
+
 def probe_router_discrimination(moe_dir: str,
                                 held_paths: Dict[str, str],
                                 expert_order: Sequence[str],
@@ -531,7 +664,8 @@ def probe_router_discrimination(moe_dir: str,
                                 device: str = "cpu",
                                 trained_on: Optional[set] = None,
                                 raw_text_sources: Optional[Sequence[str]] = None,
-                                callback=None) -> Dict[str, Any]:
+                                callback=None,
+                                reasoning_style=None) -> Dict[str, Any]:
     """THE dead-expert measurement — ported from probe_router_discrimination.py.
 
     PROVENANCE, and why this is a port rather than an implementation. This is
@@ -697,6 +831,23 @@ def probe_router_discrimination(moe_dir: str,
     totals = {s: [0] * L for s in src_names}
     rnd = random.Random(0)
 
+    # DOES ROUTING SWING AT THE TAG BOUNDARY? The pooled share above cannot
+    # answer it: it averages over the whole sequence, so a reasoning expert
+    # that owns `<think>...</think>` and hands off at the close tag, and one
+    # that contributes evenly throughout, produce the SAME number. Relay and
+    # duet are different architectures with the same pooled row.
+    #
+    # Strictly additive. Every accumulator here stays at zero unless a
+    # reasoning style was passed AND a sample has a complete block AND the
+    # tokenizer can give offsets; the pooled path above does not read any of
+    # it. No block, no offsets, no style - the table is exactly what it was.
+    seg_counts = {k: {s: [[0] * E for _ in range(L)] for s in src_names}
+                  for k in ("think", "after")}
+    seg_totals = {k: {s: [0] * L for s in src_names}
+                  for k in ("think", "after")}
+    seg_samples = {s: 0 for s in src_names}
+    seg_errors: Dict[str, str] = {}
+
     # PROBE IN THE FORMAT THE ROUTER WAS TRAINED IN, OR MEASURE FORMATTING.
     #
     # This asked every source with `Write {safe_name}:` inside a chat
@@ -758,8 +909,35 @@ def probe_router_discrimination(moe_dir: str,
                     _trace(f"routing probe: no chat template for {s} "
                            f"({exc.__class__.__name__}: {exc}) - "
                            f"falling back to raw text")
-            enc = tok(wrapped, return_tensors="pt", truncation=True,
-                      max_length=max_len).to(device)
+            # OFFSETS ARE ASKED FOR ONLY WHEN THEY WILL BE USED, and never
+            # at the cost of the pooled number: a slow tokenizer has no
+            # offset_mapping and raises, so record it once per source and fall
+            # through to exactly the call this always made.
+            offsets, enc = None, None
+            if reasoning_style is not None:
+                try:
+                    enc = tok(wrapped, return_tensors="pt", truncation=True,
+                              max_length=max_len, return_offsets_mapping=True)
+                    offsets = [tuple(x)
+                               for x in enc.pop("offset_mapping")[0].tolist()]
+                    enc = enc.to(device)
+                except Exception as exc:
+                    seg_errors.setdefault(s, f"{exc.__class__.__name__}: {exc}")
+                    offsets, enc = None, None
+            if enc is None:
+                enc = tok(wrapped, return_tensors="pt", truncation=True,
+                          max_length=max_len).to(device)
+            n_seq = int(enc["input_ids"].shape[-1])
+            seg = None
+            if offsets and len(offsets) == n_seq:
+                seg = think_token_segments(wrapped, offsets, reasoning_style)
+                # A block with nothing after it is a sequence max_len cut
+                # mid-think, not a hand-off measured at zero. Drop it rather
+                # than average a swing against an empty half.
+                if seg and not (seg[0] and seg[1]):
+                    seg = None
+            if seg:
+                seg_samples[s] += 1
             with torch.no_grad():
                 out = model(**enc, output_router_logits=True)
             router_logits = getattr(out, "router_logits", None)
@@ -780,6 +958,21 @@ def probe_router_discrimination(moe_dir: str,
                 for e in sel.tolist():
                     counts[s][li][e] += 1
                 totals[s][li] += sel.numel() // K
+                # Same selections, split by where in the sequence they
+                # happened. `top.indices` is [tokens, K] with one row per
+                # sequence position, which is what makes a token-index slice
+                # meaningful here; the length check is because a router that
+                # ever reports something other than one row per token would
+                # otherwise mis-attribute every segment silently.
+                if seg is not None and int(top.indices.shape[0]) == n_seq:
+                    for _key, _ranges in (("think", seg[0]), ("after", seg[1])):
+                        for _a, _b in _ranges:
+                            part = top.indices[_a:_b]
+                            if not part.numel():
+                                continue
+                            for e in part.flatten().tolist():
+                                seg_counts[_key][s][li][e] += 1
+                            seg_totals[_key][s][li] += int(part.shape[0])
                 # GATE CONFIDENCE - how sure the router is, separate from
                 # whether it is RIGHT. With norm_topk_prob=false the selected
                 # weight multiplies the expert's output, so p is a free scalar
@@ -800,11 +993,24 @@ def probe_router_discrimination(moe_dir: str,
     release_memory()
 
     # source x expert, pooled over layers
-    avg: Dict[str, List[float]] = {}
+    avg: Dict[str, List[float]] = {
+        s: _pooled_shares(counts[s], totals[s], E, K) for s in src_names}
+
+    # The same arithmetic, restricted to tokens inside the think block and to
+    # tokens after it. Only sources that actually had complete blocks appear,
+    # so an empty dict means "nothing here reasoned", not "no swing".
+    segments: Dict[str, Any] = {}
     for s in src_names:
-        tot = sum(totals[s]) * K
-        avg[s] = [sum(counts[s][li][e] for li in range(L)) / max(tot, 1)
-                  for e in range(E)]
+        if not seg_samples[s]:
+            continue
+        think = _pooled_shares(seg_counts["think"][s], seg_totals["think"][s],
+                               E, K)
+        after = _pooled_shares(seg_counts["after"][s], seg_totals["after"][s],
+                               E, K)
+        summary = summarize_think_swing(dict(zip(expert_names, think)),
+                                        dict(zip(expert_names, after)))
+        summary["samples"] = seg_samples[s]
+        segments[s] = summary
 
     experts: Dict[str, Any] = {}
     enrich: List[float] = []
@@ -948,6 +1154,15 @@ def probe_router_discrimination(moe_dir: str,
         # Sources whose chat template refused, with the reason. Empty is the
         # normal case; non-empty means those columns fell back to raw text.
         "prompt_format_errors": format_errors,
+        # Selection share INSIDE `<think>...</think>` vs AFTER it, per source
+        # that had complete blocks, with the delta and a relay/duet reading.
+        # Empty whenever the run does not reason, the tokenizer cannot give
+        # offsets, or nothing sampled had a closed block - this is additive
+        # and never narrows the pooled table above.
+        "think_segments": segments,
+        # Sources where offsets were asked for and refused (slow tokenizer),
+        # so a missing segment row cannot be read as "no think blocks here".
+        "think_segment_errors": seg_errors,
     }
 
 
@@ -1150,6 +1365,11 @@ def _split_reasoning_answer(text: str, style) -> Tuple[str, bool]:
 def eval_generation(model_dir: str, test_data_path: str,
                     label: str, domain: str,
                     num_samples: int = 10,
+                    # The historical cap, kept so a direct caller behaves the
+                    # way it always did. run_eval never leaves it at this: it
+                    # passes the value resolved from the recipe and the run's
+                    # shape (pipeline.eval_max_new_tokens), because 256 cuts a
+                    # thinking trace off before it reaches the answer.
                     max_new_tokens: int = 256,
                     max_prompt_tokens: int = 1024,
                     callback=None,
@@ -1210,6 +1430,7 @@ def eval_generation(model_dir: str, test_data_path: str,
     reasoned_count: List[int] = []
     scored = 0
     truncated_refs = 0
+    capped = 0
     completion_mode = False
 
     for line in samples:
@@ -1320,8 +1541,15 @@ def eval_generation(model_dir: str, test_data_path: str,
                        f"prompt was {n_tok} tokens, "
                        f"reserved/live = {reserved:,.0f}/{live:,.0f}MiB")
                 return result
-        generated = tok.decode(
-            out_ids[0][batch["input_ids"].shape[-1]:], skip_special_tokens=True)
+        # COUNT THE ONES THAT RAN OUT THE CLOCK. A generation stopped by the
+        # budget has no ending - no close tag, no answer - and from the score
+        # alone that is indistinguishable from a model that never writes one.
+        # Somebody has to count, or the caveat below cannot tell the reader
+        # which of the two they are looking at.
+        new_ids = out_ids[0][batch["input_ids"].shape[-1]:]
+        if int(new_ids.shape[-1]) >= max_new_tokens:
+            capped += 1
+        generated = tok.decode(new_ids, skip_special_tokens=True)
 
         try:
             peak_mib = max(peak_mib,
@@ -1365,6 +1593,7 @@ def eval_generation(model_dir: str, test_data_path: str,
     result.avg_length = sum(lengths) / scored
     if reasoning_style is not None:
         result.reasoned = sum(reasoned_count) / scored
+    result.capped_generations = capped
     # THE DENOMINATOR TRAVELS WITH THE AVERAGE. Every number above is a mean
     # over `scored`, not over the rows we drew, and the difference is the
     # whole difference between a result and a rumour.
@@ -1567,6 +1796,57 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
     return dead
 
 
+def reasoning_discipline_caveat(enrichment: float, reasoned: float,
+                                capped_fraction: float, expert: str = "",
+                                enrichment_floor: float = 1.2,
+                                reasoned_floor: float = 0.5,
+                                capped_ceiling: float = 0.25) -> str:
+    """The register-without-the-discipline reading, or '' when it does not fit.
+
+    HIGH ENRICHMENT NEXT TO LOW `reasoned` IS A NAMED FAILURE, NOT A PUZZLE,
+    and it is the one a reader is least equipped to interpret on their own.
+    The router is doing its job - it prefers this expert on its own ground -
+    while the expert produces think-block-FLAVOURED text without reliably
+    opening, sustaining and closing the block. It learned the register of
+    deliberation, not the discipline of it.
+
+    That is the PREDICTED failure mode of putting reasoning in a routed FFN
+    expert: chain-of-thought is a sequence-level policy that lives in
+    attention, and router training only trains the gates. So it is exactly
+    what a user should be told when the numbers take this shape, instead of
+    being handed two good-looking columns and a bad one.
+
+    `capped_fraction` is the guard against saying it when it is not true. A
+    generation that ran out its token budget has no close tag because it was
+    CUT, not because the model failed to write one, and those two produce an
+    identical `reasoned`. When enough of the run hit the budget the honest
+    answer is "raise eval.max_new_tokens and ask again", which is a different
+    caveat - so this one stands down rather than conflating them.
+
+    Pure and scalar on purpose: the diagnosis is the part worth testing, and
+    everything it needs is a number.
+    """
+    if enrichment < enrichment_floor:
+        return ""
+    if reasoned < 0 or reasoned >= reasoned_floor:
+        return ""
+    if capped_fraction > capped_ceiling:
+        return ""
+    who = expert or "the reasoning expert"
+    return (
+        f"{who}: routing works ({enrichment:.2f}x enrichment on its own "
+        f"ground) but only {reasoned:.0%} of its outputs opened AND closed a "
+        f"think block, with just {capped_fraction:.0%} of generations cut off "
+        f"by the token budget - so truncation does not explain it. That shape "
+        f"has a name: the expert learned the REGISTER of deliberation without "
+        f"the DISCIPLINE - think-block-flavoured text that does not reliably "
+        f"open, sustain and close the block. It is the predicted failure mode "
+        f"of putting reasoning in a routed FFN expert: chain-of-thought is a "
+        f"sequence-level policy and lives in attention, while router training "
+        f"only trains the gates. Read the quality scores in that row as "
+        f"scores on an unstructured answer, not on a reasoned one.")
+
+
 def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     """Run the eval pipeline.
 
@@ -1578,6 +1858,9 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             - held_out_fraction: fraction held back (default 0.1)
             - num_samples: samples per expert (default 20)
             - dead_threshold: min enrichment before dead (default 1.2)
+            - max_new_tokens: generation budget per sample (default -1 =
+              you decide, resolved from whether this run writes thinking
+              traces - see pipeline.eval_max_new_tokens)
 
     Returns:
         EvalReport. Anything unmeasurable is reported as such, never scored.
@@ -1588,6 +1871,12 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
     held_out = spec.get("held_out_fraction", 0.1)
     num_samples = spec.get("num_samples", 20)
     dead_threshold = spec.get("dead_threshold", 1.2)
+    # RESOLVED ONCE, HERE, because this is the first place that has both the
+    # recipe's answer and the run's shape. A caller that never sets it (the
+    # builder's post-build eval) gets the same automatic number the recipe's
+    # -1 gets, instead of the old hardcoded 256 that no key could reach.
+    max_new_tokens = cfg_module.eval_max_new_tokens(
+        config, spec.get("max_new_tokens", -1))
     mode = spec.get("mode", "all")
     if mode not in ("routing", "quality", "experts", "all"):
         report.ok = False
@@ -1752,6 +2041,10 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             dead_threshold=dead_threshold,
             trained_on=trained_on,
             raw_text_sources=raw_text,
+            # Segment by think-block position when this run writes traces at
+            # all. Strictly additive: no style, no offsets or no closed block
+            # and the pooled table is byte-for-byte what it was.
+            reasoning_style=cfg_module.reasoning_style_of_config(config),
         )
         if report.routing.get("status") == UNMEASURABLE:
             report.unmeasured.append(
@@ -1794,7 +2087,8 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
             res = eval_generation(
                 model_dir=expert_dir, test_data_path=held_paths[expert_name],
                 label=expert_name, domain=expert_name,
-                num_samples=num_samples, reasoning_style=reasoning_style)
+                num_samples=num_samples, max_new_tokens=max_new_tokens,
+                reasoning_style=reasoning_style)
             report.stages[expert_name] = res
             if res.status == UNMEASURABLE:
                 report.unmeasured.append(f"quality/{expert_name}: {res.note}")
@@ -1820,7 +2114,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                 moe_res = eval_generation(
                     model_dir=moe_dir, test_data_path=held_paths[expert_name],
                     label="moe", domain=expert_name,
-                    num_samples=num_samples,
+                    num_samples=num_samples, max_new_tokens=max_new_tokens,
                     loaded=(moe_model, moe_tok, moe_device),
                     reasoning_style=reasoning_style)
                 report.stages[f"moe/{expert_name}"] = moe_res
@@ -1872,6 +2166,50 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                     f"second. Check the family for this base in reasoning.yaml "
                     f"(drop a corrected one at ~/.msmoe/reasoning.yaml; no "
                     f"release needed).")
+
+        # RAN OUT THE CLOCK, OR NEVER FINISHED THE SENTENCE?
+        #
+        # These two produce the same low `reasoned` and the same short answer,
+        # and only one of them is about the model. A row where half the
+        # generations stopped because the budget ended is a row scored on
+        # unfinished text - say so first, because it also disqualifies the
+        # discipline reading below.
+        for _name, _res in report.stages.items():
+            if _res.status != "done" or not _res.scored_samples:
+                continue
+            if _res.capped_generations * 2 >= _res.scored_samples:
+                report.caveats.append(
+                    f"quality/{_name}: {_res.capped_generations} of "
+                    f"{_res.scored_samples} generations ran the full "
+                    f"{max_new_tokens}-token budget, so they were cut off "
+                    f"rather than finished. Every score in that row is on a "
+                    f"truncated output, and `reasoned` is a LOWER BOUND - a "
+                    f"trace cut before its close tag reads as 'did not "
+                    f"reason'. Raise eval.max_new_tokens and ask again.")
+
+        # THE DIAGNOSIS THE READER CANNOT BE EXPECTED TO INVENT. High routing
+        # enrichment next to a low `reasoned` is the predicted failure of
+        # putting reasoning in a routed FFN expert, and it is only readable by
+        # holding the routing table and the quality table together - which is
+        # exactly what a person reading one column at a time does not do. Only
+        # for experts the recipe declared reasoning: a reasoning BASE with no
+        # reasoning expert cannot be failing this way.
+        _routing_experts = (report.routing or {}).get("experts") or {}
+        for _name in (getattr(config, "reasoning_experts", None) or []):
+            _res = report.stages.get(_name)
+            _ent = _routing_experts.get(_name)
+            if _res is None or _ent is None or _res.status != "done":
+                continue
+            if not _res.scored_samples or not _ent.get("enrichment_reliable",
+                                                       True):
+                continue
+            _caveat = reasoning_discipline_caveat(
+                enrichment=float(_ent.get("enrichment", 0.0)),
+                reasoned=_res.reasoned,
+                capped_fraction=_res.capped_generations / _res.scored_samples,
+                expert=_name, enrichment_floor=dead_threshold)
+            if _caveat:
+                report.caveats.append(_caveat)
 
     # ── verdict ────────────────────────────────────────────────────────────
     if do_routing:
@@ -1959,6 +2297,8 @@ def eval_from_manifest(run_dir: Path) -> EvalReport:
             avg_length=info.get("avg_length", 0.0),
             scored_samples=info.get("scored_samples", 0),
             attempted_samples=info.get("attempted_samples", 0),
+            reasoned=info.get("reasoned", -1.0),
+            capped_generations=info.get("capped_generations", 0),
             status=info.get("status", "pending"),
             note=info.get("note", ""),
         )
@@ -1988,6 +2328,12 @@ def save_eval_report(report: EvalReport, path: Path) -> None:
                 # and a mean over 20 are not the same claim.
                 "scored_samples": r.scored_samples,
                 "attempted_samples": r.attempted_samples,
+                # The discipline check, in the artifact too. It is a column in
+                # the printed table now, and a table read back from a run dir
+                # that shows "-" for a run that DID measure it is the same
+                # kind of quiet loss scored_samples used to suffer.
+                "reasoned": r.reasoned,
+                "capped_generations": r.capped_generations,
                 "status": r.status,
                 "note": r.note,
             }

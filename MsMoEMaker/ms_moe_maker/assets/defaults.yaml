@@ -22,6 +22,24 @@ tools_expert:
   # Traces to generate. -1 keeps the pipeline's own budget.
   examples: -1
 
+# The reasoning specialist that `reasoning_expert: true` injects. Like the
+# block above, this SAYS WHAT ONE IS - it does not ask for one. A recipe still
+# has to write `reasoning_expert: true`, or every recipe on this box would grow
+# a second specialist and its teacher hours without mentioning it.
+#
+# The teacher must ITSELF reason. Rejection sampling throws away every trace
+# whose think block is empty, so a non-reasoning teacher here does not degrade
+# gracefully - it burns GPU hours at a ~0% accept rate until the tripwire fires.
+#
+# This is NOT `reasoning: true` on one of your domain experts. That spends most
+# of that expert's token budget on English prose, and then reads as healthy on
+# the routing eval because its held-out set is prose too. One expert, one job.
+reasoning_expert:
+  name: deliberation
+  teacher: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+  # Traces to generate. -1 keeps the pipeline's own budget.
+  examples: -1
+
 # ── THE BOX ITSELF ────────────────────────────────────────────────────────────
 # `tiers:` and `models:` are box-only. A recipe may NAME a tier; it may not
 # redefine one, or the same recipe would describe different hardware depending

@@ -40,11 +40,21 @@ from typing import Any, Dict, List, Optional, Tuple
 # The panic minimum. Two values, because a build that reaches the tools expert
 # with no name and no teacher cannot proceed at all — everything else has a
 # working default in the dataclasses already. The packaged defaults.yaml
-# carries these same two, and a test asserts the two do not disagree.
+# carries the same values, and a test asserts the two do not disagree.
 FLOOR: Dict[str, Any] = {
     "tools_expert": {
         "name": "agentcore",
         "teacher": "Qwen/Qwen2.5-7B-Instruct",
+    },
+    # ONE EXPERT, ONE JOB - and the teacher is why this block cannot just
+    # borrow the one above. generate_reasoning_traces rejects every trace whose
+    # think block is empty, so a non-reasoning teacher here spends real GPU
+    # hours at a ~0% accept rate until the 200-attempt tripwire fires. This
+    # distill is the one the gauntlet already names by hand for its reasoning
+    # expert; the floor should not make you look it up.
+    "reasoning_expert": {
+        "name": "deliberation",
+        "teacher": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     },
 }
 
@@ -66,7 +76,13 @@ USER_PATH = os.path.join("~", ".msmoe", "defaults.yaml")
 # whole extra specialist, its teacher, and its GPU hours, injected by a file
 # the recipe never mentions. A defaults file configures the answer; only a
 # recipe asks the question.
-CONTENT_ONLY: frozenset = frozenset({"tools_expert"})
+# `reasoning_expert` joins it for exactly the same reason, and would have had
+# exactly the same bug: a box that says what a reasoning specialist SHOULD BE
+# has not put one in a recipe that never mentions one. The rule belongs to the
+# shape, not to the one feature that discovered it - anything a defaults file
+# supplies CONTENT for goes in this set the day it is added, or every recipe on
+# the box grows an expert nobody asked for.
+CONTENT_ONLY: frozenset = frozenset({"tools_expert", "reasoning_expert"})
 
 # THE BOX ITSELF. What a tier IS, and which checkpoint a size maps to, are
 # statements about a MACHINE - so a recipe may name a tier but must never
@@ -83,7 +99,7 @@ NOT_MERGED: frozenset = CONTENT_ONLY | BOX_ONLY
 
 ALLOWED: frozenset = frozenset({
     "base", "base_kind", "size", "budget", "moe", "gates", "runtime", "roots",
-    "corpus", "router", "eval", "smoke", "tools_expert",
+    "corpus", "router", "eval", "smoke", "tools_expert", "reasoning_expert",
     # box-only (see BOX_ONLY): not recipe keys at all
     "tiers", "models",
 })
