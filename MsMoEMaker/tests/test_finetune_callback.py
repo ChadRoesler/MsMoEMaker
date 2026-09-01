@@ -132,3 +132,57 @@ def test_finetune_imports_without_transformers():
     importlib.reload(f)
     assert "torch" not in sys.modules or True   # nothing heavy at import time
     assert callable(f.make_heartbeat_callback)
+
+
+# ── Adapter-base refusal and the dense save ─────────────────────────────────
+
+def test_an_adapter_checkpoint_base_is_refused_before_training():
+    """An adapter dir auto-loads its delta on top of already-merged weights
+    (double-ablation) and nests our LoRA inside it - the first gauntlet build
+    died at specialist save time because of exactly that. Refuse up front."""
+    from ms_moe_maker.train import finetune as f
+
+    class AdapterCarrying:
+        peft_config = {"default": object()}
+
+    with pytest.raises(RuntimeError, match="ADAPTER checkpoint"):
+        f._refuse_adapter_base(AdapterCarrying(), "abliterated_base")
+
+    class Plain:
+        pass
+
+    f._refuse_adapter_base(Plain(), "clean_base")   # no raise
+
+
+def test_peft_residue_is_stripped_before_the_dense_save():
+    """merge_and_unload can return a model that still carries peft_config;
+    save_pretrained then takes the adapter path (get_adapter_state_dict ->
+    active_adapters) - the upstream UnboundLocalError the gauntlet hit."""
+    from ms_moe_maker.train import finetune as f
+
+    class Residue:
+        pass
+
+    m = Residue()
+    m.peft_config = {"default": object()}
+    assert f._strip_peft_residue(m, "python") is True
+    assert not hasattr(m, "peft_config")
+
+    class Clean:
+        pass
+
+    assert f._strip_peft_residue(Clean(), "python") is False
+
+
+def test_unremovable_peft_residue_refuses_to_save():
+    """A residue that cannot be stripped must fail the build, not be saved as
+    adapter-flavoured weights under a dense specialist's name."""
+    from ms_moe_maker.train import finetune as f
+
+    class Sticky:
+        @property
+        def peft_config(self):
+            return {"default": object()}
+
+    with pytest.raises(RuntimeError, match="refusing to write"):
+        f._strip_peft_residue(Sticky(), "python")

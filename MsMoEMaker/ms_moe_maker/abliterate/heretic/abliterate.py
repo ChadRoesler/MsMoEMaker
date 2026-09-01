@@ -367,14 +367,30 @@ def run_abliteration(settings: Settings) -> str:
     if settings.export_strategy == ExportStrategy.ADAPTER:
         # THE ADAPTER ALONE IS NOT A LOADABLE CHECKPOINT: no config.json, no
         # base weights, no tokenizer. The pipeline repoints config.base at
-        # this directory, so it must always contain a complete merged model -
-        # the adapter files are written first and kept alongside, for anyone
-        # who wants just the delta. (The tokenizer used to live only in the
-        # merge branch, and abliterate_is_done tested config.json, which the
-        # adapter path never wrote - so the study re-ran on every resume.)
-        print("Saving LoRA adapter...")
-        model.model.save_pretrained(staging, max_shard_size=settings.max_shard_size)
-        print("Saving merged model alongside (the pipeline loads this)...")
+        # this directory, so it must always contain a complete merged model.
+        #
+        # THE DELTA LIVES IN A SUBDIR, NOT NEXT TO THE MERGED WEIGHTS. The
+        # first version wrote adapter_config.json into this same directory -
+        # and transformers/peft AUTO-LOAD an adapter whenever a model dir
+        # contains one. So every finetune stage loaded the abliterated base
+        # with the delta applied a SECOND time on top of the already-merged
+        # weights (double-ablation), nested its own LoRA inside that
+        # auto-loaded adapter, and then died at specialist save time when
+        # save_pretrained routed through get_adapter_state_dict ->
+        # active_adapters (UnboundLocalError: an upstream transformers typo
+        # that any peft_config-carrying model hits). The pipeline's
+        # checkpoint dir must be a PLAIN merged model; the delta stays one
+        # level down, for anyone who wants just the delta.
+        # (The tokenizer used to live only in the merge branch, and
+        # abliterate_is_done tested config.json, which the adapter path
+        # never wrote - so the study re-ran on every resume.)
+        print("Saving LoRA adapter (adapter/, so the checkpoint stays a "
+              "plain merged model)...")
+        adapter_dir = os.path.join(staging, "adapter")
+        os.makedirs(adapter_dir, exist_ok=True)
+        model.model.save_pretrained(adapter_dir,
+                                    max_shard_size=settings.max_shard_size)
+        print("Saving merged model (the pipeline loads this)...")
         merged_model = model.get_merged_model()
         merged_model.save_pretrained(staging, max_shard_size=settings.max_shard_size)
         del merged_model

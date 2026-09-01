@@ -229,6 +229,53 @@ def clear_checkpoints(tmp_dir: str) -> list:
     return removed
 
 
+def _refuse_adapter_base(model, base_label: str) -> None:
+    """An adapter checkpoint is NOT a valid training base. Refuse, loudly, BEFORE the expensive part.
+
+    transformers/peft auto-load an adapter whenever a model directory contains
+    adapter_config.json - so pointing config.base at an adapter export trains
+    from weights with the delta applied TWICE (the export also holds the
+    merged model), and our LoRA then nests inside the auto-loaded adapter. The
+    first gauntlet run hit exactly that: training finished, the merged model
+    still carried peft_config, and save_pretrained took the adapter path
+    (get_adapter_state_dict -> active_adapters) and died with an upstream
+    UnboundLocalError. Like the 4-bit and unsloth guards below, this fails
+    before the bill is paid rather than after.
+    """
+    if getattr(model, "peft_config", None):
+        raise RuntimeError(
+            f"config.base {base_label!r} is an ADAPTER checkpoint: it carries "
+            "peft_config, so loading it auto-applied the adapter delta on top "
+            "of weights that already contain it (double-applied), and LoRA "
+            "would nest inside the auto-loaded adapter. Point config.base at "
+            "the MERGED checkpoint instead - an adapter export keeps its "
+            "merged model at the directory root and the delta in the "
+            "adapter/ subdir.")
+
+
+def _strip_peft_residue(model, label: str) -> bool:
+    """Drop adapter residue from a merged specialist before the dense save.
+
+    Returns True if something was stripped. If the residue cannot be removed
+    (a class-level property, say), refusing is the only honest option:
+    save_pretrained would route through get_adapter_state_dict, which either
+    writes ADAPTER files where dense weights belong or crashes first - on the
+    transformers version whose active_adapters references an unbound local.
+    """
+    if getattr(model, "peft_config", None) is None:
+        return False
+    try:
+        del model.peft_config
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError(
+            f"{label}: the merged specialist still carries peft adapter state "
+            f"that cannot be removed, and save_pretrained would treat it as an "
+            f"adapter checkpoint; refusing to write adapter-flavoured weights "
+            f"where a dense specialist belongs."
+        ) from exc
+    return True
+
+
 def fine_tune_specialist(config, safe_name: str, data_path: str,
                          expert_display: Optional[str] = None,
                          retrain: bool = False) -> str:
@@ -350,6 +397,7 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
             attn_implementation=config.attn_impl,
             cache_dir=config.hf_home,
         )
+        _refuse_adapter_base(model, config.base)
 
         model = get_peft_model(model, LoraConfig(
             r=config.lora_r,
@@ -563,6 +611,15 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         model.save_pretrained_merged(out_dir, tokenizer, save_method="merged_16bit")
     else:
         merged = model.merge_and_unload()
+        # DENSE SAVE, NEVER THE ADAPTER PATH. Some transformers/peft pairs
+        # leave peft_config on the unloaded model; save_pretrained then
+        # routes through get_adapter_state_dict -> active_adapters(), which
+        # is exactly where the first gauntlet build died (an upstream
+        # UnboundLocalError). The specialist on disk must be plain dense
+        # weights, so drop any residue before the save.
+        if _strip_peft_residue(merged, safe_name):
+            print(f"   {safe_name}: stripped peft residue from the merged "
+                  f"specialist before the dense save")
         merged.save_pretrained(out_dir)
         tokenizer.save_pretrained(out_dir)
 
