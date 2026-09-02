@@ -6,6 +6,7 @@ themselves live here so the entry point stays an entry point.
 from __future__ import annotations
 
 from .build import _cmd_build
+from .bundle import _cmd_bundle
 from .corpus import _cmd_corpus
 from .eval import _cmd_eval, _print_eval_report
 from .export import _cmd_export
@@ -15,6 +16,7 @@ from .validate import _cmd_validate
 
 __all__ = [
     "_cmd_build",
+    "_cmd_bundle",
     "_cmd_corpus",
     "_cmd_eval",
     "_cmd_export",

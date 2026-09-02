@@ -66,6 +66,12 @@ class Knob:
     # "<block>.<row>" in the README's knob tables, when the same sentence is
     # printed there too. Empty when this field has no README row.
     readme: str = ""
+    # Where in a RECIPE this value is written, as "<block>.<key>". Usually the
+    # same string as `readme` - the README's knob tables are addressed by
+    # recipe block and key - so it is only set here when there is no README row
+    # or the two genuinely differ. `ms-moe-maker bundle` stamps along these
+    # paths; see recipe_path() and UNPINNABLE below.
+    recipe: str = ""
 
 
 KNOBS: Dict[str, Knob] = {
@@ -102,7 +108,8 @@ KNOBS: Dict[str, Knob] = {
     "abliterate_enabled": Knob(
         "Strips the base model's refusal direction before any specialist "
         "trains, so the finished MoE inherits it instead of being decensored "
-        "afterwards."),
+        "afterwards.",
+        recipe="abliterate.enabled"),
     "abliterate_n_trials": Knob(
         "How many candidate decensorings the search tries before one is "
         "picked. The whole cost of the stage lives here - a 0.5B run is "
@@ -245,11 +252,13 @@ KNOBS: Dict[str, Knob] = {
         "fit. Unset loads it at full bfloat16."),
     "teacher_max_new": Knob(
         "Most tokens the teacher may write for one generated example. Too "
-        "low and answers stop mid-script."),
+        "low and answers stop mid-script.",
+        recipe="budget.teacher_max_new"),
     "reasoning_teacher_max_new": Knob(
         "Most tokens the teacher may write for one reasoning example. Higher "
         "than the plain ceiling because the thinking alone can eat the whole "
-        "budget before the answer starts."),
+        "budget before the answer starts.",
+        recipe="budget.reasoning_teacher_max_new"),
 
     # ── specialist training ───────────────────────────────────────────────
     "max_seq_length": Knob(
@@ -492,3 +501,94 @@ def describe() -> List[Dict[str, Any]]:
 def readme_rows() -> Dict[str, str]:
     """`<block>.<row>` in the README's knob tables -> the field it explains."""
     return {k.readme: name for name, k in sorted(KNOBS.items()) if k.readme}
+
+
+# ── what a bundle cannot pin, and why ────────────────────────────────────────
+#
+# `ms-moe-maker bundle` writes a recipe with every default STAMPED IN, so a
+# recipe handed to someone else builds the same thing on their box instead of
+# quietly picking up their defaults. It can only do that for values the recipe
+# LANGUAGE CAN EXPRESS.
+#
+# These cannot be expressed. Every one of them is in `build_fingerprint` - so
+# every one of them changes what the build produces - and none of them has a
+# recipe key to write it into. Three kinds, and the distinction matters because
+# the fixes are different:
+#
+#   "env"       your SHELL decides part of the model. The worst of the three
+#               for handing work to somebody, because nothing on disk records
+#               it and the person receiving it has no reason to suspect.
+#   "constant"  a literal in build_config. Stable until an upgrade moves it,
+#               at which point every exported recipe silently gets the new one.
+#   "cli"       correctly not a recipe key - it describes THIS invocation.
+#
+# THE ANSWER IS NOT TO PRETEND. A bundle records the whole resolved fingerprint
+# in `bundle.json`, and import diffs it against what this box resolves - so an
+# unpinnable field that differs is reported by NAME rather than discovered as a
+# model that came out wrong. Same move as stamping the defaults_files sha256:
+# the divergence is not prevented, it is made impossible to miss.
+#
+# Adding a recipe key for any of these is a real improvement and a separate
+# decision. Until then this list is the honest statement of the gap, and
+# tests/test_bundle_stamp.py insists every direct fingerprint field is either
+# pinnable or named here - so a NEW unpinnable field is a choice somebody makes
+# on purpose rather than a hole that opens quietly.
+UNPINNABLE: Dict[str, str] = {
+    # -- the shell decides ------------------------------------------------
+    "use_vllm": "env: MSMOE_VLLM. Which generator produced the corpus is not "
+                "recorded anywhere on disk.",
+    "use_unsloth": "env: MSMOE_UNSLOTH.",
+    "gradient_checkpointing": "env: MSMOE_GRAD_CKPT.",
+    # -- literals in build_config -----------------------------------------
+    "attn_impl": "constant in build_config ('sdpa').",
+    "vllm_max_len": "constant in build_config (4096).",
+    "vllm_quantization": "constant in build_config (None).",
+    "packing_strategy": "constant in build_config ('wrapped').",
+    "target_modules": "constant in build_config (the three MLP projections).",
+    "lr_lora": "constant in build_config (2e-4). A release that retunes this "
+               "changes every exported recipe's meaning without editing one.",
+    "specialist_save_steps": "constant in build_config (200).",
+    "chars_per_token_est": "constant in build_config (3.2). Feeds the corpus "
+                           "size estimate, so it moves how much data is "
+                           "collected.",
+    "seed": "PipelineConfig default (42); nothing sets it from a recipe.",
+    "code_prompt_templates": "PipelineConfig default. See the note in the "
+                             "README about this field being unreachable.",
+    "code_prompt_unnamed": "PipelineConfig default, same as above.",
+    "code_prompt_unnamed_fraction": "PipelineConfig default, same as above.",
+    # -- about this invocation, not about the recipe -----------------------
+    "dryrun": "cli: --dryrun. It describes THIS run, not the recipe, and "
+              "stamping it would hand someone a recipe that can only ever "
+              "build the small rung.",
+}
+
+
+def recipe_path(field: str) -> str:
+    """Where in a recipe this fingerprint field is written, or "".
+
+    `readme` records the README knob-table cell, which is addressed by recipe
+    block and key - so for every direct field that has one it IS the recipe
+    path, and tests/test_bundle_stamp.py resolves all of them against the real
+    Recipe dataclass rather than trusting that sentence. `recipe` overrides it
+    for the handful where the two differ or where there is no README row.
+    """
+    knob = KNOBS.get(field)
+    if knob is None:
+        return ""
+    return knob.recipe or knob.readme
+
+
+def pinnable() -> Dict[str, str]:
+    """Every fingerprint field a bundle can stamp, to its recipe path.
+
+    DERIVED FIELDS ARE EXCLUDED, and that is the load-bearing half. A value
+    computed from other values must be RECOMPUTED on the far box, not frozen:
+    stamping `collect_token_target` would leave it fighting the
+    `collect_headroom` it is supposed to follow, and the recipe has no key for
+    it anyway. Stamp the inputs; let the outputs fall out. That is also why the
+    build_id round-trips - the inputs are pinned, so the outputs re-derive to
+    the same numbers.
+    """
+    return {name: recipe_path(name)
+            for name, knob in KNOBS.items()
+            if knob.derived_from is None and recipe_path(name)}

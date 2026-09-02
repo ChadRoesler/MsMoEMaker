@@ -276,7 +276,7 @@ DESCRIBE = {
 # the entry point keeps argparse and this dispatch table. _print_eval_report
 # and _defaults_template_body are re-exported because tests (and any external
 # caller) historically imported them from __main__.
-from .cli import (_cmd_build, _cmd_corpus, _cmd_eval, _cmd_export, _cmd_init,
+from .cli import (_cmd_build, _cmd_bundle, _cmd_corpus, _cmd_eval, _cmd_export, _cmd_init,
                   _cmd_smoke, _cmd_validate, _print_eval_report,
                   _defaults_template_body)
 
@@ -293,6 +293,7 @@ COMMAND_HANDLERS = {
     "eval": _cmd_eval,
     "validate": _cmd_validate,
     "export": _cmd_export,
+    "bundle": _cmd_bundle,
 }
 
 
@@ -404,6 +405,21 @@ def main(argv=None):
                          "(never in place). Without it, only propose.")
     ap.add_argument("--per-repo-cap", dest="per_repo_cap", type=int, default=0,
                     help="corpus: max docs per repo when pruning (default 20)")
+    # Bundle args
+    # NOT `-o`. That short flag already belongs to corpus\'s --output, and
+    # argparse refuses the duplicate at import - which would have taken every
+    # verb down, not just this one.
+    ap.add_argument("--out", dest="out", default=None,
+                    help="bundle: where to write the .zip "
+                         "(default: <recipe name>.zip)")
+    ap.add_argument("--with-data", dest="with_data", action="store_true",
+                    help="bundle: include the synth corpora. Off by default "
+                         "because a corpus runs to gigabytes and a surprise "
+                         "download is a worse gift than a small bundle.")
+    ap.add_argument("--notes", default=None,
+                    help="bundle: a markdown file to carry along - what this "
+                         "recipe is for, what you already tried, which knob "
+                         "you would move first.")
     ap.add_argument("--mode", dest="eval_mode",
                     choices=list(_d.EVAL_MODES), default="",
                     help="eval mode (default: the recipe's eval.mode, or all)")
