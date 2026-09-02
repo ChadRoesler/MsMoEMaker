@@ -444,6 +444,13 @@ def audit_moe_config(moe_dir: str) -> Dict[str, Any]:
 
 # ── the gate ─────────────────────────────────────────────────────────────
 
+# Where the builder drops `ExpertsReport.to_dict()`. Named here rather than at
+# the call site because this module owns the SHAPE, and a filename that lives
+# beside the dataclass cannot drift away from it. seren-theatre reads this,
+# which makes the name a wire format between two packages.
+GATE_REPORT_NAME = "gate_experts.json"
+
+
 @dataclass
 class ExpertsReport:
     status: str = OK

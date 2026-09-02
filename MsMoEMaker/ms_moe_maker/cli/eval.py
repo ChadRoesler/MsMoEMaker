@@ -60,6 +60,33 @@ def _cmd_eval(args):
         print(f"\nEval could not run: {report.message}", file=sys.stderr)
         return 2
 
+    # PERSIST BEFORE PRINTING, and the order is the point. `_print_eval_report`
+    # is two hundred lines of formatting over a dozen optional sub-tables, and
+    # an exception in any one of them would take the whole measurement with it:
+    # forty minutes of generation lost because a table header could not render.
+    # The numbers reach disk first; the pretty version is a convenience laid on
+    # top of an artifact that already exists.
+    #
+    # INTO THE RUN DIRECTORY, BESIDE THE MANIFEST AND NOT INTO IT. `eval` is
+    # deliberately outside the build - run/stages.py spells out why a model
+    # must not grade itself as part of being built - so it must not write the
+    # manifest either, which the builder owns. It drops its own file and lets a
+    # reader find it, the same bargain the GGUF and the smoke-pass marker make.
+    from pathlib import Path
+    from ..config.pipeline import build_id as _build_id
+    from ..eval.harness import EVAL_REPORT_NAME, save_eval_report
+
+    saved = Path(config.output_root) / EVAL_REPORT_NAME
+    try:
+        save_eval_report(report, saved, build_id=_build_id(config))
+        print(f"\n  eval report -> {saved}")
+    except OSError as exc:
+        # A read-only or full run directory must not turn a measurement that
+        # SUCCEEDED into a command that failed. Say so and carry on to the
+        # numbers, which are still correct and still worth reading.
+        print(f"\n[warn] could not write the eval report to {saved}: {exc}",
+              file=sys.stderr)
+
     _print_eval_report(report)
 
     # THREE OUTCOMES, THREE EXIT CODES. "We could not measure it" must never

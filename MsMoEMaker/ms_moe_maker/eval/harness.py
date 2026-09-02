@@ -125,6 +125,18 @@ class EvalReport:
     """
     unmeasured: List[str] = field(default_factory=list)
     """Things we could not measure, and therefore did not score."""
+    build_id: str = ""
+    """Digest of the resolved config the GRADED MODEL was built from.
+
+    An eval is a claim about a model, and the model can be rebuilt underneath
+    it. Carrying the build's own id lets a reader tell "this eval measured
+    this build" from "this eval is left over from an earlier one" - which is
+    otherwise unanswerable from a directory listing. Empty means the caller
+    did not say, and unknown must never read as a match.
+    """
+    generated: float = 0.0
+    """Seconds since epoch when this was written. The age of a claim is part
+    of the claim. 0.0 = not from disk."""
 
 
 def _trace(tag: str) -> None:
@@ -2266,14 +2278,31 @@ def _run_custom_eval(custom_script: str, config, held_out: float,
     return report
 
 
-def eval_from_manifest(run_dir: Path) -> EvalReport:
-    """Read eval results from a run's manifest/eval record.
+# ── the eval report on disk ──────────────────────────────────────────────
+#
+# A FILE IN THE RUN DIRECTORY, DELIBERATELY NOT A MANIFEST FIELD. `eval` is
+# a separate command on purpose - run/stages.py spells out why a model must
+# not grade itself as part of being built - so it must not write to the
+# manifest either, which the builder owns and rewrites on stage transitions.
+# It drops its own file; a reader finds it by scanning, exactly the way the
+# GGUF and the smoke-pass marker are found.
+#
+# THE NAME IS THE CONTRACT. seren-theatre reads this file, so the filename
+# and the schema are a wire format between two packages, and both ends say
+# the version out loud rather than sniffing the shape.
+EVAL_REPORT_NAME = "eval_report.json"
+EVAL_REPORT_SCHEMA = 1
 
-    Used after a build to load previous eval results.
+
+def eval_from_manifest(run_dir: Path) -> EvalReport:
+    """Read back the report `save_eval_report` wrote, if there is one.
+
+    Used after a build to load previous eval results, so "how did this do"
+    can be answered without forty minutes of generation.
     """
     report = EvalReport(ok=True, message="")
 
-    eval_path = run_dir / "eval_report.json"
+    eval_path = run_dir / EVAL_REPORT_NAME
     if not eval_path.is_file():
         report.ok = False
         report.message = "no eval report found"
@@ -2286,6 +2315,16 @@ def eval_from_manifest(run_dir: Path) -> EvalReport:
     report.undiscriminating = data.get("undiscriminating", [])
     report.caveats = data.get("caveats", [])
     report.experts = data.get("experts", {})
+    # ROUTING WAS NEVER READ BACK, because it was never written. See
+    # save_eval_report: it is the headline measurement, and the round trip
+    # dropped it in silence for the life of the file.
+    report.routing = data.get("routing", {}) or {}
+    report.unmeasured = data.get("unmeasured", []) or []
+    report.build_id = str(data.get("build_id") or "")
+    try:
+        report.generated = float(data.get("generated") or 0.0)
+    except (TypeError, ValueError):
+        report.generated = 0.0
 
     for name, info in data.get("stages", {}).items():
         r = EvalResult(
@@ -2307,14 +2346,41 @@ def eval_from_manifest(run_dir: Path) -> EvalReport:
     return report
 
 
-def save_eval_report(report: EvalReport, path: Path) -> None:
-    """Save eval report to disk as JSON."""
+def save_eval_report(report: EvalReport, path: Path, *,
+                     build_id: str = "") -> None:
+    """Persist an EvalReport beside the run it graded.
+
+    WHY THIS SUDDENLY MATTERS. It had no caller, for the life of the file, and
+    neither did `eval_from_manifest`, which reads what it writes. The pair
+    round-tripped in tests and nowhere else, so a measurement that costs forty
+    minutes of GPU time lived in a terminal scrollback until the window closed.
+
+    ROUTING AND UNMEASURED WERE BEING DROPPED. `routing` is the enrichment
+    table, the JS divergence, the gate confidence and the think-block
+    segmentation - the headline claim this whole command exists to make - and
+    it never reached the JSON. Nothing noticed, because both round-trip tests
+    populate `stages` and nothing else: a test that never sets a field cannot
+    observe that the field is gone. The suite was green over a silent loss.
+
+    PROVENANCE. `build_id` is the digest of the resolved config the graded
+    model was built from, so a reader can tell this eval from one left over
+    by an earlier build of the same rung. Empty when the caller did not say,
+    which reads as unknown and must never read as a match.
+    """
     data = {
+        "schema_version": EVAL_REPORT_SCHEMA,
+        # Written at save time, not at measure time - close enough for "how
+        # old is this claim", and it cannot be forgotten by a caller.
+        "generated": time.time(),
+        "build_id": build_id,
         "ok": report.ok,
         "message": report.message,
         "dead_experts": report.dead_experts,
         "undiscriminating": report.undiscriminating,
         "caveats": report.caveats,
+        # THE TWO THAT WERE MISSING. See the docstring.
+        "routing": report.routing,
+        "unmeasured": report.unmeasured,
         "experts": report.experts,
         "stages": {
             name: {

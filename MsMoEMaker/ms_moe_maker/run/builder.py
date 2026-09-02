@@ -16,6 +16,7 @@ stitch.py, router.py, export.py) are the machinery.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -600,6 +601,32 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
                 config, dict(specialist_dirs), held_paths=held or None,
                 spec={"num_samples": 12}, callback=cb.stage)
             print(experts_mod.format_report(gate))
+
+            # THE MATRIX GOES TO DISK, not only to stdout. `format_report`
+            # renders weight divergence, pairwise JS, the cross-domain loss
+            # matrix and the config audit as TEXT, and until now that text was
+            # the only copy that survived: the manifest got `gate.status` - one
+            # word - and everything that justified the word stayed in a
+            # scrollback. "Was there ever anything here to route on" is a
+            # question asked months later, while staring at a disappointing
+            # routing table, and the only other way to answer it is to re-run
+            # the fine-tunes.
+            #
+            # A FAILED WRITE MUST NOT LOOK LIKE A FAILED GATE. This gets its
+            # own try, so a full disk reports itself as a full disk rather than
+            # surfacing through the handler below as "gate error" - which would
+            # claim the experts were never compared when in fact they were, and
+            # a check that vanished reading as a check that could not run is
+            # the one failure mode this whole module exists to prevent.
+            gate_path = Path(config.output_root) / experts_mod.GATE_REPORT_NAME
+            try:
+                gate_path.write_text(
+                    json.dumps(gate.to_dict(), indent=2) + "\n",
+                    encoding="utf-8")
+            except OSError as exc:
+                print(f"[warn] the expert gate ran, but its report could not "
+                      f"be written to {gate_path}: {exc}", file=sys.stderr)
+
             result.artifacts[stages.GATE_EXPERTS] = gate.status
             if gate.findings:
                 cb.stage(stages.GATE_EXPERTS, "done",
