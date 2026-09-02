@@ -324,7 +324,26 @@ def _prepare_gguf_src(config, src_dir: str, cfg_dict: dict,
                         # num_experts/experts_per_tok ratio this code allows.
                         t = (t.float() * scale).to(t.dtype)
                     for dst in dsts:
-                        out[dst] = t
+                        # CLONE PER DESTINATION, and the reason is object
+                        # identity rather than value. `out[dst] = t` gave every
+                        # expert the SAME tensor object; safetensors refuses a
+                        # file where N names alias one storage, because nothing
+                        # in the format can say which of the N a reader should
+                        # get. It refuses at save_file - i.e. at stage 6 of 17,
+                        # hours into the build, which is the worst place to
+                        # learn it.
+                        #
+                        # NOT save_model, which the error message recommends:
+                        # it DELETES the duplicates and records them in
+                        # metadata for load_model to restore. convert_hf_to_gguf
+                        # opens the file directly and never calls load_model,
+                        # so following that advice would ship one expert per
+                        # dense layer and leave the other N-1 simply absent.
+                        #
+                        # N real copies on disk is correct here anyway: GGUF has
+                        # no notion of a shared expert tensor, and the converter
+                        # needs all N present as distinct entries.
+                        out[dst] = t.clone()
                 else:
                     out[k] = sf.get_tensor(k)
     for dst, kind, ref in extras:
