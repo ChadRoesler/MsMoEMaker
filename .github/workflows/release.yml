@@ -200,9 +200,18 @@ jobs:
           # files importing one proprietary namespace - and trained an expert
           # in one company's house style that every other check in the package
           # reported as healthy.
+          #
+          # `bundle` was added on purpose: it resolves a recipe and writes every
+          # default back into it, so handing somebody a recipe stops handing
+          # them your intentions and their defaults. A bare recipe is mostly
+          # sentinels meaning "you decide", and build_config decides using
+          # whichever ms-moe-maker is running - same file, different model, no
+          # error anywhere. It also records the sixteen fingerprint fields a
+          # recipe CANNOT express, so an import can diff them by name instead
+          # of leaving them to be discovered from a model that came out wrong.
           assert set(d["commands"]) == {
               "init", "build", "corpus", "smoke", "eval", "validate", "export",
-              "describe"}, d
+              "bundle", "describe"}, d
           # EVAL MODES ARE ALSO A CONTRACT, and were not being checked at all.
           # A consumer asking for --mode routing has to keep getting routing,
           # so removing or renaming one is breaking exactly like a verb.
