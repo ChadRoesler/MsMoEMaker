@@ -155,6 +155,20 @@ class Manifest:
     build_id: str = ""
     resolved: Dict[str, Any] = field(default_factory=dict)
     defaults_files: Dict[str, str] = field(default_factory=dict)
+    # WHAT THE FIELDS IN `resolved` MEAN, travelling with the run.
+    #
+    # {field: {"summary": str, "derived_from": str | None}}, keyed to exactly
+    # the fields `resolved` carries. It is stamped here rather than looked up
+    # by the reader because the reader cannot look it up: a base seren-theatre
+    # install has no ms-moe-maker to ask, and a run archived a year ago has to
+    # keep explaining itself after this package has moved on. A copy of these
+    # sentences living in the viewer is the failure this whole file exists to
+    # prevent, four times over.
+    #
+    # A field with no entry is simply absent, so a viewer renders no
+    # affordance for it - partial coverage degrades to silence, never to an
+    # empty tooltip. See config/knobs.py.
+    knobs: Dict[str, Any] = field(default_factory=dict)
     # Anything a future ms-moe-maker adds that this reader does not know about.
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -238,6 +252,7 @@ def write(run_dir: Path, manifest: Manifest) -> Path:
         "build_id": manifest.build_id,
         "resolved": dict(manifest.resolved),
         "defaults_files": dict(manifest.defaults_files),
+        "knobs": dict(manifest.knobs),
         "stages": [asdict(s) for s in manifest.stages],
     }
     payload.update(manifest.extra)
@@ -284,7 +299,7 @@ def read(run_dir: Path) -> Optional[Manifest]:
             f"understands ({SCHEMA_VERSION}). Upgrade the reader rather than "
             f"guessing at fields it has never seen.")
 
-    known = {"build_id", "resolved", "defaults_files",
+    known = {"build_id", "resolved", "defaults_files", "knobs",
              "schema_version", "recipe_id", "name", "size", "base", "experts",
              "started", "updated", "finished", "ok", "refusals", "stages"}
 
@@ -323,5 +338,6 @@ def read(run_dir: Path) -> Optional[Manifest]:
         resolved=raw.get("resolved") if isinstance(raw.get("resolved"), dict) else {},
         defaults_files=(raw.get("defaults_files")
                         if isinstance(raw.get("defaults_files"), dict) else {}),
+        knobs=raw.get("knobs") if isinstance(raw.get("knobs"), dict) else {},
         extra={k: v for k, v in raw.items() if k not in known},
     )

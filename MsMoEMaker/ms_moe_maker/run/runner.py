@@ -208,6 +208,12 @@ class Runner:
             _c = _cfg_mod.build_config(recipe, dryrun=bool(self.dryrun))
             self.manifest.resolved = _cfg_mod.build_fingerprint(_c)
             self.manifest.build_id = _cfg_mod.build_id(_c)
+            # The glossary for exactly the fields we just stamped - not the
+            # whole table. A row the playbill cannot show is a row it does not
+            # need explained, and keying the two together is what stops the
+            # manifest describing knobs this run does not have.
+            from ..config import knobs as _knobs_mod
+            self.manifest.knobs = _knobs_mod.for_fields(self.manifest.resolved)
         except Exception:
             pass
         self.manifest.defaults_files = dict(

@@ -341,14 +341,14 @@ your file.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `target_steps` | 1200 | Optimiser steps per expert. The single biggest lever on wall-clock: total ≈ `target_steps × experts × seconds-per-step`. |
+| `target_steps` | 1200 | Optimiser steps each specialist trains for. The single biggest lever on wall-clock: total is about `target_steps × experts × seconds-per-step`. |
 | `max_seq_length` | 2048 | Tokens per training row. Halving it roughly halves memory and time, and truncates long files. |
-| `per_device_batch` | 4 | Rows per forward pass. Raise until you OOM, then back off one. |
-| `grad_accum` | 2 | Batches per optimiser step. `per_device_batch × grad_accum` is your effective batch. |
-| `lora_r` | tier | Adapter rank — how much the expert is *allowed* to differ from the base. nano 32 / xavier 64 / spark 128, clamped to 1–256. |
-| `lora_alpha` | 32 | Scaling on the adapter. Leave it unless you know why. |
-| `lora_dropout` | 0.0 | Regularisation. Non-zero costs a little speed. |
-| `warmup_ratio` | 0.05 | Fraction of steps spent ramping the LR. |
+| `per_device_batch` | 4 | Rows the GPU processes at once. Raise it until you run out of memory, then back off one. |
+| `grad_accum` | 2 | How many of those batches are added up before the model is actually updated. `per_device_batch × grad_accum` is the effective batch. |
+| `lora_r` | tier | How far a specialist is allowed to move away from the base model. Bigger means more room to specialise and more weights to train, store and stitch; over a small corpus it mostly buys memorisation. |
+| `lora_alpha` | 32 | How strongly the trained difference is applied on top of the base. Leave it unless you know why you are moving it. |
+| `lora_dropout` | 0.0 | Randomly ignores part of the adapter on each step so it generalises instead of memorising. Non-zero costs a little speed. |
+| `warmup_ratio` | 0.05 | Fraction of the run spent easing the learning rate up from zero instead of hitting the model at full strength on step one. |
 | `warmup_floor` | 10 | Never warm up for fewer steps than this, however short the run. |
 | `collect_headroom` | 1.5 | How much more text to gather than the step budget strictly needs, so packing doesn't starve. |
 
@@ -369,12 +369,12 @@ budget's step count is the lever that actually moves enrichment.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `epochs` | 1.0 | Passes over the router mix. **The cheapest way to buy router steps.** |
-| `batch` | 8 | Per-device batch for the gate. **Must be > 1** so the load-balancing loss sees a mixed batch — at batch 1 every batch is one domain and the aux loss can't balance anything. |
-| `accum` | 1 | Gradient accumulation for the gate. |
-| `lr` | 1e-4 | Gate learning rate. |
-| `aux_loss_coef` | 0.02 | Load-balancing pressure. Mixtral's value, kept because lowering it bought nothing measurable and spent margin against collapse. |
-| `agent_mix_fraction` | 0.15 | Share of the mix drawn from generated (synth) experts. The rest split what's left, evenly. |
+| `epochs` | 1.0 | Passes over the router's mix. **The cheapest way to buy router steps** — another pass is free, more mix rows cost a corpus. |
+| `batch` | 8 | Rows the gate sees at once. **Must be more than 1**: the load-balancing loss needs several domains in one batch to mean anything, and at 1 every batch is a single domain and it can balance nothing. |
+| `accum` | 1 | How many of the gate's batches are added up before it is updated. Raising it buys fewer, steadier updates out of the same mix. |
+| `lr` | 1e-4 | How big a correction the gate makes each step. Too high and it slams onto one expert; too low and it never leaves the noise it started from. |
+| `aux_loss_coef` | 0.02 | How hard the gate is pushed to spread traffic instead of collapsing onto one expert. Mixtral's value, kept because lowering it bought nothing measurable and spent margin against collapse. |
+| `agent_mix_fraction` | 0.15 | Share of the router's mix taken from generated (synth) experts. The rest split what is left, evenly. |
 
 The number that actually governs the gate is **steps**, and steps are not a
 knob — they're arithmetic:
@@ -412,13 +412,13 @@ opinionated, and no amount of steps takes you past 2.0 at this topology.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `experts_per_tok` | 2 | Top-k. **Do not set this to 1** — see below. |
-| `norm_topk_prob` | true | Renormalise the top-k gate weights to sum to 1. |
-| `router_init` | random | `random` \| `zero`. `random` seeds small noise (as Switch and Mixtral do) so the gate isn't perfectly symmetric. `zero` exists only for the stitch's bit-equality check. |
-| `router_init_std` | 0.02 | Noise scale when `router_init: random`. |
-| `shared_expert_width` | 1 | Width multiplier for the always-on shared expert. |
-| `shared_expert_gate_fill` | 0.02 | Initial gate value for the shared expert. |
-| `dense_layers` | auto | `auto`, or an explicit list of layer indices to leave dense instead of MoE-ifying. |
+| `experts_per_tok` | 2 | How many experts each token is sent to. **1 is refused**: the single gate weight is then divided by itself, so nothing ever teaches the gate to choose. |
+| `norm_topk_prob` | true | Rescales the chosen experts' weights to sum to 1, so the gate decides the blend and not the overall volume. |
+| `router_init` | random | How the gate's weights start out. `random` seeds small noise so no two experts begin identical; `zero` exists only for the stitch's bit-equality check, and three trainings from a zero gate each collapsed onto a different single expert. |
+| `router_init_std` | 0.02 | How much noise the gate starts with when `router_init` is random. Too little and every expert looks the same to it on step one. |
+| `shared_expert_width` | 1 | Width of the always-on expert every token passes through whatever the gate chooses. At the default it is inert by construction and the routed experts do all the work. |
+| `shared_expert_gate_fill` | 0.02 | What the always-on expert's gate holds before training. It **must not be zero** — `silu(0)/0` is NaN after GGUF export, a break that only shows up outside Python. |
+| `dense_layers` | auto | Layers left as one ordinary feed-forward block instead of being split into experts, given as a list of layer indices. That block is the average of every specialist, so it costs no routing and carries no specialisation. |
 
 **`experts_per_tok: 1` is refused at validate, on purpose.** With `k=1` and
 `norm_topk_prob: true`, the single gate weight is divided by itself — it is
@@ -443,11 +443,11 @@ why `random` is the default.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `min_samples` | 2000 (500 dry) | Floor per expert. Below it, the stage fails instead of training on scraps. |
-| `max_samples` | 100k (10k dry) | Cap per expert. |
-| `router_mix_total` | 16000 (4000 dry) | Rows in the router's stratified mix. Also the numerator in the steps formula above; at the default batch 8 × accum 1 this is 2,000 router steps. |
-| `per_repo_cap` | 20 | Max files from **one repository, per language**. |
-| `max_shards` | 80 | How many corpus shards the scan may pull before giving up. ~0.57 GB each. |
+| `min_samples` | 2000 (500 dry) | Documents an expert must have collected before it is allowed to train. Below it the stage fails rather than train on scraps, and it rises on its own when the router's mix needs more than you asked for. |
+| `max_samples` | 100k (10k dry) | Ceiling on documents kept per expert. It caps collection; it never becomes a target. |
+| `router_mix_total` | 16000 (4000 dry) | Rows in the stratified mix the gate trains on. Divided by `batch × accum` and multiplied by `epochs`, this is the router's step count — the number that decides whether the MoE routes at all. |
+| `per_repo_cap` | 20 | Most files **one repository may contribute to one language**. Not a tuning knob: measured, a single enterprise codebase filled 78% of a C# corpus and the expert learned one company's house style instead of the language. |
+| `max_shards` | 80 | How many corpus shards the scan may pull before giving up, at roughly 0.57 GB each. |
 
 Two things here talk to each other, and you should know it before it surprises
 you:
@@ -475,7 +475,7 @@ shorter scan and you should mean it.
 | Knob | Default | What it does |
 |---|---|---|
 | `mode` | all | `routing` \| `quality` \| `experts` \| `all`. |
-| `held_out_fraction` | 0.1 | Share of each corpus reserved from training and used to test. |
+| `held_out_fraction` | 0.1 | Share of each corpus kept out of training and used to score the result. Raising it buys a more trustworthy score and takes text away from the expert; 0.95 and above is ignored, because it leaves nothing to train on. |
 | `num_samples` | 20 | Generations per expert for the quality half. |
 | `dead_threshold` | 1.2 | Enrichment below this marks an expert as not meaningfully preferred. |
 | `max_new_tokens` | -1 | Tokens generated per sample. `-1` = you decide: 256, or **1024 when the run writes thinking traces** — a `<think>` block alone routinely runs past 256, so a smaller budget stops mid-thought and `reasoned` reports "does not reliably reason" about a model that reasons fine. |
@@ -501,9 +501,9 @@ token forever.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `hardware_tier` | xavier | `nano` \| `xavier` \| `spark`. Picks the default size, LoRA rank and quant. |
+| `hardware_tier` | xavier | The box this build is aimed at. It picks the default model size, adapter rank and export quantisation whenever the recipe does not. |
 | `precision` | float16 | Compute dtype. |
-| `load_in_4bit` | false | Quantise the base for training. Buys memory, costs fidelity. |
+| `load_in_4bit` | false | Loads the base model at 4-bit while training. Buys memory, costs fidelity, and a specialist saved this way is refused by the stitcher for holding packed bytes instead of real matrices. |
 | `direct_load` | false | Skip the staging copy when loading checkpoints. |
 | `alloc_conf` | — | Passed straight to `PYTORCH_CUDA_ALLOC_CONF`. `expandable_segments:True` is the one that matters on unified memory. |
 | `llama_cpp` | (search) | Path to your llama.cpp build. **Put it here, not in an env var** — this is the one path most likely to differ per box, so a recipe that can't carry it is a recipe that exports nothing on your friend's machine. |

@@ -85,6 +85,26 @@ def _box_validators():
         return []
 
 
+def _box_knobs():
+    """What every resolved-config field means, as rows.
+
+    Same shape as `kinds` and `validators` beside it - {name, summary,
+    derived_from} - so a front-end reads all three the same way. Backstage is
+    the consumer this is for; the PLAYBILL reads the copy stamped into the run
+    manifest instead, because a viewer looking at an archived run has no
+    installed ms-moe-maker to ask.
+
+    Same defensiveness as every other _box_* helper: --describe promises exit 0
+    and one line of JSON, so a glossary that somehow fails to import degrades
+    to an empty list rather than taking the contract down.
+    """
+    try:
+        from .config import knobs as _k
+        return _k.describe()
+    except Exception:
+        return []
+
+
 def _box_reasoning():
     """Tag styles and model families this install knows about.
 
@@ -241,6 +261,10 @@ DESCRIBE = {
     # box offers is a consumer that breaks every time the package moves - and
     # `--describe` exists precisely so nobody has to.
     "validators": _box_validators(),
+    # WHAT THE NUMBERS IN A RUN MEAN. Keyed to the fields build_fingerprint
+    # emits, which is what the manifest's `resolved` block carries - so the
+    # same sentences explain a live install here and an archived run there.
+    "knobs": _box_knobs(),
     "registry_errors": _box_registry_errors(),
     "modes": list(_d.EVAL_MODES),
 }
