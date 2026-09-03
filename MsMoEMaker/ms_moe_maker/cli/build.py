@@ -7,6 +7,32 @@ from ..run.events import Events
 from ._common import _load_recipe
 
 
+# ── the resume refusal, as data ─────────────────────────────────────────────
+#
+# A refusal that names its own way out is only half a kindness if the thing
+# reading it cannot tell one way out from another. These are the three, in
+# one place, so the sentences printed on stderr and the `options` list on the
+# event stream are rendered from the SAME rows - a dashboard offering a
+# button cannot end up offering a flag this command does not have. That has
+# happened here before, in the other direction: seren-theatre grew an
+# `--allow-refusals` checkbox for a flag that never existed, and argparse
+# exited 2 on every build it started.
+#
+# `do` is what to DO, which is not always a flag - "build somewhere else" is
+# a config edit, and saying so as prose in a field called `flag` is how a
+# consumer ends up appending it to argv.
+RESUME_DRIFT = "resume_drift"
+RESUME_OPTIONS = [
+    {"id": "force", "do": "--force", "flag": "--force",
+     "what": "rebuild everything with the new settings",
+     "discards": True},
+    {"id": "defaults", "do": "--defaults <the old file>", "flag": None,
+     "what": "reproduce the original build", "discards": False},
+    {"id": "elsewhere", "do": "build somewhere else", "flag": None,
+     "what": "change roots.output, keep both", "discards": False},
+]
+
+
 def _cmd_build(args):
     """Run the full build pipeline.
 
@@ -260,19 +286,49 @@ def _cmd_build(args):
     # under the old settings; a fresh directory just gets restamped.
     changed, finished = runner.drift()
     if changed and finished and not translation.force:
-        say("\n  REFUSING TO RESUME: this run directory was built by a "
-            "different build.")
-        say(f"  {len(finished)} stage(s) already finished and would be kept "
-            f"as-is: {', '.join(finished)}")
+        headline = ("REFUSING TO RESUME: this run directory was built by a "
+                    "different build.")
+        kept = (f"{len(finished)} stage(s) already finished and would be kept "
+                f"as-is: {', '.join(finished)}")
+        say(f"\n  {headline}")
+        say(f"  {kept}")
         say("\n  What changed:")
         for c in changed:
             say(f"    · {c}")
         say("\n  Pick one:")
-        say("    --force                 rebuild everything with the new settings")
-        say("    --defaults <the old file>   reproduce the original build")
-        say("    build somewhere else    change roots.output, keep both")
-        events.error(stage="build",
-                     message="run directory belongs to a different build_id")
+        # Width from the rows, not a number typed here. `--defaults <the old
+        # file>` is 25 characters and the hardcoded 24 ran the two columns
+        # together into "...the old file>reproduce the original build".
+        wide = max(len(o['do']) for o in RESUME_OPTIONS) + 3
+        for opt in RESUME_OPTIONS:
+            say(f"    {opt['do']:<{wide}}{opt['what']}")
+        # THE EVENT SAYS EVERYTHING THE PROSE JUST SAID, and it is built from
+        # the same objects rather than from a second description of them.
+        #
+        # This refusal names three ways out and, until now, said all of it in
+        # sentences on stderr. seren-theatre's Backstage - which forks this
+        # command with --json and reads the events - had a one-line "belongs
+        # to a different build_id" and a wall of prose it could only render as
+        # a wall of prose. The operator was handed a diff to read and no way
+        # to act on it, from a program that had the diff as a list.
+        #
+        # `changed` entries are Change: str for the prose, .as_dict() for the
+        # table. One object, two shapes, no chance of them disagreeing.
+        events.error(
+            stage="build",
+            message="run directory belongs to a different build_id",
+            refusal=RESUME_DRIFT,
+            headline=headline,
+            kept=kept,
+            # ABSOLUTE. output_root is relative to the build's cwd, and the
+            # reader of this event is a browser three machines away deciding
+            # whether to keep that directory or point roots.output somewhere
+            # else. A bare "msmoe_dryrun_7B" does not answer that.
+            run_dir=str(Path(config.output_root).resolve()),
+            finished=list(finished),
+            changed=[str(c) for c in changed],
+            fields=[c.as_dict() for c in changed if hasattr(c, "as_dict")],
+            options=list(RESUME_OPTIONS))
         events.done(ok=False, errors=1, warnings=0)
         return 1
     if changed:

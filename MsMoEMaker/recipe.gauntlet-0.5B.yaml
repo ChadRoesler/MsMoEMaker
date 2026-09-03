@@ -35,46 +35,27 @@ experts:
     source: 
       kind: stack
       language: C#
+    tokens: 12_000_000
   # kind=hf - the dedicated dataset collector.
   - name: powershell
     source: 
       kind: hf
       repo: adamo1139/powershell_thestack
       text_field: content
-  # kind=gh - the tarball collector; default glob (**/*.md) applies, so this
-  # also exercises the 3.9 sentinel fix.
-  - name: docs
-    source: 
-      kind: gh
-      repo: mdn/content
-      glob: "files/**/*.md"
-  # kind=local - offline notes. Preflight checks this path BEFORE anything
-  # expensive (tier 3/4); see the header for how to fill it.
-  - name: notes
-    source: 
-      kind: local
-      path: ./gauntlet_notes
-  # Synth shape #1: R1-distill reasoning traces into ONE specialist, on a
-  # base that cannot reason. Explicit reasoning teacher + the reasoning
-  # teacher's max_new knob (tier 2).
+    tokens: 12_000_000
   - name: shell
-    source:
-      kind: synth
-      teacher: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
-  # Synth shape #3: plain domain traces (no think, no tools) with a packaged
-  # question-template file and a per-source trace count (tier 2).
-  - name: lore
-    source:
-      kind: synth
-      teacher: Qwen/Qwen2.5-7B-Instruct
-      templates: dnd
-      examples: 250
+    source: 
+      kind: stack
+      language: Shell
+    tokens: 12_000_000
+
 
 # Synth shape #2: the MCP tool-call expert. A mapping (even one that changes
 # nothing but the name) exercises the parse path; the box's defaults fill the
 # teacher.
 tools_expert: 
   name: agentcore
+  examples: 10000
 
 # Synth shape #4: the ROSTER reasoning expert, injected by flag rather than
 # written into `experts:`.
@@ -88,11 +69,11 @@ tools_expert:
 # the register of deliberation instead of one subject.
 reasoning_expert:
   name: deliberation
-  examples: 200               # per-expert trace count, like `lore` above
+  examples: 10000               # per-expert trace count, like `lore` above
 
 abliterate:                   # tier 5: the decensor pass, adapter export
   enabled: true               #   exercises the "adapter is loadable" fix
-  n_trials: 60                #   a gauntlet-sized study, not 200
+  n_trials: 200                #   a gauntlet-sized study, not 200
   seed: 42
   trial_index: 0              #   deterministic: first Pareto-front trial
   checkpoint_action: continue #   resume the study, never re-run it

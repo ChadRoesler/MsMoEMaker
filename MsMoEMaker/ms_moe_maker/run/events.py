@@ -63,8 +63,23 @@ class Events:
     def warning(self, message: str) -> None:
         self.emit("warning", message=message)
 
-    def error(self, stage: str, message: str) -> None:
-        self.emit("error", stage=stage, message=message)
+    def error(self, stage: str, message: str, **fields: Any) -> None:
+        """An error, with room for the structure the prose was flattening.
+
+        THE EXTRA FIELDS EXIST BECAUSE THE PROSE WAS THE ONLY COPY. The
+        resume refusal in cli/build.py knows two LISTS - which stages already
+        finished, and which fields moved - and it printed them through say()
+        while this event carried one flat sentence. So anything reading the
+        event stream got "run directory belongs to a different build_id" and
+        had to go scrape stderr to learn what actually changed. That is what
+        seren-theatre's Backstage was reduced to, and it did it badly.
+
+        **fields rather than a second method, because the vocabulary is the
+        point: `error` is still `error` to anything that already reads it, and
+        a consumer that does not know a key ignores it. Emitting less than we
+        know is the one thing this file exists to stop.
+        """
+        self.emit("error", stage=stage, message=message, **fields)
 
     def done(self, ok: bool, **kw: Any) -> None:
         self.emit("done", ok=ok, **kw)

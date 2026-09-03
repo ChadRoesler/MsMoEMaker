@@ -125,6 +125,80 @@ def _is_generated(source: Any) -> bool:
     return bool(kind and kind.generated)
 
 
+class Change(str):
+    """One drifted field. READS as the prose line, CARRIES the parts.
+
+    WHY A str SUBCLASS AND NOT A dataclass. Two consumers want two shapes of
+    the same fact and neither may be the copy that goes stale:
+
+        cli/build.py  prints it   -> `say(f"    * {c}")`
+        events.error  emits it    -> a field/was/now row a dashboard renders
+
+    The old code had only the prose, so seren-theatre's Backstage showed the
+    operator a wall of text it had to split on " -> " to make a table of -
+    parsing prose, from a program that had the tuple and threw it away. The
+    obvious fix is to return both, which means two lists, which means a third
+    place where they can disagree. Being a str instead means there is ONE
+    object: `str(c)` is what gets printed and `c.as_dict()` is what gets
+    emitted, and no edit can make them describe different things.
+
+    Every existing caller keeps working untouched - f-strings, sorting, `==`
+    against a plain string in the tests, and json.dumps(default=str), which
+    serialises a str subclass as the string it is.
+    """
+
+    field: str
+    was: Any
+    now: Any
+
+    def __new__(cls, field: str, was: Any = None, now: Any = None,
+                text: Optional[str] = None) -> "Change":
+        # `text` is for the entries that are NOT a field diff at all - "the
+        # previous manifest is unreadable", "this run predates build ids".
+        # Those are sentences about the comparison itself; they carry no
+        # field, and a renderer keys off that rather than off a sentinel.
+        rendered = text if text is not None else f"{field}: {was!r} -> {now!r}"
+        obj = super().__new__(cls, rendered)
+        obj.field = field
+        obj.was = was
+        obj.now = now
+        return obj
+
+    @property
+    def kind(self) -> str:
+        """moved | first-recorded | no-longer-recorded | note.
+
+        THE ONE THING A READER HAS TO BE ABLE TO TELL APART. Resuming into a
+        directory built before a field existed reports that field as changed
+        - correctly, because unknown is not unchanged - and on a 92-field
+        config that is seventy-odd rows of "the old manifest never said",
+        with the ONE knob somebody actually moved sitting in the middle of
+        them. Rendered identically, the important line is buried in a list
+        nobody reads, which is the wall of text this whole change is about.
+
+        Decided HERE, off the sentinel fingerprint_diff actually writes,
+        rather than by a consumer matching the string "(absent)" - one fact,
+        in the place that owns it.
+        """
+        if self.field is None:
+            return "note"
+        from ..config.pipeline import ABSENT
+        if self.was == ABSENT:
+            return "first-recorded"
+        if self.now == ABSENT:
+            return "no-longer-recorded"
+        return "moved"
+
+    def as_dict(self) -> Dict[str, Any]:
+        # `was`/`now` go through repr() rather than out as live objects: a
+        # resolved config value can be a Path, a set, or an enum, and the far
+        # end of this is a browser. The prose already showed the repr, so the
+        # table and the sentence say the same thing about the same value.
+        return {"field": self.field, "text": str(self), "kind": self.kind,
+                "was": None if self.field is None else repr(self.was),
+                "now": None if self.field is None else repr(self.now)}
+
+
 class Runner:
     """Drives one build and keeps the manifest honest while it runs."""
 
@@ -320,9 +394,10 @@ class Runner:
             try:
                 prev = mf.read(self.run_dir)
             except mf.UnreadableManifest:
-                return (["the previous manifest is unreadable AND this run's "
+                return ([Change(None, text=
+                         "the previous manifest is unreadable AND this run's "
                          "settings could not be fingerprinted - resume cannot "
-                         "be verified from either side"],
+                         "be verified from either side")],
                         ["unknown"])
             except Exception:
                 prev = None
@@ -330,8 +405,9 @@ class Runner:
                 return [], []
             finished = [s.id for s in prev.stages
                         if s.status in (mf.DONE, mf.SKIPPED)]
-            return (["this run's settings could not be fingerprinted, so "
-                     "resume cannot be verified against the previous build"],
+            return ([Change(None, text=
+                     "this run's settings could not be fingerprinted, so "
+                     "resume cannot be verified against the previous build")],
                     finished or ["unknown"])
         try:
             prev = mf.read(self.run_dir)
@@ -340,8 +416,9 @@ class Runner:
             # by the disk-full preflight warns about) used to read as "no
             # drift" - the one guard between an edited knob and a
             # mixed-settings model, disabled by its own input.
-            return (["the previous manifest is unreadable (corrupt or "
-                     "truncated) - refusing to guess about resume"],
+            return ([Change(None, text=
+                     "the previous manifest is unreadable (corrupt or "
+                     "truncated) - refusing to guess about resume")],
                     ["unreadable"])
         except Exception:
             return [], []
@@ -352,25 +429,28 @@ class Runner:
             # settings are unknowable, which is not the same as "unchanged".
             finished = [s.id for s in prev.stages
                         if s.status in (mf.DONE, mf.SKIPPED)]
-            return (["this run predates build ids - its settings are "
-                     "unknown, so resume cannot be verified"],
+            return ([Change(None, text=
+                     "this run predates build ids - its settings are "
+                     "unknown, so resume cannot be verified")],
                     finished or ["unknown"])
         if prev.build_id == self.manifest.build_id:
             return [], []
         finished = [s.id for s in prev.stages if s.status in (mf.DONE, mf.SKIPPED)]
         try:
             from ..config.pipeline import fingerprint_diff
-            changed = [f"{k}: {was!r} -> {now!r}"
+            changed = [Change(k, was, now)
                        for k, was, now in fingerprint_diff(
                            prev.resolved or {}, self.manifest.resolved or {})]
         except Exception:
-            changed = ["(the previous manifest recorded no resolved config)"]
+            changed = [Change(None, text=
+                              "(the previous manifest recorded no resolved config)")]
         if not changed:
-            changed = [f"build_id {prev.build_id} -> {self.manifest.build_id}"]
+            changed = [Change("build_id", prev.build_id,
+                              self.manifest.build_id)]
         for path, digest in (prev.defaults_files or {}).items():
             now = (self.manifest.defaults_files or {}).get(path)
             if now and now != digest:
-                changed.append(f"defaults file {path}: {digest} -> {now}")
+                changed.append(Change(f"defaults file {path}", digest, now))
         return changed, finished
 
     def run(self) -> int:

@@ -294,8 +294,20 @@ def test_the_diff_reports_a_field_only_one_side_has():
 
 
 def test_the_diff_explains_an_unpinnable_field_with_its_reason():
-    field = "use_vllm"
-    out = S.diff_fingerprints({field: True}, {field: False})
-    assert "MSMOE_VLLM" in out[field]["why"], (
-        "an unpinnable field that differs must say WHY it could not travel, "
-        "or the reader has a mystery instead of an action")
+    """DRAWN FROM THE REGISTRY, not named here.
+
+    This used to hardcode use_vllm as its example, and broke the day that
+    field earned a recipe key - correctly, but the failure read as a puzzle
+    about a missing env var rather than as a finding. A test about "every
+    unpinnable field explains itself" should ask the list: a field leaving
+    it is then a non-event, and a field arriving in it is covered for free.
+    """
+    from ms_moe_maker.config.knobs import UNPINNABLE
+
+    assert UNPINNABLE, "nothing is unpinnable, which cannot be right"
+    for field, reason in UNPINNABLE.items():
+        out = S.diff_fingerprints({field: True}, {field: False})
+        assert out[field]["why"] == reason, (
+            f"{field} differs between two boxes and the diff does not say "
+            f"WHY it could not travel - that is a mystery, not an action")
+

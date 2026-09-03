@@ -221,6 +221,23 @@ class Runtime:
     load_in_4bit: Optional[bool] = None
     direct_load: bool = False
     alloc_conf: str = ""
+    # SERVE THE TEACHER THROUGH vLLM. Previously env-only (MSMOE_VLLM),
+    # which is the same mistake llama_cpp used to make one field down: the
+    # knob that most changes how long a build takes was the one a recipe
+    # could not carry, so "make the synth stage faster" meant editing the
+    # environment of whatever launched the build - a systemd unit, if the
+    # build was started from a viewer.
+    #
+    # It is not only a speed knob, which is why it belongs in the recipe
+    # rather than the shell: it moves teacher_batch from 96 to 512 and
+    # therefore changes WHAT gets generated, and it is already one of the
+    # fingerprinted fields for exactly that reason.
+    #
+    # Bool-or-None like load_in_4bit above, and for the same reason: False
+    # is a real answer that must not read as "you did not say". None leaves
+    # MSMOE_VLLM to the environment, so nothing changes for anyone who
+    # never writes it.
+    use_vllm: Optional[bool] = None
     hardware_tier: str = "xavier"  # nano | xavier | spark
     # WHERE llama.cpp LIVES. Previously env-only (MSMOE_LLAMA_CPP), which
     # makes the one path most likely to differ per box the one thing a recipe

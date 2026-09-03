@@ -347,6 +347,67 @@ def _check_exporter(pf: Preflight, config) -> None:
            "https://github.com/ggml-org/llama.cpp and set MSMOE_LLAMA_CPP")
 
 
+def _needs_a_teacher(config) -> bool:
+    """Will this build stand a teacher model up at all?
+
+    Three ways to acquire synth work, and a recipe with none of them never
+    constructs a teacher - so demanding its serving stack would be a
+    preflight failure about a stage that is not in the plan.
+    """
+    return bool(getattr(config, "synth_experts", None)
+                or getattr(config, "tools_expert_name", "")
+                or getattr(config, "reasoning_expert_name", "")
+                or getattr(config, "reasoning_experts", None))
+
+
+def _check_generator(pf: Preflight, config) -> None:
+    """Which stack serves the teacher, and is it actually here?
+
+    THE ASYMMETRY THIS FIXES. llama.cpp has had a check since the start and
+    it is a WARNING, correctly: a missing exporter costs you the GGUF and
+    you still keep the checkpoint, which is a real result. vLLM had NO
+    check at all, and `from vllm import LLM` sat bare inside the teacher's
+    constructor - so a box without it got a ModuleNotFoundError in the
+    synth stage, which on a real gauntlet is roughly fifty minutes past
+    preflight, past abliterate and past corpus collection, on a booked GPU.
+
+    FAIL, NOT WARN, and the difference from llama.cpp is the whole point:
+    there is no degraded result here. Quietly falling back to transformers
+    would produce a corpus generated at batch 96 by a different sampler,
+    under a build_id whose fingerprint says vLLM - the artifact and its
+    claim would disagree, which is worse than refusing.
+
+    find_spec, not import: preflight is the laptop answer and must not pull
+    a serving stack and a CUDA context in to decide whether one exists.
+
+    It reports on the plain path too. "transformers at batch 96" is the
+    answer to "why is synth taking three hours", said in the place somebody
+    is already looking.
+    """
+    import importlib.util
+
+    if not _needs_a_teacher(config):
+        return
+
+    batch = getattr(config, "teacher_batch", 0)
+    if not getattr(config, "use_vllm", False):
+        pf.add("teacher", PASS, f"transformers, batch {batch}",
+               "")
+        return
+
+    if importlib.util.find_spec("vllm") is None:
+        pf.add("teacher", FAIL,
+               "runtime.use_vllm is on and vllm is not installed",
+               "pip install vllm on the box that builds, or set "
+               "`runtime: {use_vllm: false}` in the recipe. Falling back "
+               "silently is not offered: use_vllm moves the teacher batch "
+               "from 96 to 512 and is part of the build fingerprint, so a "
+               "corpus made without it would not be the corpus this "
+               "build_id describes.")
+        return
+    pf.add("teacher", PASS, f"vLLM, batch {batch}")
+
+
 def _check_sources(pf: Preflight, recipe) -> None:
     """Anything checkable about the corpora, without fetching them."""
     from ..data import corpus as corpus_mod
@@ -382,6 +443,7 @@ def run(config, recipe, offline: bool = False,
     have_torch = _check_training_stack(pf)
     _check_roots(pf, config)
     _check_sources(pf, recipe)
+    _check_generator(pf, config)
     if have_torch:
         _check_base_model(pf, config, offline=offline)
     _check_datasets(pf, recipe, offline=offline)

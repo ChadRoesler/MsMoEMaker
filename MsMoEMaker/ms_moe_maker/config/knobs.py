@@ -242,7 +242,9 @@ KNOBS: Dict[str, Knob] = {
     "use_vllm": Knob(
         "Serves the teacher through vLLM instead of plain transformers. Much "
         "faster generation, and a second serving stack to install and keep "
-        "happy."),
+        "happy. Also moves the teacher batch from 96 to 512, so it changes "
+        "what gets generated and not only how fast.",
+        recipe="runtime.use_vllm"),
     "vllm_max_len": Knob(
         "Longest prompt-plus-answer the vLLM teacher will hold in one "
         "request. Too small and long traces are cut off mid-sentence; too "
@@ -535,8 +537,13 @@ def readme_rows() -> Dict[str, str]:
 # on purpose rather than a hole that opens quietly.
 UNPINNABLE: Dict[str, str] = {
     # -- the shell decides ------------------------------------------------
-    "use_vllm": "env: MSMOE_VLLM. Which generator produced the corpus is not "
-                "recorded anywhere on disk.",
+    # use_vllm USED TO LIVE HERE, with the reason "which generator produced
+    # the corpus is not recorded anywhere on disk". That was true, and it
+    # was an argument for giving it a recipe key rather than for leaving it
+    # unrecordable: it is a fingerprinted field that changes the corpus, so
+    # a bundle that could not say which generator made the data was a
+    # bundle missing something it needed. It is `runtime.use_vllm` now and
+    # stamps like any other knob.
     "use_unsloth": "env: MSMOE_UNSLOTH.",
     "gradient_checkpointing": "env: MSMOE_GRAD_CKPT.",
     # -- literals in build_config -----------------------------------------

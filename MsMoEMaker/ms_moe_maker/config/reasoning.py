@@ -270,8 +270,35 @@ def split(text: str, style: Optional[ReasoningStyle]) -> Tuple[str, str, bool]:
         return think, (answer or text), bool(think)
 
     open_i = text.find(style.open)
+
+    # THE OPENER IS OFTEN IN THE PROMPT, NOT IN THE COMPLETION, and this
+    # branch is what that costs when it is missing.
+    #
+    # DeepSeek-R1 and its distills put "<think>\n" at the END of the
+    # generation prompt: the model wakes up already inside the block and
+    # emits ONLY the closer. Requiring the pair therefore reports "did not
+    # reason" for the most reasoning-shaped output there is, and every
+    # caller downstream believes it - the generator falls back to a marker
+    # prompt, the marker cuts at the wrong seam, and the corpus ends up
+    # with the model's real answer filed under `think`.
+    #
+    # A lone closer is not ambiguous. Nothing else in a completion ends a
+    # block that was never opened here, so everything before it is the
+    # thinking and everything after it is the answer. Reading it that way
+    # is the lenient half of strict-train/lenient-infer; we still WRITE the
+    # pair.
     if open_i == -1:
-        return "", text, False
+        lone = text.find(style.close)
+        if lone == -1:
+            return "", text, False
+        think = text[:lone].strip()
+        answer = text[lone + len(style.close):].strip()
+        # Both halves must exist. A completion that is nothing but a closing
+        # tag is not a reasoned answer, it is a malformed one.
+        if not think or not answer:
+            return "", text, False
+        return think, answer, True
+
     after = text[open_i + len(style.open):]
     close_i = after.find(style.close)
     if close_i == -1:

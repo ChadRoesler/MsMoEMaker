@@ -70,6 +70,14 @@ def translate(recipe: Any, force: bool = False,
         if getattr(rt, "direct_load", False):
             tr.env["MSMOE_DIRECT_LOAD"] = "1"
             agree("runtime.direct_load", True)
+        # `is not None`, NOT truthiness. `use_vllm: false` in a recipe is a
+        # deliberate "plain transformers on this box" and has to beat an
+        # MSMOE_VLLM=1 in the environment; a truthiness test would silently
+        # drop it and hand the recipe's author the opposite of what they
+        # wrote. _env_bool already reads "0" as false.
+        if getattr(rt, "use_vllm", None) is not None:
+            tr.env["MSMOE_VLLM"] = "1" if rt.use_vllm else "0"
+            agree("runtime.use_vllm", bool(rt.use_vllm))
         if getattr(rt, "hardware_tier", ""):
             tr.env["MSMOE_TIER"] = rt.hardware_tier
             agree("runtime.hardware_tier", rt.hardware_tier)

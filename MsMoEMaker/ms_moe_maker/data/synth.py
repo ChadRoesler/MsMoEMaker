@@ -1151,8 +1151,8 @@ def generate_agent_traces(config, callback=None,
                     continue
 
                 conv = msgs + [{"role": "assistant", "content": text}]
-                text_out = (base_tokenizer.apply_chat_template(conv, tokenize=False)
-                            + base_tokenizer.eos_token)
+                text_out = _finish(base_tokenizer.apply_chat_template(
+                    conv, tokenize=False), base_tokenizer)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
                 kept += 1
                 if kept >= target:
@@ -1321,11 +1321,30 @@ def generate_reasoning_traces(config, expert_name, callback=None,
         _reasoning_msgs(tag_system, display, 0, templates), tokenize=False,
         add_generation_prompt=True)
     probe_text = (teacher.complete([probe_prompt]) or [""])[0]
-    _, _, speaks_tags = _reasoning.split(probe_text, teacher_style)
+
+    # ASK ABOUT THE CLOSER, NOT THE PAIR, and this one line decided the
+    # shape of ten thousand traces.
+    #
+    # `split` used to be the whole test, and split needed BOTH tags. An
+    # R1-distill puts "<think>\n" at the end of its generation prompt, so
+    # the completion contains only "</think>" - reasoning-shaped output,
+    # reported as "does not reason". That flipped the run to marker_system,
+    # which asks for an ANSWER: line, and an R1 model obliges by writing
+    # THREE things: its reasoning, its closer, a full answer, and THEN a
+    # one-line summary after the marker. The marker split then cut at the
+    # last seam - filing the real answer under `think` and training the
+    # specialist on the summary. One trace came out with an entire Python
+    # function inside the think block and the single word
+    # `calculate_average` as the answer.
+    #
+    # `split` now understands a lone closer, so this is belt and braces:
+    # either reading finding a delimiter means the teacher speaks tags and
+    # the marker crutch is not needed.
+    speaks_tags = _speaks_tags(probe_text, teacher_style)
     system = tag_system if speaks_tags else marker_system
     if not speaks_tags:
-        print(f"   teacher {teacher_model or config.teacher_model} does not "
-              f"emit {teacher_style.open}…{teacher_style.close}; "
+        print(f"   teacher {teacher_model or config.teacher_model} emits "
+              f"neither {teacher_style.open} nor {teacher_style.close}; "
               f"falling back to the {marker!r} marker")
 
     partial = out_path + ".partial"
@@ -1356,13 +1375,29 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     # then write ANSWER:" baked into every example.
     clean_system = f"You are a {display} specialist."
     sample = ""
+    # THE CURSOR SURVIVES THE BATCH, and it did not.
+    #
+    # `for i in range(batch_n)` restarts at 0 every batch, and the
+    # non-roster path picks `templates[i % len(templates)]`. So a run asked
+    # the SAME first templates[:batch_n] questions, batch after batch, for
+    # the whole corpus - ten thousand traces drawn from whatever fits in
+    # one batch. Every row is well formed, which is why nothing said so;
+    # the tell is two byte-identical traces hours apart.
+    #
+    # _reasoning_msgs' own docstring is about exactly this failure on the
+    # roster path ("one counter advances both in lockstep"). The fix there
+    # was independent RNG draws; the fix here is a counter that keeps
+    # counting, which also keeps template coverage EVEN rather than clumpy.
+    cursor = kept
+    t0, t_kept0 = time.time(), kept
     sink = open(partial, "a", buffering=1)
     try:
         while kept < n:
             batch_n = min(teacher.batch_size, (n - kept) * 2)
-            batch = [_reasoning_msgs(system, display, i, templates,
+            batch = [_reasoning_msgs(system, display, cursor + i, templates,
                                      domains, rnd)
                      for i in range(batch_n)]
+            cursor += batch_n
             prompts = [teacher.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
             for msgs, text in zip(batch, teacher.complete(prompts)):
@@ -1370,7 +1405,16 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 if not sample:
                     sample = text
                 think, answer = _parse_teacher_output(text, teacher_style)
-                if not think or not answer:
+                # PRESENCE IS NOT SHAPE, and that gap cost a whole corpus.
+                # The test used to be "both halves exist", which a `think`
+                # consisting of nothing but "</think>" passes, and which
+                # the 92% accept rate then reported as a healthy run for
+                # nine thousand malformed rows. A stray delimiter in either
+                # half means the split landed on the wrong seam; that is a
+                # reject, and finding it at trace 1 is the entire point.
+                if not think or not answer or _has_delimiter(
+                        think, teacher_style) or _has_delimiter(
+                        answer, teacher_style):
                     rejects += 1
                     continue
                 # Re-emit in the TARGET delimiter so the specialist learns
@@ -1382,15 +1426,33 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                     msgs[1],  # the user task (msgs[0] is the teacher's system)
                     {"role": "assistant", "content": canonical},
                 ]
-                text_out = (base_tokenizer.apply_chat_template(
-                    conv, tokenize=False) + base_tokenizer.eos_token)
+                text_out = _finish(base_tokenizer.apply_chat_template(
+                    conv, tokenize=False), base_tokenizer)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
                 kept += 1
                 if kept >= n:
                     break
-            acc = 100.0 * (kept - resumed) / max(attempted, 1)
+            # THE SAME READING THE TOOLS LOOP GIVES. It had t0 and a rate
+            # and an ETA; this one had neither, so the longest stage of the
+            # build was the one you could not put a number on. The rate is
+            # a cumulative session average, not a per-batch figure, so a
+            # slow batch does not make it jump.
+            session = kept - resumed
+            acc = 100.0 * session / max(attempted, 1)
+            rate = session / max(time.time() - t0, 1e-9)
+            eta = (n - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
-                  f"rejects {rejects})")
+                  f"rejects {rejects}, {rate:.1f}/s, ETA {eta:.0f} min)")
+            if callback:
+                # INSIDE THE LOOP. Every callback in this file fired either
+                # before the loop or after os.replace, so between "stage
+                # started" and "stage done" - two hours - the manifest and
+                # the event stream said nothing at all, and a viewer had to
+                # scrape stderr to find a number this loop prints a hundred
+                # times.
+                callback(st.DATA_SYNTH, "running",
+                         f"{expert_name}: {kept}/{n} reasoning traces "
+                         f"({rate:.1f}/s, ETA {eta:.0f} min)")
             # Tripwire: a teacher that never separates thinking from an answer
             if attempted > 200 and ((kept - resumed) / max(attempted, 1)) < 0.05:
                 raise RuntimeError(
@@ -1466,12 +1528,17 @@ def generate_domain_traces(config, expert_name, callback=None,
 
     resumed = kept
     attempted, rejects = 0, 0
+    # See the note in generate_reasoning_traces: a per-batch index asks the
+    # same handful of questions for the whole run.
+    cursor = kept
+    t0 = time.time()
     sink = open(partial, "a", buffering=1)
     try:
         while kept < n:
             batch_n = min(teacher.batch_size, (n - kept) * 2)
-            batch = [_reasoning_msgs(system, display, i, templates)
+            batch = [_reasoning_msgs(system, display, cursor + i, templates)
                      for i in range(batch_n)]
+            cursor += batch_n
             prompts = [teacher.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
             for msgs, text in zip(batch, teacher.complete(prompts)):
@@ -1482,14 +1549,22 @@ def generate_domain_traces(config, expert_name, callback=None,
                     continue
                 conv = [msgs[0], msgs[1],
                         {"role": "assistant", "content": answer}]
-                text_out = (base_tokenizer.apply_chat_template(
-                    conv, tokenize=False) + base_tokenizer.eos_token)
+                text_out = _finish(base_tokenizer.apply_chat_template(
+                    conv, tokenize=False), base_tokenizer)
                 sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
                 kept += 1
                 if kept >= n:
                     break
-            acc = 100.0 * (kept - resumed) / max(attempted, 1)
-            print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, rejects {rejects})")
+            session = kept - resumed
+            acc = 100.0 * session / max(attempted, 1)
+            rate = session / max(time.time() - t0, 1e-9)
+            eta = (n - kept) / max(rate, 1e-9) / 60
+            print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
+                  f"rejects {rejects}, {rate:.1f}/s, ETA {eta:.0f} min)")
+            if callback:
+                callback(st.DATA_SYNTH, "running",
+                         f"{expert_name}: {kept}/{n} traces "
+                         f"({rate:.1f}/s, ETA {eta:.0f} min)")
     finally:
         sink.close()
         teacher.close()
@@ -1533,6 +1608,73 @@ def _reasoning_msgs(system: str, display: str, i: int, templates,
     ]
 
 
+def _finish(rendered: str, tokenizer) -> str:
+    """A rendered conversation, ending in exactly one EOS.
+
+    All three synth loops did `apply_chat_template(...) + eos_token`, and a
+    Qwen template already closes the assistant turn with <|im_end|> - so
+    every row of every corpus ended "<|im_end|>\\n<|im_end|>" and every
+    training target carried a spurious token after the stop. Cheap to fix,
+    invisible until you read a row.
+
+    CHECKED, NOT ASSUMED. Not every chat template closes the final turn;
+    dropping the append unconditionally would leave those corpora with no
+    stop at all, which is a worse failure than a doubled one.
+    """
+    eos = getattr(tokenizer, "eos_token", "") or ""
+    if not eos:
+        return rendered
+    return rendered if rendered.rstrip().endswith(eos) else rendered + eos
+
+
+def _speaks_tags(probe_text: str, style) -> bool:
+    """Did the teacher emit its style's delimiter at all?
+
+    ITS OWN FUNCTION BECAUSE THIS ONE BOOLEAN DECIDED TEN THOUSAND TRACES,
+    and it spent its life as a bare expression in the middle of a four
+    hundred line generator where nothing could reach it to check.
+
+    The question is emphatically NOT "does split() succeed on this sample".
+    R1 and its distills put the opener in the generation PROMPT, so the
+    completion carries only the closer - the most reasoning-shaped output
+    there is, formerly reported as prose. That answer flipped the run to a
+    marker prompt, which asked an R1 model for an `ANSWER:` line, which it
+    supplied AFTER writing a complete answer - so the marker split filed
+    the real answer under `think` and trained the specialist on a summary.
+
+    So: a delimiter anywhere means the teacher speaks tags. `split` is
+    consulted first because it now understands the lone-closer shape and is
+    the stricter reading; the raw containment check is the backstop for a
+    probe that emitted a closer with an empty half, which says nothing
+    about the teacher and everything about one unlucky draw.
+    """
+    # Imported here rather than at module scope, like every other use of
+    # this package in this file: synth is imported by the corpus stage on
+    # boxes that never reach a teacher.
+    from ..config import reasoning as _reasoning
+
+    if not probe_text or style is None:
+        return False
+    if _reasoning.split(probe_text, style)[2]:
+        return True
+    close = getattr(style, "close", "")
+    return bool(close and close in probe_text)
+
+
+def _has_delimiter(half: str, style) -> bool:
+    """Does a parsed half still carry a reasoning tag?
+
+    Its own function because two places ask - the generator rejects on it,
+    and a repair pass keys off it - and because a check this cheap has no
+    business being written twice.
+    """
+    if not half or style is None:
+        return False
+    return any(tag and tag in half
+               for tag in (getattr(style, "open", ""),
+                           getattr(style, "close", "")))
+
+
 def _parse_teacher_output(text: str, style) -> tuple:
     """(think, answer) from a teacher's raw output.
 
@@ -1541,14 +1683,50 @@ def _parse_teacher_output(text: str, style) -> tuple:
     R1-distill). Both halves must be non-empty for a trace to pass.
     """
     from ..config.reasoning import split
+
+    marker = getattr(style, "answer_marker", "") or "ANSWER:"
+
+    def _clean(half: str) -> str:
+        """No stray delimiters in a half. THIS IS NOT TIDYING.
+
+        The re-emit below wraps `think` in the target tags, so a `think`
+        that still carries a "</think>" produces "</think></think>" in the
+        corpus - and eval, which uses this same splitter to READ, then cuts
+        at the first closer and scores an answer that begins with a stray
+        tag. A corpus-wide constant subtracted from every score, looking
+        exactly like a specialist that came out weak.
+        """
+        out = half
+        for tag in (getattr(style, "open", ""), getattr(style, "close", "")):
+            if tag:
+                out = out.replace(tag, " ")
+        return out.strip()
+
+    # THE DELIMITER FIRST, ALWAYS. `split` now understands a lone closer,
+    # so a teacher that reasons in tags is read as reasoning in tags even
+    # when its opener lived in the prompt - and the marker below stays what
+    # it was meant to be, a fallback for teachers that emit no delimiter at
+    # all rather than the path every R1 model took.
     think, answer, reasoned = split(text, style)
     if reasoned and think and answer:
-        return think, answer
-    marker = getattr(style, "answer_marker", "") or "ANSWER:"
+        # A teacher told to write ANSWER: will often ALSO write it, after a
+        # perfectly good answer. Keep the answer and drop the summary: the
+        # full response is the thing worth learning, and training on the
+        # one-liner is what produced a trace whose entire response was the
+        # word `calculate_average`.
+        cut = answer.upper().find(marker.upper())
+        if cut > 0:
+            answer = answer[:cut].strip() or answer
+        elif cut == 0:
+            answer = answer[len(marker):].strip()
+        think, answer = _clean(think), _clean(answer)
+        if think and answer:
+            return think, answer
+
     idx = text.upper().find(marker.upper())
     if idx != -1:
-        think = text[:idx].strip()
-        answer = text[idx + len(marker):].strip()
+        think = _clean(text[:idx])
+        answer = _clean(text[idx + len(marker):])
         if think and answer:
             return think, answer
     return "", ""
@@ -1909,7 +2087,25 @@ class _VLLMTeacher:
     batch_size: int
 
     def __init__(self, config, model=None, max_new_tokens=None):
-        from vllm import LLM, SamplingParams
+        # A SENTENCE, NOT A TRACEBACK. Preflight refuses this build before
+        # it starts (see _check_generator), so reaching here without vllm
+        # means somebody got past it - a resumed run, a stage invoked
+        # directly, a preflight that could not see the config. The bare
+        # `from vllm import LLM` this replaces produced
+        # "ModuleNotFoundError: No module named 'vllm'" from inside a
+        # generator forty minutes into a build, with nothing tying it back
+        # to the one line in the recipe that asked for it.
+        try:
+            from vllm import LLM, SamplingParams
+        except ImportError as exc:
+            raise RuntimeError(
+                "runtime.use_vllm is on (or MSMOE_VLLM=1) and vllm is not "
+                "installed on this box. pip install vllm, or set "
+                "`runtime: {use_vllm: false}` in the recipe. It is not "
+                "silently downgraded to transformers because use_vllm is "
+                "part of the build fingerprint and moves the teacher batch "
+                "from 96 to 512 - the corpus would not match its build_id."
+            ) from exc
         # AutoTokenizer was imported in _HFTeacher.__init__ and used here,
         # where nothing binds it - a NameError waiting for the first recipe
         # with a synth expert on the vLLM path. transformers cannot move to

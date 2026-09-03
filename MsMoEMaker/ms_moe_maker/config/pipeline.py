@@ -218,13 +218,23 @@ def build_id(config) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
+# "This side did not record that field", as a value, so a comparison can be
+# total. NAMED because two very different things end up in one diff and a
+# reader has to be able to tell them apart: a knob somebody MOVED, and a
+# field the older manifest simply never wrote down. A resume against a run
+# from before a field existed reports seventy-odd of the second kind and one
+# of the first, and an interface that renders those identically has buried
+# the only line that mattered in a list nobody will read.
+ABSENT = "(absent)"
+
+
 def fingerprint_diff(old: Dict[str, Any],
                      new: Dict[str, Any]) -> List[Tuple[str, Any, Any]]:
     """(field, was, now) for every value that moved. Sorted, so it reads the
-    same twice."""
+    same twice. A side that never recorded the field reports ABSENT."""
     keys = sorted(set(old) | set(new))
-    return [(k, old.get(k, "(absent)"), new.get(k, "(absent)"))
-            for k in keys if old.get(k, "(absent)") != new.get(k, "(absent)")]
+    return [(k, old.get(k, ABSENT), new.get(k, ABSENT))
+            for k in keys if old.get(k, ABSENT) != new.get(k, ABSENT)]
 
 
 # ── the router's appetite, expressed in documents ──────────────────────────────
@@ -1121,7 +1131,25 @@ def build_config(recipe, force: bool = False,
 
     # Unsoth / vLLM
     use_unsloth = _env_bool("MSMOE_UNSLOTH", False)
-    use_vllm = _env_bool("MSMOE_VLLM", False)
+    # RECIPE FIRST, THEN THE ENVIRONMENT, and this ordering is the whole
+    # reason `runtime.use_vllm` is not decoration.
+    #
+    # levers.translate() puts MSMOE_VLLM into the environment, but Runner
+    # applies that environment AFTER build_config has already run - so a
+    # lever that only wrote to os.environ set a variable this line had
+    # finished reading. The recipe key parsed, the env var was set, the
+    # agreed list said so, and `config.use_vllm` was False the whole time:
+    # a knob that reported itself honoured and changed nothing.
+    #
+    # `--plan` is what caught it, printing "teacher: transformers, batch
+    # 96" for a recipe that had just asked for vLLM.
+    #
+    # `is None` rather than truthiness: `use_vllm: false` is a deliberate
+    # answer that must beat an exported MSMOE_VLLM=1, the same way
+    # _resolve_llama_cpp lets the recipe beat MSMOE_LLAMA_CPP.
+    _asked_vllm = getattr(getattr(recipe, "runtime", None), "use_vllm", None)
+    use_vllm = (_env_bool("MSMOE_VLLM", False) if _asked_vllm is None
+                else bool(_asked_vllm))
 
     # Optimiser
     optim = "adamw_8bit" if use_unsloth else "adamw_torch"
