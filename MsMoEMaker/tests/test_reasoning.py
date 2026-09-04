@@ -37,8 +37,20 @@ class TestPackagedTable:
     def test_the_floor_does_not_contradict_the_shipped_table(self):
         styles, _, _ = Rz.load(include_user=False)
         for key, floor in Rz.FLOOR_STYLES.items():
-            assert styles[key] == floor, (
-                f"{key}: floor and packaged reasoning.yaml disagree")
+            got = styles[key]
+            # THE TAGS, NOT THE WHOLE OBJECT. A style now also carries the
+            # file that supplied it, and the floor comes from no file - so
+            # comparing dataclasses compares provenance, which is exactly
+            # what the two are SUPPOSED to disagree about. What must not
+            # differ is anything a splitter reads.
+            assert (got.open, got.close, got.interwoven,
+                    got.answer_marker) == (floor.open, floor.close,
+                                           floor.interwoven,
+                                           floor.answer_marker), (
+                f"{key}: floor and packaged reasoning.yaml disagree - a build "
+                f"that fell back to the floor would write different tags "
+                f"from one that read the table")
+
 
 
 class TestSniffing:

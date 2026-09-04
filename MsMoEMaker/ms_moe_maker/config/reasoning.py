@@ -46,6 +46,12 @@ class ReasoningStyle:
     # delimiter `open`/`close` above is still what a finished specialist learns
     # and what eval reads back.
     answer_marker: str = "ANSWER:"
+    # WHICH FILE SAID SO. Three layers merge into this table - the packaged
+    # asset, ~/.msmoe/reasoning.yaml, and $MSMOE_REASONING - and a wrong tag
+    # style is a silent wrong answer, so "where is this coming from" is a
+    # question somebody WILL ask at the worst moment. Answering it costs a
+    # string. Empty means the built-in floor.
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,7 @@ class ReasoningFamily:
     name: str
     hints: Tuple[str, ...]   # model-id fragments, matched loosely (see _norm)
     style: str               # a key into the style table
+    source: str = ""         # the layer that supplied it; see ReasoningStyle
 
 
 # The panic minimum. Plain `<think>`/`</think>` is what a build falls back to
@@ -101,7 +108,8 @@ def _styles_from(doc: Dict[str, Any], into: Dict[str, ReasoningStyle],
         into[key] = ReasoningStyle(
             name=label or key, open=str(opening), close=str(closing),
             interwoven=bool(entry.get("Interwoven", False)),
-            answer_marker=str(entry.get("AnswerMarker") or "ANSWER:"))
+            answer_marker=str(entry.get("AnswerMarker") or "ANSWER:"),
+            source=where)
         if label:
             by_name[_norm(label)] = key
     return warns
@@ -132,7 +140,8 @@ def _families_from(doc: Dict[str, Any], into: Dict[str, ReasoningFamily],
                 f"FamilyName, at least one model, and a PreferredStyle that "
                 f"names a known tag style - IGNORED")
             continue
-        into[key] = ReasoningFamily(name=label or key, hints=hints, style=style)
+        into[key] = ReasoningFamily(name=label or key, hints=hints,
+                                    style=style, source=where)
     return warns
 
 
@@ -202,31 +211,76 @@ def load_errors():
     return list(warns)
 
 
+def explain_base(base: str, kind: str = "auto",
+                 styles: Optional[Dict[str, ReasoningStyle]] = None,
+                 families: Optional[Dict[str, ReasoningFamily]] = None
+                 ) -> Dict[str, Any]:
+    """Which style a base model uses, AND WHY. The answer with its receipts.
+
+    style_for_base returns the key alone, which is all a build needs and
+    exactly nothing when somebody is staring at a trace wondering where its
+    delimiters came from. Three layers merge into this table and a wrong tag
+    style is a silent wrong answer, so the provenance is worth carrying:
+    which family matched, on which hint, out of which file.
+
+    Keys: style ('' for none), family, hint, source (the file that
+    defined the matching FAMILY), style_source (the file that defined the
+    tags), why.
+    """
+    out: Dict[str, Any] = {"style": "", "family": "", "hint": "",
+                           "source": "", "style_source": "",
+                           "why": ""}
+    if kind == "nonreasoning":
+        out["why"] = "base_kind is nonreasoning, so nothing reasons"
+        return out
+    if styles is None or families is None:
+        styles, families, _ = load()
+
+    # THE LONGEST HINT WINS, so the answer does not depend on dict order. A
+    # table someone else edits should not change meaning because of where
+    # they put their entry - and it is what makes "r1distillqwen" beat
+    # "deepseek" on an id that contains both.
+    best: Optional[ReasoningFamily] = None
+    best_hint = ""
+    needle = _norm(base)
+    for fam in families.values():
+        for h in fam.hints:
+            if h and h in needle and len(h) > len(best_hint):
+                best, best_hint = fam, h
+    if best is not None:
+        # TWO FILES CAN BE INVOLVED and the useful one is the FAMILY's: it
+        # holds the rule that matched this model id. A user table that adds a
+        # family pointing at a packaged style is the ordinary case, and
+        # "where did this come from" means "which file decided", not "which
+        # file spelled <think>". Both are returned; nobody has to guess.
+        style_obj = styles.get(best.style)
+        out.update(style=best.style, family=best.name, hint=best_hint,
+                   source=best.source or (style_obj.source if style_obj
+                                          else ""),
+                   style_source=(style_obj.source if style_obj else ""),
+                   why=f"{base} matched family {best.name!r} on hint "
+                       f"{best_hint!r}")
+        return out
+
+    if kind == "reasoning":
+        out.update(style="xml",
+                   why=f"{base} matched no family, and base_kind is "
+                       f"reasoning - falling back to plain xml")
+        return out
+    out["why"] = (f"{base} matched no family and base_kind is {kind!r}, so "
+                  f"this base is treated as non-reasoning")
+    return out
+
+
 def style_for_base(base: str, kind: str = "auto",
                    styles: Optional[Dict[str, ReasoningStyle]] = None,
                    families: Optional[Dict[str, ReasoningFamily]] = None) -> str:
     """The style KEY a base model uses, or '' for a non-reasoning base.
 
-    `kind` is the recipe's `base_kind`: nonreasoning short-circuits, reasoning
-    falls back to plain xml when the id matches no family, auto only sniffs.
-
-    THE LONGEST HINT WINS, so the answer does not depend on dict order. A table
-    someone else edits should not change meaning because of where they put
-    their entry.
+    A thin read of explain_base, so the answer a BUILD acts on and the answer
+    a PERSON is shown can never be two different answers.
     """
-    if kind == "nonreasoning":
-        return ""
-    if styles is None or families is None:
-        styles, families, _ = load()
-    needle = _norm(base)
-    best_key, best_len = "", 0
-    for fam in families.values():
-        for h in fam.hints:
-            if h and h in needle and len(h) > best_len:
-                best_key, best_len = fam.style, len(h)
-    if best_key:
-        return best_key
-    return "xml" if kind == "reasoning" else ""
+    return explain_base(base, kind, styles, families)["style"]
 
 
 def split(text: str, style: Optional[ReasoningStyle]) -> Tuple[str, str, bool]:

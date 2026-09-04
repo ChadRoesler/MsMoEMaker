@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import time
 import hashlib
 from pathlib import Path
@@ -1121,6 +1122,7 @@ def generate_agent_traces(config, callback=None,
     teacher_tokenizer = teacher.tokenizer
     rnd = _expert_rng(config, expert_name)
     attempted, rejects = 0, 0
+    cut_short = 0
     t0 = time.time()
     t_kept0 = kept
 
@@ -1137,6 +1139,13 @@ def generate_agent_traces(config, callback=None,
             for (msgs, tools, task, listing), text in zip(batch_specs, completions):
                 attempted += 1
                 by_name = {t["name"]: t for t in tools}
+                # A tool call cut in half is not JSON, so this one WOULD have
+                # been caught - by _extract_calls, as a parse failure, filed
+                # under generic rejects. Counting it apart is what turns "the
+                # teacher is being flaky" into "the cap is too low".
+                if getattr(text, "truncated", False):
+                    cut_short += 1
+                    continue
                 calls = _extract_calls(text)
                 calls = [c for c in calls if c.get("method") == "tools/call"]
 
@@ -1164,7 +1173,14 @@ def generate_agent_traces(config, callback=None,
             acc = 100.0 * session / max(attempted, 1)
             eta = (target - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{target}  "
-                  f"(accept {acc:.0f}% of {attempted}, {rate:.1f}/s, ETA {eta:.0f} min)")
+                  f"(accept {acc:.0f}% of {attempted}"
+                  f"{f', cut short {cut_short}' if cut_short else ''}, "
+                  f"{rate:.1f}/s, ETA {eta:.0f} min)")
+            if cut_short and cut_short > attempted * 0.25:
+                print(f"   NOTE: {100 * cut_short / max(attempted, 1):.0f}% of "
+                      f"generations hit the token cap and were discarded. "
+                      f"Raise budget.teacher_max_new (0 = as far as the "
+                      f"engine window allows).")
 
             # Tripwire: broken teacher
             if attempted > 200 and acc < 5:
@@ -1389,6 +1405,7 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     # was independent RNG draws; the fix here is a counter that keeps
     # counting, which also keeps template coverage EVEN rather than clumpy.
     cursor = kept
+    cut_short = 0
     t0, t_kept0 = time.time(), kept
     sink = open(partial, "a", buffering=1)
     try:
@@ -1404,6 +1421,17 @@ def generate_reasoning_traces(config, expert_name, callback=None,
                 attempted += 1
                 if not sample:
                     sample = text
+                # CUT AT THE CAP IS NOT AN ANSWER. A guillotined generation
+                # has both halves, no stray delimiter and a plausible shape -
+                # it passes every other test - and it ends mid-word. Real
+                # rows ended "**Final" because the teacher was starting to
+                # write "**Final Answer**" when the budget ran out. Counted
+                # apart from `rejects` on purpose: this number is how you
+                # learn the cap is too low, and lumping it in with genuine
+                # rejects hides exactly that.
+                if getattr(text, "truncated", False):
+                    cut_short += 1
+                    continue
                 think, answer = _parse_teacher_output(text, teacher_style)
                 # PRESENCE IS NOT SHAPE, and that gap cost a whole corpus.
                 # The test used to be "both halves exist", which a `think`
@@ -1442,7 +1470,18 @@ def generate_reasoning_traces(config, expert_name, callback=None,
             rate = session / max(time.time() - t0, 1e-9)
             eta = (n - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
-                  f"rejects {rejects}, {rate:.1f}/s, ETA {eta:.0f} min)")
+                  f"rejects {rejects}"
+                  f"{f', cut short {cut_short}' if cut_short else ''}, "
+                  f"{rate:.1f}/s, ETA {eta:.0f} min)")
+            if cut_short and cut_short > attempted * 0.25:
+                # A QUARTER OF THE BUDGET SPENT ON TRACES NOBODY KEEPS is a
+                # setting, not a fluctuation. Said once, loudly, rather than
+                # left for somebody to infer from a dangling word in a row
+                # they happened to open.
+                print(f"   NOTE: {100 * cut_short / max(attempted, 1):.0f}% of "
+                      f"generations hit the token cap and were discarded. "
+                      f"Raise budget.reasoning_teacher_max_new (0 = as far "
+                      f"as the engine window allows).")
             if callback:
                 # INSIDE THE LOOP. Every callback in this file fired either
                 # before the loop or after os.replace, so between "stage
@@ -1531,6 +1570,7 @@ def generate_domain_traces(config, expert_name, callback=None,
     # See the note in generate_reasoning_traces: a per-batch index asks the
     # same handful of questions for the whole run.
     cursor = kept
+    cut_short = 0
     t0 = time.time()
     sink = open(partial, "a", buffering=1)
     try:
@@ -1543,6 +1583,11 @@ def generate_domain_traces(config, expert_name, callback=None,
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
             for msgs, text in zip(batch, teacher.complete(prompts)):
                 attempted += 1
+                # See the note in generate_reasoning_traces: a generation cut
+                # at the cap ends mid-sentence and passes every other test.
+                if getattr(text, "truncated", False):
+                    cut_short += 1
+                    continue
                 answer = (text or "").strip()
                 if not answer:
                     rejects += 1
@@ -1560,7 +1605,14 @@ def generate_domain_traces(config, expert_name, callback=None,
             rate = session / max(time.time() - t0, 1e-9)
             eta = (n - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
-                  f"rejects {rejects}, {rate:.1f}/s, ETA {eta:.0f} min)")
+                  f"rejects {rejects}"
+                  f"{f', cut short {cut_short}' if cut_short else ''}, "
+                  f"{rate:.1f}/s, ETA {eta:.0f} min)")
+            if cut_short and cut_short > attempted * 0.25:
+                print(f"   NOTE: {100 * cut_short / max(attempted, 1):.0f}% of "
+                      f"generations hit the token cap and were discarded. "
+                      f"Raise budget.teacher_max_new (0 = as far as the "
+                      f"engine window allows).")
             if callback:
                 callback(st.DATA_SYNTH, "running",
                          f"{expert_name}: {kept}/{n} traces "
@@ -1606,6 +1658,71 @@ def _reasoning_msgs(system: str, display: str, i: int, templates,
         {"role": "system", "content": system},
         {"role": "user", "content": task},
     ]
+
+
+class Completion(str):
+    """One teacher generation. READS as the text, CARRIES why it stopped.
+
+    A str subclass for the same reason config/knobs' Change is: two
+    consumers want two shapes of one fact, and neither may be the copy that
+    goes stale. Every loop does `for msgs, text in zip(batch,
+    teacher.complete(prompts))` and uses `text` as a string - all of that
+    keeps working untouched - while the reject test can now ask WHY it
+    ended.
+
+    THE FACT WAS ALREADY THERE AND WAS BEING DROPPED. vLLM returns
+    `finish_reason` on every output: "stop" for a generation that ended
+    itself, "length" for one guillotined at the token cap. `complete` read
+    `.text` and threw the rest away, so a trace cut off mid-sentence looked
+    exactly like a complete one - both halves non-empty, no stray
+    delimiter, 98% accept - and taught the specialist to stop mid-word. A
+    real corpus ended two rows in three with a dangling "**Final".
+    """
+
+    finish_reason: str
+
+    def __new__(cls, text: str, finish_reason: str = "") -> "Completion":
+        obj = super().__new__(cls, text or "")
+        obj.finish_reason = finish_reason or ""
+        return obj
+
+    @property
+    def truncated(self) -> bool:
+        """Cut at the cap rather than finished.
+
+        UNKNOWN IS NOT TRUNCATED. An empty finish_reason means the teacher
+        did not say - an older vLLM, a path that does not report - and
+        guessing "truncated" there would reject every trace on a box whose
+        engine is merely quiet. Fail toward keeping the data; the count in
+        the progress line is what tells you if that was wrong.
+        """
+        return self.finish_reason == "length"
+
+
+UNBOUNDED = 0
+
+
+def _resolve_max_new(asked, fallback):
+    """How many tokens a teacher may generate. 0 means "as many as it takes".
+
+    THE `or` THIS REPLACES WAS A TRAP, and it was already live: both teachers
+    did `max_new_tokens or config.teacher_max_new`, so passing 0 - the
+    obvious spelling of "no limit" - fell through to the OTHER cap and
+    quietly generated 512. Somebody asking for unlimited would have got
+    half of what they started with, and nothing would have said so.
+
+    Returns None for unbounded, which each teacher then means in its own
+    terms: vLLM lets the engine window decide, transformers has to be told a
+    number because its own default is twenty tokens.
+
+    None (not 0) still means "the caller did not say", which is what every
+    existing call site passes.
+    """
+    if asked is None:
+        return fallback if fallback else None
+    if int(asked) == UNBOUNDED:
+        return None
+    return int(asked)
 
 
 def _finish(rendered: str, tokenizer) -> str:
@@ -1661,6 +1778,32 @@ def _speaks_tags(probe_text: str, style) -> bool:
     return bool(close and close in probe_text)
 
 
+def _marker_at(text: str, marker: str) -> int:
+    """Where the ANSWER: marker starts, as a LINE. -1 if it is not one.
+
+    A SUBSTRING SEARCH FOR THIS IS A BUG, and it shipped and ate a corpus.
+
+    The generator's own prompt says "write the LINE 'ANSWER:' followed by
+    your final answer" - so the marker is a line, and treating it as a
+    substring makes every ordinary use of the word a cut point. Teachers
+    write "**Final Answer:**" constantly; `text.upper().find("ANSWER:")`
+    finds it mid-sentence and truncates the answer there, leaving rows that
+    end "...the C# code is correct.\n\n**Final" and look for all the world
+    like a generation cut off at its token cap. Two rows in three, in a run
+    whose cap was nowhere near being reached.
+
+    Anchored to a line start, tolerating leading whitespace and markdown
+    emphasis, because a teacher that writes "**ANSWER:**" on its own line is
+    obeying the instruction and should not be punished for bolding it.
+    """
+    if not text or not marker:
+        return -1
+    pattern = re.compile(r"(?m)^[ \t]*[*_#>\s]{0,4}" + re.escape(marker),
+                         re.IGNORECASE)
+    hit = pattern.search(text)
+    return hit.start() if hit else -1
+
+
 def _has_delimiter(half: str, style) -> bool:
     """Does a parsed half still carry a reasoning tag?
 
@@ -1714,7 +1857,7 @@ def _parse_teacher_output(text: str, style) -> tuple:
         # full response is the thing worth learning, and training on the
         # one-liner is what produced a trace whose entire response was the
         # word `calculate_average`.
-        cut = answer.upper().find(marker.upper())
+        cut = _marker_at(answer, marker)
         if cut > 0:
             answer = answer[:cut].strip() or answer
         elif cut == 0:
@@ -1723,10 +1866,13 @@ def _parse_teacher_output(text: str, style) -> tuple:
         if think and answer:
             return think, answer
 
-    idx = text.upper().find(marker.upper())
+    idx = _marker_at(text, marker)
     if idx != -1:
         think = _clean(text[:idx])
-        answer = _clean(text[idx + len(marker):])
+        # The marker may have been reached past leading emphasis, so cut
+        # after the marker TEXT rather than a fixed offset from its start.
+        after = text.upper().find(marker.upper(), idx)
+        answer = _clean(text[after + len(marker):])
         if think and answer:
             return think, answer
     return "", ""
@@ -2023,7 +2169,14 @@ class _HFTeacher:
 
     def __init__(self, config, model=None, max_new_tokens=None):
         self.model_id = model or config.teacher_model
-        self.max_new_tokens = max_new_tokens or config.teacher_max_new
+        # UNBOUNDED HAS TO BECOME A NUMBER HERE. transformers' generate()
+        # falls back to max_length when max_new_tokens is None, and that
+        # default is TWENTY tokens - so passing None through would turn "let
+        # the chain finish" into the shortest generation this file can
+        # produce. The model's own context window is the honest ceiling.
+        self.max_new_tokens = _resolve_max_new(max_new_tokens,
+                                               config.teacher_max_new)
+        self._unbounded = self.max_new_tokens is None
         self.batch_size = config.teacher_batch
         # SEED THE SAMPLER TOO, or `build_id` still lies. The batch specs are
         # deterministic now, but generate(do_sample=True) draws from torch's
@@ -2062,19 +2215,49 @@ class _HFTeacher:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+    def _budget(self, prompt_len: int) -> int:
+        """Tokens this call may generate. Never None - see __init__."""
+        if not self._unbounded:
+            return self.max_new_tokens
+        window = (getattr(self.model.config, "max_position_embeddings", 0)
+                  or getattr(self.tokenizer, "model_max_length", 0) or 0)
+        # model_max_length is a sentinel-sized int on some tokenizers, which
+        # would ask for a trillion tokens. Anything past the window is not a
+        # real answer either way.
+        if not window or window > 1_000_000:
+            window = 4096
+        return max(64, int(window) - int(prompt_len))
+
     def complete(self, prompts):
         import torch
         inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.model.device)
+        budget = self._budget(inputs.input_ids.shape[1])
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=budget,
                 temperature=0.7,
                 do_sample=True,
                 pad_token_id=self.tokenizer.pad_token_id,
             )
         cut = inputs.input_ids.shape[1]
-        return [self.tokenizer.decode(o[cut:], skip_special_tokens=True) for o in outputs]
+        eos = self.tokenizer.eos_token_id
+        out = []
+        for o in outputs:
+            grown = o[cut:]
+            # WHY IT STOPPED, derived rather than reported: transformers does
+            # not hand back a finish_reason, so ask the two questions it
+            # leaves answerable - did it run to the budget, and did it end on
+            # the stop token. Ran to the budget without an eos is a
+            # guillotined generation, which is the one the corpus must not
+            # keep.
+            ran_out = len(grown) >= budget
+            ended = eos is not None and len(grown) and int(grown[-1]) == eos
+            reason = "length" if (ran_out and not ended) else "stop"
+            out.append(Completion(
+                self.tokenizer.decode(grown, skip_special_tokens=True),
+                reason))
+        return out
 
     def close(self):
         import torch
@@ -2095,9 +2278,40 @@ class _VLLMTeacher:
         # "ModuleNotFoundError: No module named 'vllm'" from inside a
         # generator forty minutes into a build, with nothing tying it back
         # to the one line in the recipe that asked for it.
+        # SPAWN, SET BEFORE THE IMPORT, AND UNCONDITIONALLY.
+        #
+        # vLLM v1 runs its EngineCore in a separate process. On Linux that
+        # forks by default, and a forked child cannot re-initialise a CUDA
+        # context its parent already holds:
+        #
+        #     RuntimeError: Cannot re-initialize CUDA in forked subprocess.
+        #
+        # vLLM DOES detect this itself - it logs "Overriding
+        # VLLM_WORKER_MULTIPROC_METHOD to 'spawn' ... Reasons: CUDA is
+        # initialized" - and that is exactly why this line is here anyway.
+        # Observed on a real build: the detector did NOT fire, the engine
+        # forked, and the stage died; the same box with an explicit
+        # torch.zeros(1, device="cuda") first DID trip it. The likely gap is
+        # that preflight calls torch.cuda.is_available(), which touches the
+        # driver enough to poison a fork without making
+        # torch.cuda.is_initialized() true - two different questions, and
+        # vLLM asks the narrower one.
+        #
+        # We do not have to guess: this pipeline has ALWAYS touched CUDA by
+        # the time it reaches a teacher. So say so, rather than waiting on a
+        # detector that has already missed once here.
+        #
+        # setdefault, so an operator who exports something else still wins.
+        # BEFORE the import, because the multiprocessing context is settled
+        # as vllm loads - moving this line below the import is the kind of
+        # tidy-up that would put the fork crash back with nothing to show
+        # why. tests/test_preflight_generator.py pins the ordering.
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
         try:
             from vllm import LLM, SamplingParams
         except ImportError as exc:
+
             raise RuntimeError(
                 "runtime.use_vllm is on (or MSMOE_VLLM=1) and vllm is not "
                 "installed on this box. pip install vllm, or set "
@@ -2116,42 +2330,94 @@ class _VLLMTeacher:
         self._SamplingParams = SamplingParams
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_id, cache_dir=config.hf_home)
-        self.llm = LLM(
+        # ONE ENGINE, NOT TWO. This used to construct the LLM, and then - if
+        # vllm_quantization was set - construct a SECOND one and overwrite
+        # the first. At gpu_memory_utilization 0.88 the discarded engine has
+        # already claimed almost the whole card, so the quantized path was a
+        # double model load into a GPU that no longer had room for it.
+        # Dormant today because vllm_quantization defaults to None, which is
+        # exactly how it survived: the only way to reach it is to set the
+        # knob, and setting the knob is when you can least afford an OOM.
+        kwargs = dict(
             model=self.model_id,
             dtype="bfloat16",
             gpu_memory_utilization=config.vllm_gpu_util,
             max_model_len=config.vllm_max_len,
             enable_prefix_caching=True,
-            cache_dir=config.hf_home,
+            # download_dir, NOT cache_dir. Every other cache_dir=hf_home in
+            # this file goes to a real HF API - AutoTokenizer.from_pretrained,
+            # load_dataset - where it is the correct parameter name. This one
+            # is a constructor that forwards **kwargs to vLLM EngineArgs,
+            # which has no such field, so the idiom copy-pasted in here would
+            # have TypeError'd on the first vLLM build. Checked against the
+            # installed engine: EngineArgs offers download_dir and no
+            # cache_dir.
+            #
+            # PASSED RATHER THAN OMITTED, and that is the part worth knowing.
+            # builder.py already exports HF_HOME, so leaving this out would
+            # work - but vLLM would then use the standard $HF_HOME/hub
+            # layout, while the tokenizer three lines up caches into hf_home
+            # DIRECTLY. Two different directories for one model, and the
+            # second one is a fresh multi-gigabyte download of a teacher that
+            # is already on the disk.
+            download_dir=config.hf_home,
             trust_remote_code=True,
+
             # Engine-level seed, NOT SamplingParams(seed=...): a per-request
             # seed would hand every batch the same draw and the reasoning
             # generator, which rebuilds the same prompts each batch, would
-            # generate one trace over and over. Same reason as the HF teacher -
-            # config.seed is in the build id, so the sampler has to honour it.
+            # generate one trace over and over. Same reason as the HF
+            # teacher - config.seed is in the build id, so the sampler has
+            # to honour it.
             seed=getattr(config, "seed", 42),
         )
         if config.vllm_quantization:
-            self.llm = LLM(
-                model=self.model_id,
-                dtype="bfloat16",
-                gpu_memory_utilization=config.vllm_gpu_util,
-                max_model_len=config.vllm_max_len,
-                enable_prefix_caching=True,
-                quantization=config.vllm_quantization,
-                cache_dir=config.hf_home,
-                trust_remote_code=True,
-            )
+            kwargs["quantization"] = config.vllm_quantization
+        try:
+            self.llm = LLM(**kwargs)
+        except TypeError as exc:
+            # A REJECTED KWARG NAMES ITSELF. vLLM forwards **kwargs straight
+            # to EngineArgs, so any name it does not carry is a TypeError -
+            # and it would land in the middle of the synth stage, forty
+            # minutes into a build, reading like a bug in this file rather
+            # than a version difference in a fast-moving engine.
+            #
+            # The kwargs above are checked against vLLM 0.28 (that is how the
+            # cache_dir/download_dir mistake was found). This exists because
+            # 0.29 gets to disagree, and the person who meets that deserves
+            # one sentence and the command that answers it.
+
+            raise RuntimeError(
+                f"vLLM rejected an engine argument: {exc}. The kwargs passed "
+                f"were {sorted(kwargs)} - check them against EngineArgs for "
+                f"the vllm version installed here "
+                f"(python -c \"import dataclasses, vllm; "
+                f"print([f.name for f in "
+                f"dataclasses.fields(vllm.EngineArgs)])\")."
+            ) from exc
+
+        # None = "as far as the engine window allows", which is
+        # max_model_len (vllm_max_len) minus the prompt. That is what 0 in a
+        # recipe buys you: on a box with the VRAM for a bigger window, the
+        # reasoning chain gets to finish instead of being cut at a number
+        # somebody guessed.
+        self.max_new_tokens = _resolve_max_new(max_new_tokens,
+                                               config.teacher_max_new)
         self.params = SamplingParams(
             temperature=0.7, top_p=0.8, top_k=20,
             repetition_penalty=1.05,
-            max_tokens=(max_new_tokens or config.teacher_max_new),
+            max_tokens=self.max_new_tokens,
         )
         self.batch_size = config.vllm_batch
 
     def complete(self, prompts):
         outs = self.llm.generate(prompts, self.params)
-        return [o.outputs[0].text for o in outs]
+        # finish_reason was here the whole time and was being dropped on the
+        # floor: "stop" for a generation that ended itself, "length" for one
+        # cut at the cap. See Completion.
+        return [Completion(o.outputs[0].text,
+                           getattr(o.outputs[0], "finish_reason", ""))
+                for o in outs]
 
     def close(self):
         del self.llm

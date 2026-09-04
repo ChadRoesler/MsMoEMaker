@@ -389,10 +389,14 @@ def _check_generator(pf: Preflight, config) -> None:
     if not _needs_a_teacher(config):
         return
 
-    batch = getattr(config, "teacher_batch", 0)
+    # TWO BATCH FIELDS, AND ONLY ONE IS READ ON EACH PATH. _HFTeacher takes
+    # config.teacher_batch, _VLLMTeacher takes config.vllm_batch - which
+    # both happen to say 512 under vLLM today, so reporting the wrong one
+    # would print the right number for the wrong reason and diverge the
+    # first time somebody tuned one of them.
     if not getattr(config, "use_vllm", False):
-        pf.add("teacher", PASS, f"transformers, batch {batch}",
-               "")
+        pf.add("teacher", PASS,
+               f"transformers, batch {getattr(config, 'teacher_batch', 0)}")
         return
 
     if importlib.util.find_spec("vllm") is None:
@@ -405,7 +409,173 @@ def _check_generator(pf: Preflight, config) -> None:
                "corpus made without it would not be the corpus this "
                "build_id describes.")
         return
-    pf.add("teacher", PASS, f"vLLM, batch {batch}")
+    pf.add("teacher", PASS,
+           f"vLLM, batch {getattr(config, 'vllm_batch', 0)}")
+
+
+def _check_reasoning(pf: Preflight, config, recipe) -> None:
+    """WHICH TAGS, AND WHERE THEY CAME FROM.
+
+    A wrong tag style is a silent wrong answer - the splitter finds no
+    delimiters, eval reports "did not reason", and the think block gets scored
+    as though it were the answer. The table that decides it merges three
+    layers (the packaged asset, ~/.msmoe/reasoning.yaml, $MSMOE_REASONING),
+    any of which can be the one that mattered. So the answer to "where did
+    these delimiters come from" belongs in the preflight somebody already ran,
+    not at the end of an afternoon in the source.
+
+    TWO STYLES, AND REPORTING ONLY ONE IS WHAT MAKES THIS CONFUSING.
+    synth.py keeps them apart deliberately:
+
+        target        what the SPECIALIST learns and eval reads back. Off the
+                      run - reasoning_open/close, stamped into the config at
+                      build time and part of the fingerprint.
+        teacher_style what the TEACHER natively emits. Off the TEACHER's id,
+                      with kind forced to "reasoning" - a teacher was picked
+                      to reason, so the question is which dialect, never
+                      whether.
+
+    They legitimately differ: DeepSeek-R1 proper writes <|reasoning|> while
+    the specialist learns <think>. Conflating them "rejected a good teacher's
+    output 288 times in a row" per the note in synth. The first version of
+    this check made the same mistake in the other direction - it asked about
+    the BASE with the base's kind, and printed "base_kind is nonreasoning, so
+    nothing reasons" on the same line as <think>…</think>.
+
+    SAME CALLS AS THE BUILD, deliberately. reasoning_style_of_config for the
+    target and style_for_base(teacher, "reasoning") for the teacher - the same
+    two lines synth runs. A preflight that derived these its own way would be
+    a second answer to one question, which is the disease this repo keeps
+    finding.
+    """
+    from ..config import reasoning as _reasoning
+    from ..config.pipeline import reasoning_style_of_config
+
+    teacher = (getattr(config, "reasoning_teacher", "")
+               or getattr(config, "teacher_model", "") or "")
+    target = reasoning_style_of_config(config)
+    wants = bool(getattr(config, "reasoning_expert_name", "")
+                 or getattr(config, "reasoning_experts", None)
+                 or target)
+    if not wants:
+        return
+
+    # A malformed user table degrades to the packaged one rather than raising,
+    # so the only way anyone learns it happened is if something asks.
+    for warn in _reasoning.load_errors():
+        pf.add("reasoning table", WARN, warn,
+               "the table fell back a layer - the tags below may not be the "
+               "ones you edited")
+
+    if target is None:
+        pf.add("reasoning", WARN,
+               "a reasoning expert is planned and no delimiters resolved onto "
+               "the config",
+               "traces will be written with the fallback <think></think>. If "
+               "this base speaks something else, add a family for it to "
+               "~/.msmoe/reasoning.yaml - that file is what it is FOR.")
+        return
+
+    pf.add("reasoning", PASS,
+           f"specialist learns {target.open}…{target.close}"
+           f"{f' ({target.name})' if target.name else ''}")
+
+    if not teacher:
+        return
+    try:
+        why = _reasoning.explain_base(teacher, "reasoning")
+    except Exception as exc:                              # noqa: BLE001
+        pf.add("reasoning teacher", WARN,
+               f"could not resolve the teacher's tag style: {exc}")
+        return
+
+    styles, _, _ = _reasoning.load()
+    spoken = styles.get(why["style"]) if why["style"] else None
+
+    # KEY OFF THE FAMILY, NOT THE STYLE, and the difference is the whole
+    # check. explain_base is asked with kind="reasoning" - a teacher was
+    # picked to reason, so the question is which dialect - and that kind
+    # FALLS BACK to plain xml when nothing matches. So a style always
+    # resolves, and testing `spoken is None` made the warning unreachable:
+    # an unknown teacher printed "family '' on hint '' · from the built-in
+    # floor", which is the exact species of confident-looking nonsense this
+    # check was added to delete.
+    #
+    # A family matched or it did not. That is the fact; the xml is a guess.
+    if spoken is None or not why.get("family"):
+        # No family matched, so synth falls back to the TARGET style for the
+        # teacher too - which is right often enough to be worth doing and
+        # wrong quietly enough to be worth saying.
+        pf.add("reasoning teacher", WARN,
+               f"{teacher} matches no family in the reasoning table",
+               f"it will be assumed to speak the target style "
+               f"({target.open}…{target.close}). If it does not, every trace "
+               f"is rejected or mis-split. Add a family for it to "
+               f"~/.msmoe/reasoning.yaml.")
+        return
+
+    same = "" if (spoken.open, spoken.close) != (target.open, target.close) \
+        else " (same as the target)"
+    pf.add("reasoning teacher", PASS,
+           f"{teacher} emits {spoken.open}…{spoken.close}{same} · "
+           f"family {why['family']!r} on hint {why['hint']!r} · from "
+           f"{why['source'] or 'the built-in floor'}")
+
+
+def _check_trainer(pf: Preflight, config) -> None:
+    """unsloth, and what happens when it was asked for and is not here.
+
+    FALL BACK AND SAY SO LOUDLY, AT VALIDATE TIME. That is the shape asked
+    for and it is the llama.cpp shape, not the vLLM one: a plain fine-tune
+    is a real result, so this warns rather than refuses. What it must not
+    do is what it used to - fall back with a print, five hours into a run,
+    on a knob that is part of the build fingerprint.
+
+    AND THE FALLBACK IS NOT CLEAN, which is the part worth saying out loud.
+    `config.optim` is resolved to "adamw_8bit" from use_unsloth back in
+    build_config, and finetune passes `optim=config.optim` to the trainer
+    whichever path it took - so the plain path runs with the 8-bit
+    optimiser unsloth was going to provide, and needs bitsandbytes to do
+    it. A reader deserves to know that before the GPU is booked.
+
+    load_in_4bit is the one hard refusal here. finetune already raises for
+    it, deliberately, BEFORE training - but it raises after the recipe has
+    been loaded on the build box. Saying it at preflight costs nothing and
+    says it on the laptop.
+    """
+    import importlib.util
+
+    if not (getattr(config, "use_unsloth", False)
+            or getattr(config, "load_in_4bit", False)):
+        return
+
+    have = importlib.util.find_spec("unsloth") is not None
+
+    if getattr(config, "load_in_4bit", False) and not have:
+        pf.add("trainer", FAIL,
+               "runtime.load_in_4bit is on and unsloth is not installed",
+               "4-bit TRAINING needs unsloth's save_pretrained_merged to "
+               "produce a mergeable specialist - the plain path would "
+               "train and then fail at the save, after the whole bill is "
+               "paid. Set `runtime: {load_in_4bit: false}`, or install "
+               "unsloth.")
+        return
+
+    if not getattr(config, "use_unsloth", False):
+        return
+    if have:
+        pf.add("trainer", PASS, f"unsloth, optim {config.optim}")
+        return
+
+    pf.add("trainer", WARN,
+           "MSMOE_UNSLOTH is set and unsloth is not installed - the build "
+           "will train on the plain path",
+           f"that is a real fine-tune and a real checkpoint, so it is not "
+           f"refused. But optim stays {config.optim!r} (resolved from "
+           f"use_unsloth) and the plain trainer needs bitsandbytes to "
+           f"honour it, and the manifest records use_unsloth=true for a "
+           f"run that did not use it. Install unsloth, or unset "
+           f"MSMOE_UNSLOTH so the recorded build matches the one that ran.")
 
 
 def _check_sources(pf: Preflight, recipe) -> None:
@@ -444,6 +614,8 @@ def run(config, recipe, offline: bool = False,
     _check_roots(pf, config)
     _check_sources(pf, recipe)
     _check_generator(pf, config)
+    _check_trainer(pf, config)
+    _check_reasoning(pf, config, recipe)
     if have_torch:
         _check_base_model(pf, config, offline=offline)
     _check_datasets(pf, recipe, offline=offline)

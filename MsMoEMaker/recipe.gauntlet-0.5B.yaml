@@ -48,6 +48,23 @@ experts:
       kind: stack
       language: Shell
     tokens: 12_000_000
+  - name: docs
+    source: 
+      kind: gh
+      repo: rcvd/interconnected-markdown
+      glob: "files/**/*.md"
+  # kind=local - offline notes. Preflight checks this path BEFORE anything
+  # expensive (tier 3/4); see the header for how to fill it.
+  - name: notes
+    source: 
+      kind: local
+      path: ./gauntlet_notes
+  - name: lore
+    source:
+      kind: synth
+      teacher: Qwen/Qwen2.5-7B-Instruct
+      templates: dnd
+      examples: 250
 
 
 # Synth shape #2: the MCP tool-call expert. A mapping (even one that changes
@@ -69,7 +86,7 @@ tools_expert:
 # the register of deliberation instead of one subject.
 reasoning_expert:
   name: deliberation
-  examples: 10000               # per-expert trace count, like `lore` above
+  examples: 2000               # per-expert trace count, like `lore` above
 
 abliterate:                   # tier 5: the decensor pass, adapter export
   enabled: true               #   exercises the "adapter is loadable" fix
@@ -83,8 +100,9 @@ abliterate:                   # tier 5: the decensor pass, adapter export
 runtime:
   hardware_tier: spark
   load_in_4bit: false         # explicit False: the Optional sentinel (tier 3)
-  alloc_conf: "expandable_segments:True"   # the 106.6GB lever, applied on the
-                                           # DEFAULT path now (tier 2/4)
+  alloc_conf: "expandable_segments:True"   # the 106.6GB lever, applied on the DEFAULT path now (tier 2/4)
+  use_vllm: true
+  vllm_max_len: 4096
 
 budget:
   target_steps: 600           # a shakedown, not a result
@@ -95,7 +113,7 @@ budget:
   warmup_ratio: 0.1           # tier 4: warmup now recomputed from REAL steps
   warmup_floor: 12
   collect_headroom: 1.5
-  teacher_max_new: 512        # generic teacher ceiling (tier 2)
+  teacher_max_new: 512     # generic teacher ceiling (tier 2)
   reasoning_teacher_max_new: 4096
 
 corpus:

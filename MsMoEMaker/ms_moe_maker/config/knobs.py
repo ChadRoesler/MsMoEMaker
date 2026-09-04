@@ -248,7 +248,9 @@ KNOBS: Dict[str, Knob] = {
     "vllm_max_len": Knob(
         "Longest prompt-plus-answer the vLLM teacher will hold in one "
         "request. Too small and long traces are cut off mid-sentence; too "
-        "large and it reserves memory it never uses."),
+        "large and it reserves memory it never uses. This is also the real "
+        "ceiling when a teacher budget is set to 0 for unbounded.",
+        recipe="runtime.vllm_max_len"),
     "vllm_quantization": Knob(
         "Quantisation for the vLLM teacher, for when it will not otherwise "
         "fit. Unset loads it at full bfloat16."),
@@ -548,7 +550,9 @@ UNPINNABLE: Dict[str, str] = {
     "gradient_checkpointing": "env: MSMOE_GRAD_CKPT.",
     # -- literals in build_config -----------------------------------------
     "attn_impl": "constant in build_config ('sdpa').",
-    "vllm_max_len": "constant in build_config (4096).",
+    # vllm_max_len LEFT HERE when it became `runtime.vllm_max_len`: it is the
+    # ceiling an unbounded teacher budget actually runs into, so a bundle that
+    # could not carry it could not describe what its corpus was allowed to be.
     "vllm_quantization": "constant in build_config (None).",
     "packing_strategy": "constant in build_config ('wrapped').",
     "target_modules": "constant in build_config (the three MLP projections).",

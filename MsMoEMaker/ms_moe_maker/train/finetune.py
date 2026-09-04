@@ -328,13 +328,37 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
             unsloth = unsloth
             print("[env] unsloth IMPORTED")
         except ImportError:
-            print("[env] unsloth requested but not installed — falling back to plain")
+            # FALL BACK, AND SAY WHAT IT COSTS. A plain fine-tune is a real
+            # result, so this is not a refusal - but the one-line print it
+            # replaces understated the situation twice over.
+            #
+            # `config.optim` was resolved to "adamw_8bit" from use_unsloth
+            # back in build_config, and the line that hands the trainer
+            # `optim=config.optim` does not care which path we took - so the
+            # plain path runs with the 8-bit optimiser unsloth was going to
+            # supply, and needs bitsandbytes to honour it.
+            #
+            # And use_unsloth is in the build fingerprint, so the manifest
+            # then describes a run that did not happen. Preflight warns about
+            # all of this before the GPU is booked (_check_trainer); this is
+            # the same sentence for anyone who got past it.
+            print("[env] WARNING: unsloth was requested (MSMOE_UNSLOTH) and "
+                  "is not installed - training on the PLAIN path.")
+            print(f"[env]          optim stays {config.optim!r}, resolved "
+                  f"from use_unsloth, and the plain trainer needs "
+                  f"bitsandbytes to honour it.")
+            print("[env]          the manifest records use_unsloth=true for "
+                  "a run that did not use it. Install unsloth, or unset "
+                  "MSMOE_UNSLOTH so the record matches the run.")
             want_unsloth = False
 
-    if want_unsloth and not unsloth_available:
-        raise RuntimeError(
-            "MSMOE_UNSLOTH=1 but unsloth is not installed. "
-            "Either pip install unsloth or unset MSMOE_UNSLOTH.")
+    # NO `if want_unsloth and not unsloth_available: raise` HERE. There was
+    # one, and it could never fire: the except above sets want_unsloth to
+    # False, so the condition was unreachable and the RuntimeError it carried
+    # - "MSMOE_UNSLOTH=1 but unsloth is not installed" - was dead code
+    # standing in for a guard nobody had. The real behaviour was, and remains,
+    # a fallback; it is a loud one now, said here and at preflight.
+
 
     # 4-BIT TRAINING FAILS FAST, BEFORE THE EXPENSIVE PART. The merged save
     # needs unsloth's save_pretrained_merged; the plain path used to discover

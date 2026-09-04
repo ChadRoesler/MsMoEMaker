@@ -1266,7 +1266,12 @@ def build_config(recipe, force: bool = False,
         use_vllm=use_vllm,
         vllm_batch=512,
         vllm_gpu_util=0.88,
-        vllm_max_len=4096,
+        # 0 (the shipped default) keeps 4096. build_config already reads
+        # recipe.runtime directly a few lines up, so this is the plain
+        # form rather than a nested getattr - which is also what
+        # test_schema_reachability can see, and it was right to complain.
+        vllm_max_len=int(getattr(recipe.runtime, "vllm_max_len", 0)
+                         or 4096),
         vllm_quantization=None,
         teacher_max_new=teacher_max_new,
         reasoning_teacher_max_new=reasoning_teacher_max_new,

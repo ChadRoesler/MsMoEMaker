@@ -238,6 +238,17 @@ class Runtime:
     # MSMOE_VLLM to the environment, so nothing changes for anyone who
     # never writes it.
     use_vllm: Optional[bool] = None
+    # THE ENGINE WINDOW, and it is the other half of `max_new: 0`.
+    #
+    # Asking a teacher for "as many tokens as it takes" only reaches as far
+    # as max_model_len allows - so leaving that a constant made the
+    # unbounded setting quietly bounded at 4096 with no way to say
+    # otherwise. On a box with the VRAM for a bigger KV cache, that is the
+    # knob that spends it.
+    #
+    # 0 keeps the shipped default. It costs memory quadratically-ish in the
+    # KV cache, so it is a deliberate choice, not something to raise idly.
+    vllm_max_len: int = 0
     hardware_tier: str = "xavier"  # nano | xavier | spark
     # WHERE llama.cpp LIVES. Previously env-only (MSMOE_LLAMA_CPP), which
     # makes the one path most likely to differ per box the one thing a recipe

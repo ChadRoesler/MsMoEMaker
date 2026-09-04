@@ -20,8 +20,9 @@ halves EXIST. Nothing asked whether either was the right half.
 import pytest
 
 from ms_moe_maker.config.reasoning import ReasoningStyle, split
-from ms_moe_maker.data.synth import (_finish, _has_delimiter,
-                                     _parse_teacher_output, _speaks_tags)
+from ms_moe_maker.data.synth import (Completion, _finish, _has_delimiter,
+                                     _marker_at, _parse_teacher_output,
+                                     _resolve_max_new, _speaks_tags)
 
 # answer_marker left at its shipped default: the marker path has to stay
 # reachable, it just must not be the FIRST thing tried.
@@ -362,3 +363,103 @@ class TestTheLeverIsWiredAndNotJustAgreedTo:
         """Nothing changes for anyone who never writes the key."""
         assert self._config(env="1").use_vllm is True
         assert self._config(env=None).use_vllm is False
+
+
+class TestTheMarkerIsALineNotASubstring:
+    """A REGRESSION I SHIPPED, and the fixture is the row it produced.
+
+    The summary-dropper cut the answer at `answer.upper().find("ANSWER:")`.
+    Teachers write "**Final Answer:**" constantly, so that found the phrase
+    mid-sentence and truncated there - leaving rows ending
+    "...the C# code is correct.\n\n**Final". Which looks EXACTLY like a
+    generation guillotined at its token cap, and sent me diagnosing a cap that
+    was nowhere near being reached.
+
+    The generator's own prompt says "write the LINE 'ANSWER:'". It is a line.
+    """
+
+    ROW_TWO = ("reasoning about it carefully.\n</think>\n\n"
+               "To determine if a C# result is correct, perform several checks:"
+               "\n\n1. Syntax Check\n2. Unit Testing\n\n"
+               "By systematically applying these checks, one can ensure the C# "
+               "code is correct. \n\n"
+               "**Final Answer:** Check syntax, test, and handle exceptions.")
+
+    def test_the_phrase_final_answer_does_not_truncate_the_answer(self):
+        _, answer = _parse_teacher_output(self.ROW_TWO, XML)
+        assert answer.endswith("handle exceptions."), repr(answer[-70:])
+        assert not answer.endswith("**Final"), (
+            "the answer was cut at the words 'Final Answer:' - this is the "
+            "exact byte pattern that showed up in a real corpus")
+        assert "1. Syntax Check" in answer
+
+    def test_a_real_marker_LINE_is_still_dropped(self):
+        """The feature still has to work: a teacher that obeys the instruction
+        and appends a one-line summary should not train the specialist on the
+        summary."""
+        _, answer = _parse_teacher_output(
+            "thinking.\n</think>\n\nThe full structured answer.\n\n"
+            "ANSWER: one-line summary.", XML)
+        assert answer == "The full structured answer."
+
+    def test_a_bolded_marker_line_counts_as_the_marker(self):
+        """Obeying the instruction and bolding it is still obeying it."""
+        _, answer = _parse_teacher_output(
+            "thinking.\n</think>\n\nThe full answer.\n\n"
+            "**ANSWER:** summary.", XML)
+        assert answer == "The full answer."
+
+    @pytest.mark.parametrize("prose", [
+        "the final answer: 42 is what I get",
+        "In answer: to your question, no.",
+        "My answer: it depends.",
+    ])
+    def test_the_word_answer_mid_sentence_is_just_a_word(self, prose):
+        _, answer = _parse_teacher_output(
+            f"thinking.\n</think>\n\n{prose}", XML)
+        assert answer == prose, answer
+
+    def test_the_helper_reports_the_line_position(self):
+        assert _marker_at("no marker here", "ANSWER:") == -1
+        assert _marker_at("**Final Answer:** inline", "ANSWER:") == -1
+        assert _marker_at("ANSWER: at the start", "ANSWER:") == 0
+        assert _marker_at("body\nANSWER: here", "ANSWER:") == 5
+
+
+class TestATruncatedGenerationIsNotAnAnswer:
+    """vLLM reports why it stopped and `complete` was dropping it. A generation
+    cut at the cap has both halves, no stray delimiter and a plausible shape -
+    it passes every other test - and it ends mid-word."""
+
+    def test_a_completion_reads_as_its_text(self):
+        c = Completion("hello", "stop")
+        assert c == "hello" and c.finish_reason == "stop"
+        assert not c.truncated
+
+    def test_length_means_truncated(self):
+        assert Completion("cut off mid", "length").truncated is True
+
+    def test_an_unreported_reason_is_not_treated_as_truncated(self):
+        """UNKNOWN IS NOT TRUNCATED. An older engine that says nothing would
+        otherwise have every trace rejected on a box that is merely quiet."""
+        assert Completion("text", "").truncated is False
+        assert Completion("text").truncated is False
+
+
+class TestZeroMeansUnbounded:
+    """`max_new: 0` = let the chain finish. The `or` this replaces made 0 fall
+    through to the OTHER cap - so asking for unlimited silently gave you 512,
+    which is less than you started with."""
+
+    def test_zero_is_unbounded(self):
+        assert _resolve_max_new(0, 512) is None
+
+    def test_none_still_means_the_caller_did_not_say(self):
+        assert _resolve_max_new(None, 512) == 512
+
+    def test_an_explicit_number_is_itself(self):
+        assert _resolve_max_new(1024, 512) == 1024
+
+    def test_zero_does_not_fall_through_to_the_fallback(self):
+        """The trap, named: `max_new_tokens or config.teacher_max_new`."""
+        assert _resolve_max_new(0, 512) != 512
