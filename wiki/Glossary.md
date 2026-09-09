@@ -63,9 +63,48 @@ Validated against commit/tag: main (unreleased)
 - **Interwoven**: A tag style whose reasoning blocks appear many times per turn
   (reasoning interleaved with tool calls). The splitter strips them all.
 
+## Teacher budget terms
+
+- **Teacher budget**: How many tokens a teacher may write for one generated
+  example. There are three loops with opposite appetites and one fallback:
+  `agent_teacher_max_new` (an MCP tool call, small), `domain_teacher_max_new`
+  (a page of prose), `reasoning_teacher_max_new` (a think block *plus* an
+  answer), and `teacher_max_new` for any loop not given its own.
+- **Unbounded** (`0`): "As far as the engine window allows" - the spelling every
+  generation budget accepts, including `eval.max_new_tokens`. On the vLLM path
+  the window is `runtime.vllm_max_len` minus the prompt, so unbounded is only as
+  generous as that ceiling.
+- **Overrun**: A generation that hit its budget instead of finishing. It is
+  **discarded, not trimmed**, which is why a cap set too low does not shorten a
+  corpus - it keeps whichever material happened to fit.
+- **Overrun policy** (`budget.teacher_overrun`): What to do about one.
+  `discard` throws it away (the default, and what every earlier release did);
+  `answer-only` finishes a generation that already ended its reasoning and had
+  its answer cut; `close-and-answer` also closes a thought still in progress and
+  buys its answer. Published in `describe` as `overrun_policies`.
+- **Answer reserve** (`budget.teacher_answer_reserve`): Tokens held back to buy
+  that ending. `-1` = a quarter of *that loop's* budget, floored at 64, never
+  more than half - a reserve that eats the budget leaves nothing to think with.
+- **Salvaged**: A row that overran and was finished with the reserve rather than
+  thrown away. Counted separately from `kept` and `cut short` in the progress
+  line, because the three are different facts about the same batch.
+- **Budget hint** (`budget.teacher_tell_budget`): Puts the room available into
+  the teacher's own prompt, in words. Lowers the overrun rate; bounds nothing.
+  Teacher-side only - it never reaches a corpus row, or the specialist would
+  learn "be brief" as part of its identity.
+
 ## Validation and quality terms
 
 - **Dryrun**: Real smallest-rung build path for quick structural validation.
 - **Smoke test**: Post-build generation sanity check.
 - **Routing eval**: Measurement of whether routing prefers appropriate experts.
 - **Quality eval**: Measurement of output quality on evaluation prompts.
+- **`reasoned`**: Share of an expert's outputs that opened AND closed a think
+  block - the DISCIPLINE check, read against routing enrichment. High
+  enrichment beside low `reasoned` is a named failure: the register of
+  deliberation without the structure. Prints `-`, not `0.00`, for an expert that
+  was never asked to reason.
+- **Capped generation**: An eval sample that ran its whole `max_new_tokens`
+  budget, so it was cut off rather than finished. Every score in such a row is
+  computed on an amputated answer and `reasoned` becomes a lower bound rather
+  than a measurement, which is why the report says so in its caveats.

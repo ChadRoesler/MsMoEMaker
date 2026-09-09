@@ -4,7 +4,7 @@ Validated against commit/tag: main (unreleased)
 
 The command surface. Prose goes to stderr; `--json` puts JSON Lines events on
 stdout for machine consumers. Commands: `init`, `describe`, `validate`, `build`,
-`smoke`, `eval`, `corpus`.
+`smoke`, `eval`, `corpus`, `export`, `bundle`.
 
 ## Commands
 
@@ -21,8 +21,14 @@ ms-moe-maker init --defaults-template              # write ~/.msmoe/defaults.yam
 
 ### `describe`
 
-Print the box: tiers, templates, corpus kinds, eval modes, defaults. Zero side
-effects, JSON on stdout.
+Print the box: tiers, templates, corpus kinds, eval modes, overrun policies,
+the knob glossary, defaults. Zero side effects, JSON on stdout.
+
+This is the contract a front-end builds from, which is why the vocabularies live
+here rather than being hardcoded anywhere: `eval_modes` and `overrun_policies`
+are the legal values for `eval.mode` and `budget.teacher_overrun`, and `events`
+is the event vocabulary emitted under `--json`. Adding a value is additive — a
+consumer that does not know one ignores it; removing or renaming one is not.
 
 ```bash
 ms-moe-maker describe
@@ -80,6 +86,39 @@ Inspect the corpora on disk. With `--prune`, write a dominance-cleaned copy
 ms-moe-maker corpus recipe.yaml
 ms-moe-maker corpus recipe.yaml --prune --per-repo-cap 10
 ```
+
+### `export`
+
+GGUF export + smoke for an already-built MoE. Re-runs the export stage against
+the router's output directory, so a build that skipped GGUF — no llama.cpp on
+the box at the time — can be finished later, or the smoke re-run once
+`llama-cli` lands.
+
+```bash
+ms-moe-maker export recipe.yaml
+```
+
+Fails with a pointer to `build` if there is no trained MoE to export.
+
+### `bundle`
+
+Freeze a recipe and everything needed to hand it to someone else.
+
+A recipe is mostly sentinels meaning "you decide", so handing somebody
+`recipe.yaml` hands them your intentions and *their* defaults — same file,
+different model, no error anywhere. This resolves the recipe on THIS box and
+writes the answers back into it, so there is nothing left for the far side to
+decide.
+
+```bash
+ms-moe-maker bundle recipe.yaml
+```
+
+It will not pretend about the part it cannot fix. Sixteen fingerprint fields
+have no recipe key at all — three come from environment variables, twelve are
+literals in `build_config`, one is a CLI flag — and they are printed by name
+every time, as well as written into the manifest so the far side can diff them.
+See `knobs.UNPINNABLE`.
 
 ## Global flags
 

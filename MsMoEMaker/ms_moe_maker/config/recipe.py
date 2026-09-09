@@ -133,10 +133,61 @@ class Budget:
     # (1024): reasoning traces need headroom for think + answer, unlike a tool
     # call. Raise it if the teacher's answers are truncated mid-script.
     reasoning_teacher_max_new: int = -1
-    # Max new tokens the generic synth/domain teacher may emit. -1 = default
-    # (512): plain domain text (no think block) needs less headroom than a
-    # reasoning trace, but more than a tool call.
+    # Max new tokens a teacher may emit, and the FALLBACK for the two
+    # loop-specific budgets below. -1 = default (512).
+    #
+    # ONE KNOB WITH TWO CONSUMERS COST A CORPUS. This number was read by the
+    # AGENT loop and the DOMAIN loop, whose appetites are opposite: an MCP
+    # tool call is a few hundred tokens of JSON answering a prompt that
+    # carries the whole tool surface, while a lore passage is a page of
+    # prose. Sized for the tool calls at 512, 66% of domain generations hit
+    # the cap and were DISCARDED - so that corpus became the 34% of narrative
+    # short enough to fit, the specialist learned atypically-short lore, and
+    # the router had nothing left to tell it apart by. The eval reported it
+    # as `NO ROUTER SIGNAL ... the fix is upstream`, which was true and did
+    # not say upstream of WHAT. Set the loop's own knob; this is what they
+    # fall back to when you have not.
     teacher_max_new: int = -1
+    # Max new tokens the AGENT (MCP tool-call) teacher may emit per trace.
+    # -1 = use teacher_max_new. Small by nature: the prompt carries the tool
+    # surface and the answer is one JSON object, so this is the budget that
+    # can afford to stay tight.
+    agent_teacher_max_new: int = -1
+    # Max new tokens the DOMAIN teacher may emit per trace. -1 = use
+    # teacher_max_new. Plain prose, no think block - but a WHOLE answer, and
+    # a truncated one is discarded rather than trimmed, so a cap set too low
+    # here does not shorten the corpus, it biases it.
+    domain_teacher_max_new: int = -1
+
+    # ── what happens when a generation wants more room than it has ────────
+    #
+    # These two are INDEPENDENT on purpose. Telling the teacher its budget
+    # reduces how often it overruns; the overrun policy decides what happens
+    # when it does anyway. Either is useful without the other, and folding
+    # them into one enum would mean parsing compound values and being unable
+    # to test the halves apart.
+
+    # Put the room available into the teacher's own prompt. Costs nothing and
+    # no model obeys it perfectly, which is exactly why it is not the whole
+    # answer - it lowers the overrun RATE, it does not bound anything. Nothing
+    # to say for an unbounded budget, where it is a no-op.
+    teacher_tell_budget: bool = False
+    # discard | answer-only | close-and-answer. See box/describe.py, which owns
+    # the vocabulary and publishes it in --describe.
+    #
+    # `discard` is the default because it is what every existing recipe already
+    # gets, not because it is the best answer. It is the RIGHT answer only if
+    # you own enough VRAM to raise the ceiling instead: a gauntlet at 512
+    # tokens discarded 490 of 740 domain generations, which does not shorten
+    # that corpus, it keeps the third of the material short enough to fit.
+    teacher_overrun: str = "discard"
+    # Tokens held back to buy an ending when a salvage policy is on. -1 = a
+    # quarter of that loop's own budget, floored at 64, never more than half.
+    #
+    # NOT RESOLVED INTO ONE NUMBER AT BUILD TIME, deliberately: the reserve
+    # scales with the budget it comes out of, and the three loops no longer
+    # share a budget. A single resolved value would be right for one of them.
+    teacher_answer_reserve: int = -1
 
     # THE ADAPTER'S SHAPE, which was reachable only from an env var.
     #
@@ -1116,11 +1167,40 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     if bud.lora_dropout != -1 and not (0.0 <= bud.lora_dropout <= 1.0):
         errs.append(f"budget.lora_dropout must be -1 or in [0, 1], got "
                     f"{bud.lora_dropout}")
+    # 0 IS UNBOUNDED HERE, AND REFUSING IT LOCKED THE FEATURE SHUT. `0` means
+    # "as far as the engine window allows": it is what _resolve_max_new turns
+    # into None, what the vLLM teacher passes as max_tokens=None, what
+    # _HFTeacher._budget resolves against max_position_embeddings, what the
+    # vllm_max_len knob help calls "the real ceiling when a teacher budget is
+    # set to 0 for unbounded" - and what the runtime NOTE tells you to set
+    # when generations hit the cap. That NOTE fired seven times in one real
+    # build, and the recipe it recommended would not load, because this check
+    # read `< 1`. Every layer implemented unbounded and this line stood in
+    # the door. A budget of zero tokens is not a thing anybody wants, so the
+    # literal reading is dead space and it belongs to unbounded.
     for knob, val in (("teacher_max_new", bud.teacher_max_new),
+                      ("agent_teacher_max_new", bud.agent_teacher_max_new),
+                      ("domain_teacher_max_new", bud.domain_teacher_max_new),
                       ("reasoning_teacher_max_new",
                        bud.reasoning_teacher_max_new)):
-        if val != -1 and val < 1:
-            errs.append(f"budget.{knob} must be -1 (default) or >= 1, got {val}")
+        if val < -1:
+            errs.append(f"budget.{knob} must be -1 (default), 0 (unbounded - "
+                        f"as far as the engine window allows) or >= 1, got "
+                        f"{val}")
+
+    from ..box.describe import OVERRUN_POLICIES
+    if bud.teacher_overrun not in OVERRUN_POLICIES:
+        errs.append(f"budget.teacher_overrun must be one of "
+                    f"{', '.join(OVERRUN_POLICIES)}, got "
+                    f"{bud.teacher_overrun!r} - a typo here would otherwise "
+                    f"read as `discard` and quietly throw away every "
+                    f"generation the policy was added to save")
+    if bud.teacher_answer_reserve != -1 and bud.teacher_answer_reserve < 1:
+        errs.append(f"budget.teacher_answer_reserve must be -1 (a quarter of "
+                    f"the loop's budget) or >= 1, got "
+                    f"{bud.teacher_answer_reserve} - 0 reserves nothing to "
+                    f"write the answer with, which is the same as discarding "
+                    f"the generation but slower")
 
     r = rec.router
     if r.batch != -1 and r.batch < 1:
@@ -1196,11 +1276,28 @@ def validate(rec: Recipe) -> Tuple[List[str], List[str]]:
     # the same shape corpus.per_repo_cap uses: the sentinel is spelled -1, and
     # 0 here would generate nothing and score the empty string against every
     # reference - a full eval reporting zeros that look like a model failure.
-    if rec.eval.max_new_tokens != -1 and rec.eval.max_new_tokens < 1:
+    # 0 IS UNBOUNDED, THE SAME WAY IT IS FOR EVERY TEACHER BUDGET. It used
+    # to be refused here on the grounds that "0 generates nothing" - the
+    # literal reading, and the one nobody means. The run that made the case
+    # for changing it capped eval at 1024 and reported SIXTEEN OF SIXTEEN
+    # generations cut off for five separate experts, which makes every score
+    # in those rows a score on an amputated answer and `reasoned` a lower
+    # bound rather than a measurement. The advisory said "raise
+    # eval.max_new_tokens and ask again"; there was no spelling of "raise it
+    # until the answer is done."
+    if rec.eval.max_new_tokens < -1:
         errs.append(f"eval.max_new_tokens must be -1 (you decide: 256, or "
-                    f"1024 when the run writes thinking traces) or >= 1, got "
-                    f"{rec.eval.max_new_tokens} - 0 generates nothing and "
-                    f"would score the empty string against every reference")
+                    f"1024 when the run writes thinking traces), 0 (unbounded "
+                    f"- as far as the model window allows) or >= 1, got "
+                    f"{rec.eval.max_new_tokens}")
+    if rec.eval.max_new_tokens == 0:
+        warns.append("eval.max_new_tokens=0 lets every sample generate until "
+                     "it stops on its own or fills the model window. That is "
+                     "the honest setting for a `reasoned` number you intend "
+                     "to trust, and it is the expensive one: eval generation "
+                     "time is linear in this budget, and it is paid once per "
+                     "sample per expert per surface. Measure a run you care "
+                     "about; do not leave it on for a shakedown.")
 
     # -- roots --------------------------------------------------------------
     # Both empty = the tool's defaults (msmoe_data / msmoe_run_{size}), which

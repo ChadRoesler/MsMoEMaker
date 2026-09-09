@@ -413,6 +413,201 @@ def _check_generator(pf: Preflight, config) -> None:
            f"vLLM, batch {getattr(config, 'vllm_batch', 0)}")
 
 
+def _budget_word(value: int) -> str:
+    """A budget as a person reads it. 0 is a word, not a number."""
+    return "unbounded" if int(value or 0) == 0 else f"{int(value)}"
+
+
+def _check_budgets(pf: Preflight, config, recipe=None) -> None:
+    """WHICH CEILING EACH GENERATOR WILL ACTUALLY WRITE UNDER.
+
+    This exists because the answer was only discoverable from a running
+    build, and only then if you happened to be tailing the log. The domain
+    loop hit its cap on 66% of generations in a real gauntlet; the NOTE that
+    said so fired seven times, named a knob, and by then the run was hours
+    deep and the corpus already biased - because a generation cut at the cap
+    is DISCARDED, so a low ceiling does not shorten that corpus, it selects
+    the material short enough to fit and throws the rest away.
+
+    Three numbers on one line, before anything is booked. No routing logic
+    here on purpose: which loops a run uses is the builder's decision and
+    reimplementing it would be a second copy that drifts. Printing all three
+    costs one line and cannot be wrong.
+
+    THE TRAP THIS WARNS ABOUT IS SPECIFIC AND EASY TO WALK INTO. On the vLLM
+    path, "unbounded" is not "as much as it takes" - it is max_model_len,
+    which is `runtime.vllm_max_len`, and that defaults to 4096. So a recipe
+    carrying `reasoning_teacher_max_new: 4096` alongside `vllm_max_len: 4096`
+    gets LESS room by asking for unbounded than by naming the number, because
+    the prompt comes out of the same window. Silently. That is the reverse of
+    what the setting reads like, and the only place to catch it is here.
+    """
+    if not _needs_a_teacher(config):
+        return
+
+    from ..box.describe import OVERRUN_CLOSE_AND_ANSWER, OVERRUN_DISCARD
+    from ..config import pipeline as cfg_module
+
+    agent = getattr(config, "agent_teacher_max_new", 0)
+    domain = getattr(config, "domain_teacher_max_new", 0)
+    reason = getattr(config, "reasoning_teacher_max_new", 0)
+    pf.add("teacher budgets", PASS,
+           f"agent {_budget_word(agent)}, domain {_budget_word(domain)}, "
+           f"reasoning {_budget_word(reason)} tokens per generation")
+
+    # ── what happens when one of those is not enough ──────────────────────
+    policy = getattr(config, "teacher_overrun", OVERRUN_DISCARD)
+    asked_reserve = getattr(config, "teacher_answer_reserve", -1)
+    if policy == OVERRUN_DISCARD:
+        pf.add("overrun policy", PASS,
+               "discard - a generation that hits its cap is thrown away "
+               "(budget.teacher_overrun)")
+    else:
+        # THE RESERVE IS PER LOOP, and printing one number would be a lie.
+        # It is a quarter of whichever budget that loop is spending, so the
+        # three differ whenever the budgets do - which is now the normal case.
+        reserves = ", ".join(
+            f"{name} {cfg_module.answer_reserve(budget, asked_reserve)}"
+            for name, budget in (("agent", agent), ("domain", domain),
+                                 ("reasoning", reason)))
+        pf.add("overrun policy", PASS,
+               f"{policy} - an overrun is finished with a reserve instead of "
+               f"discarded ({reserves} tokens held back)")
+        # SAY WHERE THE PROMISE IS WEAKER. Only the reasoning loop has a
+        # structural terminator to force; prose and JSON have only EOS, so
+        # there the policy raises the yield without bounding anything, and a
+        # continuation that also runs out is still discarded. A recipe reading
+        # `close-and-answer` should not be left to infer that.
+        if policy == OVERRUN_CLOSE_AND_ANSWER:
+            pf.add("overrun policy", PASS,
+                   "close-and-answer has a gate to close only in the reasoning "
+                   "loop; the agent and domain loops have no delimiter, so "
+                   "there it behaves as answer-only - keep writing, accept it "
+                   "if it ends")
+
+    if not getattr(config, "use_vllm", False):
+        return
+    window = int(getattr(config, "vllm_max_len", 0) or 0)
+    if not window:
+        return
+    # Only the budgets that ASK for unbounded can be surprised by the window.
+    unbounded = [name for name, val in (("agent_teacher_max_new", agent),
+                                        ("domain_teacher_max_new", domain),
+                                        ("reasoning_teacher_max_new", reason))
+                 if int(val or 0) == 0]
+    if not unbounded:
+        return
+
+    # WHAT UNBOUNDED RESOLVES TO IS ALWAYS WORTH PRINTING. It is the one fact
+    # the word hides.
+    detail = (f"{', '.join(unbounded)} = unbounded, which on the vLLM path "
+              f"means runtime.vllm_max_len ({window}) minus the prompt")
+
+    # THE WARN IS FOR NOT HAVING TOUCHED THE THING THAT DECIDES IT, not for
+    # the window being small. Asked of the RECIPE rather than the config
+    # because the config cannot tell "set to 4096" from "defaulted to 4096",
+    # and those two deserve different answers: somebody who raised this knob
+    # has already thought about the ceiling and does not need warning about
+    # it, while somebody who never set it is about to discover that asking
+    # for unbounded made the budget SMALLER than the number they replaced.
+    asked_window = 0
+    if recipe is not None:
+        asked_window = int(getattr(getattr(recipe, "runtime", None),
+                                   "vllm_max_len", 0) or 0)
+    if asked_window:
+        pf.add("teacher budgets", PASS, detail)
+        return
+    pf.add("teacher budgets", WARN,
+           detail + f" - and vllm_max_len is not set in the recipe, so that "
+                    f"{window} is a default nobody chose",
+           f"unbounded is only as generous as the window it runs into. At "
+           f"{window} it can be SMALLER than the number you replaced, "
+           f"silently, because the prompt comes out of the same window. Set "
+           f"runtime.vllm_max_len deliberately: it is the real ceiling and it "
+           f"is what reserves the KV cache.")
+
+
+def _check_budget_hint(pf: Preflight, config) -> None:
+    """Is anything being told how much room it has, and can it be?
+
+    A no-op is worth a line when the setting is on: `teacher_tell_budget` has
+    nothing to say about an unbounded budget, so a recipe that turns it on and
+    also asks for unbounded has configured a sentence that never gets written.
+    Silent success and silent no-op look identical from the outside.
+    """
+    if not _needs_a_teacher(config):
+        return
+    if not getattr(config, "teacher_tell_budget", False):
+        return
+    named = [name for name, budget in
+             (("agent", getattr(config, "agent_teacher_max_new", 0)),
+              ("domain", getattr(config, "domain_teacher_max_new", 0)),
+              ("reasoning", getattr(config, "reasoning_teacher_max_new", 0)))
+             if int(budget or 0) > 0]
+    if not named:
+        pf.add("budget hint", WARN,
+               "budget.teacher_tell_budget is on and every teacher budget is "
+               "unbounded, so there is no room to describe and no instruction "
+               "is written",
+               "harmless, but it is doing nothing - either name a budget or "
+               "turn the hint off, so the recipe says what the run does")
+        return
+    pf.add("budget hint", PASS,
+           f"the {', '.join(named)} teacher{'' if len(named) == 1 else 's'} "
+           f"{'is' if len(named) == 1 else 'are'} told how much room "
+           f"{'it' if len(named) == 1 else 'they'} ha"
+           f"{'s' if len(named) == 1 else 've'}, in words")
+
+
+def _check_eval_budget(pf: Preflight, config, recipe) -> None:
+    """What the eval will generate per sample, and what unbounded costs.
+
+    Reported rather than merely validated because the number silently decides
+    whether a whole column of the report means anything. A real run capped at
+    1024 returned SIXTEEN OF SIXTEEN generations cut off for five separate
+    experts - every score in those rows was computed on an amputated answer,
+    and `reasoned` (which needs a close tag it never reached) was a lower
+    bound being read as a measurement.
+    """
+    from ..config import pipeline as cfg_module
+
+    asked = getattr(getattr(recipe, "eval", None), "max_new_tokens", -1)
+    resolved = cfg_module.eval_max_new_tokens(config, asked)
+    if resolved == 0:
+        # "EXPENSIVE" IS AN ADJECTIVE; THIS CAN COUNT. Every sample is
+        # generated once per expert and once more against the MoE, so the
+        # multiplier is knowable from the recipe before anything is booked -
+        # and it is the difference between a setting somebody tries and a
+        # setting somebody regrets. A 0.5B with a 32k window at 16 samples
+        # across 9 experts is 288 generations of up to ~31k tokens each; the
+        # same run capped at 1024 took just under an hour.
+        n_samples = int(getattr(getattr(recipe, "eval", None),
+                                "num_samples", 0) or 0)
+        n_experts = len(getattr(recipe, "experts", None) or ())
+        # Specialist + MoE = two surfaces per expert.
+        generations = n_samples * n_experts * 2
+        cost = (f"{generations:,} generations ({n_samples} samples x "
+                f"{n_experts} experts x 2 surfaces)"
+                if generations else "one generation per sample per expert per "
+                                    "surface")
+        pf.add("eval budget", WARN,
+               "unbounded: every sample generates until it stops on its own "
+               "or fills the model window",
+               f"this is the honest setting for a `reasoned` number you mean "
+               f"to trust, and generation time is linear in it: {cost}, each "
+               f"free to run to the model's whole context. On a 32k-window "
+               f"base that is tens of thousands of tokens per sample. Name a "
+               f"number instead (2048-4096 covers a think block and its "
+               f"answer) and read `capped_generations` to find out whether it "
+               f"was enough - unbounded is for the run you have already "
+               f"decided to spend a night on.")
+        return
+    pf.add("eval budget", PASS,
+           f"{resolved} tokens per sample"
+           + (" (automatic: this run writes thinking traces)"
+              if int(asked or -1) < 0 else ""))
+
+
 def _check_reasoning(pf: Preflight, config, recipe) -> None:
     """WHICH TAGS, AND WHERE THEY CAME FROM.
 
@@ -614,6 +809,9 @@ def run(config, recipe, offline: bool = False,
     _check_roots(pf, config)
     _check_sources(pf, recipe)
     _check_generator(pf, config)
+    _check_budgets(pf, config, recipe)
+    _check_budget_hint(pf, config)
+    _check_eval_budget(pf, config, recipe)
     _check_trainer(pf, config)
     _check_reasoning(pf, config, recipe)
     if have_torch:

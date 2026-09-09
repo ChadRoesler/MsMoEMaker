@@ -82,11 +82,65 @@ Primary options usually include:
 - `grad_accum`
 - LoRA controls (`lora_r`, `lora_alpha`, `lora_dropout`)
 - warmup controls
-- `teacher_max_new` — max tokens the generic synth/domain teacher emits per
-  trace. Default `512`. `-1` (or absent) = use the default.
-- `reasoning_teacher_max_new` — max tokens the reasoning teacher emits per
-  trace. Default `1024`, because a think block + answer needs more headroom than
-  a tool call or plain domain text. `-1` (or absent) = use the default.
+### Teacher generation budgets
+
+Three synth loops generate the corpora, and they no longer share one ceiling.
+They have opposite appetites: an MCP tool call is a few hundred tokens of JSON
+answering a prompt that carries the whole tool surface, a lore passage is a page
+of prose, and a reasoning trace is a think block *plus* an answer.
+
+- `teacher_max_new` — the FALLBACK, used by any loop that has not been given its
+  own. Default `512`.
+- `agent_teacher_max_new` — the MCP tool-call loop. `-1` = use
+  `teacher_max_new`. Can stay tight; the answer is one JSON object.
+- `domain_teacher_max_new` — the plain-text loop. `-1` = use `teacher_max_new`.
+- `reasoning_teacher_max_new` — the reasoning loop. Default `1024`, because a
+  think block plus an answer needs more headroom than either of the others.
+
+All four take `0` to mean **unbounded**: as far as the engine window allows. On
+the vLLM path that window is `runtime.vllm_max_len` *minus the prompt*, which is
+worth reading twice — with `vllm_max_len` at its default `4096`, asking for
+unbounded gives you LESS room than naming `4096` outright. Preflight warns when
+you ask for unbounded without having set the window yourself.
+
+### When a generation does not fit
+
+A generation cut at its cap is **discarded, not trimmed**. That matters more
+than it sounds: a low ceiling does not shorten the corpus, it keeps whichever
+material happened to fit and deletes the rest. A real gauntlet at `512` dropped
+490 of 740 domain generations — three times the compute for a corpus made of
+atypically short material, which the eval then reported as `NO ROUTER SIGNAL`.
+
+Raising the ceiling is the answer if you own the VRAM. These two knobs are the
+answer if you do not:
+
+- `teacher_tell_budget` — put the room available into the teacher's own prompt,
+  in words. Default `false`. Lowers the overrun rate; bounds nothing, because no
+  model obeys a length instruction exactly. No-op for an unbounded budget.
+- `teacher_overrun` — what to do when it overruns anyway. Default `discard`,
+  which is what every earlier release did.
+  - `discard` — throw the generation away.
+  - `answer-only` — salvage a generation that already ended its *reasoning* and
+    had its answer cut. Never invents a boundary the teacher did not choose.
+  - `close-and-answer` — also salvage one still mid-thought: trim to the last
+    sentence, write the terminator, spend the reserve on the answer. Yield goes
+    to ~100% at any budget, which is what makes a small box able to build at
+    all. Those rows carry a thought the teacher was not finished with; the
+    answer is generated conditioned on it, so it is a shorter thought rather
+    than a wrong one, but it is a choice and `answer-only` exists for anyone who
+    does not want it.
+- `teacher_answer_reserve` — tokens held back to buy that ending. `-1` = a
+  quarter of *that loop's* budget, floored at 64, never more than half.
+
+Only the reasoning loop has a delimiter to force. The agent and domain loops
+have nothing to close, so `close-and-answer` behaves as `answer-only` there —
+keep writing, accept it if it ends — and a continuation that also runs out is
+still discarded. One attempt, never a loop. Preflight says this out loud rather
+than letting the recipe imply a promise the loop cannot make.
+
+The happy path costs nothing: a generation that finishes on its own is one
+call, and only the overruns pay for a second, batched one.
+
 
 What it changes:
 
@@ -94,9 +148,11 @@ What it changes:
 - memory pressure
 - specialist adaptation strength
 
-The two `*_teacher_max_new` knobs shape the SYNTHETIC data, not the adapter:
-raise `reasoning_teacher_max_new` if the teacher's think/answer is truncated
-mid-script, and `teacher_max_new` if plain domain traces are cut short.
+The `*_teacher_max_new` knobs shape the SYNTHETIC data, not the adapter. Raise
+the one belonging to the loop that is actually being cut — the progress line
+names it, and so does the NOTE that fires when more than a quarter of a batch
+hits the cap. Raising `teacher_max_new` when the domain loop is starving now
+moves only the loops that have not been given their own ceiling.
 
 Decision order:
 
@@ -162,7 +218,20 @@ Primary options include:
 - `held_out_fraction`
 - `num_samples`
 - `dead_threshold`
+- `max_new_tokens` — tokens generated per sample. `-1` = you decide: `256`, or
+  `1024` when the run writes thinking traces. `0` = unbounded, as far as the
+  model window allows.
 - `script` for custom evaluation integration
+
+Read `max_new_tokens` before you trust a quality column. A real run capped at
+`1024` reported sixteen of sixteen generations cut off for five separate
+experts — every score in those rows was computed on an amputated answer, and
+`reasoned` (which needs a close tag it never reached) was a lower bound being
+read as a measurement. The report says so in its caveats; the fix is to raise
+this and ask again. `0` makes that caveat impossible rather than smaller, and
+it is expensive: generation time is linear in this number and it is paid once
+per sample per expert per surface, so preflight counts the generations for you
+before you spend them.
 
 What it changes:
 
@@ -201,6 +270,15 @@ Primary options include:
 - `load_in_4bit`
 - `alloc_conf`
 - `llama_cpp`
+- `use_vllm` — serve the teacher through vLLM instead of plain transformers.
+  Much faster generation, and a second serving stack to install and keep happy.
+  It also moves the teacher batch from `96` to `512` and is part of the build
+  fingerprint, so preflight FAILS rather than falling back silently: a corpus
+  generated without it would not be the corpus that `build_id` describes.
+- `vllm_max_len` — the vLLM context window (`max_model_len`). Default `4096`.
+  This is what reserves the KV cache, and it is **the real ceiling any unbounded
+  teacher budget runs into**, so a recipe asking for unbounded generation
+  without raising this has asked for less room than it thinks.
 
 What it changes:
 

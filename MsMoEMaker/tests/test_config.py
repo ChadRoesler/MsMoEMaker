@@ -1324,12 +1324,80 @@ class TestTheEvalGenerationBudget:
         assert config.eval_max_new_tokens(self._Cfg(), 900) == 900
         assert config.eval_max_new_tokens(self._Reasoning(), 64) == 64
 
-    def test_zero_and_junk_fall_through_to_auto_not_to_nothing(self):
-        """validate() refuses these on the laptop; a spec assembled in code
-        does not go through validate(), and a budget of 0 generates nothing."""
-        assert config.eval_max_new_tokens(self._Cfg(), 0) == 256
+    def test_zero_survives_as_zero_because_only_the_harness_can_resolve_it(self):
+        """0 = unbounded, and it CANNOT be resolved here.
+
+        Unbounded means "the model window minus this prompt". This function is
+        called once for the whole run, before a model is loaded and with no
+        prompt in sight, so returning a number would mean inventing one. It
+        hands 0 onward and the harness resolves it per generation.
+
+        The reason this matters more than it reads: the harness detects
+        truncation by comparing the generated length against the budget, and
+        `>= 0` is true of every generation that has ever run. Resolving late
+        is what keeps that comparison honest.
+        """
+        assert config.eval_max_new_tokens(self._Cfg(), 0) == 0
+        assert config.eval_max_new_tokens(self._Reasoning(), 0) == 0
+
+    def test_junk_and_stray_negatives_still_fall_through_to_auto(self):
+        """Only 0 was given a meaning. None and -7 are still "you decide"."""
         assert config.eval_max_new_tokens(self._Cfg(), None) == 256
-        assert config.eval_max_new_tokens(self._Reasoning(), 0) == 1024
+        assert config.eval_max_new_tokens(self._Cfg(), "nonsense") == 256
+        assert config.eval_max_new_tokens(self._Cfg(), -7) == 256
+        assert config.eval_max_new_tokens(self._Reasoning(), None) == 1024
+
+
+class TestWhatUnboundedResolvesTo:
+    """`0` becomes a real integer before any generator sees it.
+
+    Both the teacher and the eval need "the rest of the window", and both
+    need the same guard against a tokeniser that claims a window of a
+    trillion tokens. The teacher grew that guard first and the eval needed it
+    identically - two copies of a guard against an absurd number is the shape
+    that drifts until only one of them still catches it.
+    """
+
+    class _Cfg:
+        max_position_embeddings = 32768
+
+    class _Model:
+        config = None
+
+    class _LyingTokenizer:
+        model_max_length = 1000000000000000019884624838656
+
+    def _model(self, window):
+        m = self._Model()
+        c = self._Cfg()
+        c.max_position_embeddings = window
+        m.config = c
+        return m
+
+    def test_the_model_config_is_asked_first(self):
+        assert config.model_window(self._model(32768)) == 32768
+
+    def test_a_tokenizer_claiming_a_trillion_is_not_believed(self):
+        """VERY_LARGE_INTEGER is a real sentinel in transformers, and a budget
+        derived from it asks for a trillion tokens."""
+        assert config.model_window(None, self._LyingTokenizer()) == 4096
+
+    def test_nothing_known_falls_back_rather_than_returning_zero(self):
+        assert config.model_window() == 4096
+        assert config.model_window(None, None, fallback=8192) == 8192
+
+    def test_unbounded_is_the_window_minus_the_prompt(self):
+        assert config.unbounded_budget(1000, model=self._model(4096)) == 3096
+
+    def test_a_prompt_that_fills_the_window_still_gets_a_usable_budget(self):
+        """0 generates nothing and a negative raises, so neither may escape."""
+        for used in (4096, 5000, 10**9):
+            got = config.unbounded_budget(used, model=self._model(4096))
+            assert got >= 64, (used, got)
+
+    def test_junk_prompt_lengths_do_not_crash_the_budget(self):
+        assert config.unbounded_budget(None, model=self._model(4096)) == 4096
+        assert config.unbounded_budget("x", model=self._model(4096)) == 4096
 
 
 class TestTier3ValidationRefusals:
@@ -1350,6 +1418,25 @@ class TestTier3ValidationRefusals:
         errs, _ = validate(rec)
         return errs
 
+    @classmethod
+    def _warns(cls, blocks=None):
+        """Same recipe, the other half of validate()'s answer.
+
+        _errs threw the warnings away, so a check that a value is ACCEPTED
+        LOUDLY - the shape every "we fall back and say so" decision takes -
+        had nothing to assert against.
+        """
+        from ms_moe_maker.config.recipe import parse, validate
+        body = {"schema_version": 1, "name": "t", "size": "0.5B",
+                "experts": [{"name": "python",
+                             "source": {"kind": "stack", "language": "Python"}},
+                            {"name": "csharp",
+                             "source": {"kind": "stack", "language": "C#"}}]}
+        for key, value in (blocks or {}).items():
+            body[key] = value
+        rec, _ = parse(body)
+        return validate(rec)[1]
+
     def test_a_silent_recipe_still_validates(self):
         assert self._errs() == []
 
@@ -1367,7 +1454,7 @@ class TestTier3ValidationRefusals:
                                       "collect_headroom": -2,
                                       "lora_r": 0,
                                       "lora_dropout": -0.5,
-                                      "teacher_max_new": 0}})
+                                      "teacher_max_new": -2}})
         assert any("max_seq_length" in e for e in errs)
         assert any("collect_headroom" in e for e in errs)
         assert any("lora_r" in e for e in errs)
@@ -1397,16 +1484,40 @@ class TestTier3ValidationRefusals:
         assert any("held_out_fraction" in e
                    for e in self._errs({"eval": {"held_out_fraction": 0.99}}))
 
-    def test_zero_is_not_the_sentinel_for_max_new_tokens(self):
-        """-1 means "you decide"; 0 means "generate nothing and score the
-        empty string against every reference", which is a full eval printing
-        zeros that read like a model failure."""
+    def test_zero_is_unbounded_for_every_generation_budget(self):
+        """-1 = you decide, 0 = unbounded, and refusing 0 LOCKED THE FEATURE.
+
+        Every layer already implemented unbounded - _resolve_max_new returns
+        None for it, the vLLM teacher passes max_tokens=None, _HFTeacher
+        resolves it against the model window, the vllm_max_len knob help
+        calls it "the real ceiling when a teacher budget is set to 0 for
+        unbounded", and the runtime NOTE tells you to set it when generations
+        hit the cap. That NOTE fired seven times in one real build and the
+        recipe it recommended would not load, because validate() read `< 1`.
+
+        A budget of zero tokens is not a thing anyone wants, so the literal
+        reading is dead space and it belongs to unbounded. -1 stays "you
+        decide"; anything below it is still a mistake.
+        """
+        for knob in ("teacher_max_new", "agent_teacher_max_new",
+                     "domain_teacher_max_new", "reasoning_teacher_max_new"):
+            assert self._errs({"budget": {knob: 0}}) == [], knob
+            assert any(knob in e
+                       for e in self._errs({"budget": {knob: -2}})), knob
         assert self._errs({"eval": {"max_new_tokens": -1}}) == []
         assert self._errs({"eval": {"max_new_tokens": 1024}}) == []
-        assert any("max_new_tokens" in e
-                   for e in self._errs({"eval": {"max_new_tokens": 0}}))
+        assert self._errs({"eval": {"max_new_tokens": 0}}) == []
         assert any("max_new_tokens" in e
                    for e in self._errs({"eval": {"max_new_tokens": -2}}))
+
+    def test_unbounded_eval_says_what_it_will_cost(self):
+        """Accepting it silently is how somebody leaves it on for a shakedown
+        and waits an afternoon for a number they were not going to read."""
+        assert self._errs({"eval": {"max_new_tokens": 0}}) == []
+        loud = self._warns({"eval": {"max_new_tokens": 0}})
+        assert any("max_new_tokens=0" in w for w in loud), loud
+        quiet = self._warns({"eval": {"max_new_tokens": 1024}})
+        assert not any("max_new_tokens=0" in w for w in quiet)
 
     def test_a_mix_the_unset_ceiling_cannot_fill_is_refused(self):
         """max_samples unset used to skip the mix check entirely, so a 500k mix

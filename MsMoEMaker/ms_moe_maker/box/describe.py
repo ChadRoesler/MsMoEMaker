@@ -43,6 +43,31 @@ COMMANDS = ("init", "build", "corpus", "smoke", "eval", "validate",
 # it, and stagehand's existing --mode values keep meaning what they meant.
 EVAL_MODES = ("routing", "quality", "experts", "all")
 
+# What to do when a teacher generation wants more room than its budget gives.
+# Public vocabulary, published below for the same reason eval_modes is: a
+# front-end offering these as a choice should not have to hardcode the list.
+#
+#   discard          - throw the generation away. What this tool has always
+#                      done, and what every existing recipe keeps.
+#   answer-only      - salvage a generation that already ENDED ITS REASONING
+#                      and had its answer cut. Never invents a boundary the
+#                      teacher did not choose.
+#   close-and-answer - also salvage one still mid-thought: trim to the last
+#                      sentence, write the terminator, spend the reserve on the
+#                      answer. What makes a 512-token box able to build at all.
+#
+# Why this is a knob and not a fix applied for everybody: `discard` is honest
+# about compute and dishonest about corpus SHAPE - a real gauntlet dropped 490
+# of 740 domain generations at 512 tokens, which selected the third of the
+# material short enough to fit rather than shortening anything. Salvage
+# inverts that trade. Which one is right depends on hardware nobody else can
+# see, so it is offered, not mandated.
+OVERRUN_DISCARD = "discard"
+OVERRUN_ANSWER_ONLY = "answer-only"
+OVERRUN_CLOSE_AND_ANSWER = "close-and-answer"
+OVERRUN_POLICIES = (OVERRUN_DISCARD, OVERRUN_ANSWER_ONLY,
+                    OVERRUN_CLOSE_AND_ANSWER)
+
 # The event vocabulary emitted under --json. A consumer that does not know an
 # event kind must ignore it, so adding one is not a breaking change; removing
 # or renaming one is.
@@ -60,6 +85,7 @@ DESCRIBE = {
     "description": DESCRIPTION,
     "commands": list(COMMANDS),
     "eval_modes": list(EVAL_MODES),
+    "overrun_policies": list(OVERRUN_POLICIES),
     "events": list(EVENTS),
     # The manifest schema this build writes into a run directory. A reader
     # (seren-theatre) can check compatibility before it trusts a file.

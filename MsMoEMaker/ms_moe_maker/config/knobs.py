@@ -255,14 +255,46 @@ KNOBS: Dict[str, Knob] = {
         "Quantisation for the vLLM teacher, for when it will not otherwise "
         "fit. Unset loads it at full bfloat16."),
     "teacher_max_new": Knob(
-        "Most tokens the teacher may write for one generated example. Too "
-        "low and answers stop mid-script.",
+        "Fallback ceiling for every teacher loop that has not been given its "
+        "own. Set the loop's knob instead when one of them needs a different "
+        "shape - one number for a JSON tool call and a page of prose starves "
+        "whichever it was not sized for. 0 = unbounded.",
         recipe="budget.teacher_max_new"),
+    "agent_teacher_max_new": Knob(
+        "Most tokens the AGENT teacher may write for one MCP tool-call "
+        "example. Can stay tight: the prompt carries the tool surface, the "
+        "answer is one JSON object. 0 = unbounded.",
+        recipe="budget.agent_teacher_max_new"),
+    "domain_teacher_max_new": Knob(
+        "Most tokens the DOMAIN teacher may write for one plain-text example. "
+        "Too low does not shorten this corpus, it BIASES it - a generation "
+        "cut at the cap is discarded, so the rows that survive are the ones "
+        "that happened to fit. 0 = unbounded.",
+        recipe="budget.domain_teacher_max_new"),
     "reasoning_teacher_max_new": Knob(
         "Most tokens the teacher may write for one reasoning example. Higher "
         "than the plain ceiling because the thinking alone can eat the whole "
         "budget before the answer starts.",
         recipe="budget.reasoning_teacher_max_new"),
+    "teacher_tell_budget": Knob(
+        "Put the room available into the teacher's own prompt, so it aims to "
+        "fit instead of being cut. Lowers the overrun rate; bounds nothing, "
+        "because no model obeys a length instruction exactly. No-op when the "
+        "budget is unbounded - there is no number to tell it.",
+        recipe="budget.teacher_tell_budget"),
+    "teacher_overrun": Knob(
+        "What to do when a generation overruns its budget anyway: discard it "
+        "(the default, and what every earlier release did), salvage only the "
+        "ones that already finished reasoning (answer-only), or also close a "
+        "thought still in progress and buy its answer (close-and-answer). "
+        "Discarding is honest about compute and dishonest about corpus SHAPE - "
+        "the rows that survive are the ones that happened to fit.",
+        recipe="budget.teacher_overrun"),
+    "teacher_answer_reserve": Knob(
+        "Tokens held back to buy an ending when a salvage policy is on. -1 = a "
+        "quarter of that loop's own budget, floored at 64 and never more than "
+        "half - a reserve that eats the budget leaves nothing to think with.",
+        recipe="budget.teacher_answer_reserve"),
 
     # ── specialist training ───────────────────────────────────────────────
     "max_seq_length": Knob(

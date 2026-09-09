@@ -395,19 +395,27 @@ EVAL_MAX_NEW_TOKENS_REASONING = 1024
 
 
 def eval_max_new_tokens(config, requested: int = -1) -> int:
-    """The per-sample generation budget for eval. `-1` = you decide.
+    """The per-sample generation budget for eval. `-1` = you decide, `0` = unbounded.
 
-    The shape that decides it is whether ANYTHING in this run writes a
+    The shape that decides `-1` is whether ANYTHING in this run writes a
     thinking trace: either the base is a reasoning model (build_config stamps
     the delimiters onto the config) or an expert generates traces
     (reasoning_experts). Both spend their first few hundred tokens on the
     block before they say anything scorable.
 
-    0 and stray negatives fall through to the automatic answer rather than
+    `0` IS RETURNED AS 0, NOT RESOLVED HERE. Unbounded means "the model
+    window minus this prompt", and this function has neither a model nor a
+    prompt - it is called once for the whole run, before anything is loaded.
+    The harness resolves it per generation against the model it just loaded
+    (see `unbounded_budget`), and every consumer downstream of that sees a
+    real integer. That ordering is not decoration: the harness detects
+    truncation by comparing the generated length against this budget, and
+    `>= 0` is true of every generation that ever ran.
+
+    Stray negatives still fall through to the automatic answer rather than
     generating nothing. validate() refuses them on the laptop; this is the
     belt to that pair of braces, because a spec assembled in code does not go
-    through validate() and a budget of 0 scores the empty string against every
-    reference.
+    through validate().
     """
     try:
         want = int(requested)
@@ -415,10 +423,86 @@ def eval_max_new_tokens(config, requested: int = -1) -> int:
         want = -1
     if want > 0:
         return want
+    if want == 0:
+        return 0
     reasons = bool(getattr(config, "reasoning_experts", None)) or bool(
         getattr(config, "reasoning_open", "")
         and getattr(config, "reasoning_close", ""))
     return EVAL_MAX_NEW_TOKENS_REASONING if reasons else EVAL_MAX_NEW_TOKENS
+
+
+def model_window(model=None, tokenizer=None, fallback: int = 4096) -> int:
+    """How many tokens this model can hold at once, sanitised.
+
+    ONE COPY, BECAUSE THE SANITISING IS THE WHOLE POINT. `model_max_length`
+    is a sentinel-sized int on some tokenisers - asking it for a window
+    returns something on the order of a trillion, and a budget derived from
+    that asks for a trillion tokens. The teacher grew this guard first; the
+    eval needed the identical one, and two copies of a guard against an
+    absurd number is exactly the shape that drifts until only one of them
+    still catches it.
+
+    The model's own config is asked first because it is the honest answer;
+    the tokeniser is a fallback for a bare tokeniser with no model beside it.
+    """
+    window = 0
+    cfg = getattr(model, "config", None)
+    if cfg is not None:
+        try:
+            window = int(getattr(cfg, "max_position_embeddings", 0) or 0)
+        except (TypeError, ValueError):
+            window = 0
+    if not window and tokenizer is not None:
+        try:
+            window = int(getattr(tokenizer, "model_max_length", 0) or 0)
+        except (TypeError, ValueError):
+            window = 0
+    if not window or window > 1_000_000:
+        window = int(fallback)
+    return int(window)
+
+
+def answer_reserve(budget, asked) -> int:
+    """Tokens held back to buy an ending. `asked` of -1 means "you decide".
+
+    Derived rather than fixed because the right reserve scales with the
+    budget: 128 tokens is most of a 512-token ceiling and a rounding error at
+    8192. A quarter, floored at 64.
+
+    NEVER MORE THAN HALF THE BUDGET. A reserve that eats the budget leaves
+    nothing to think with, which converts "the answer was cut off" into "there
+    was no reasoning", and the second failure is harder to see because every
+    row still validates.
+    """
+    try:
+        want = int(asked)
+    except (TypeError, ValueError):
+        want = -1
+    ceiling = int(budget or 0)
+    if want < 0:
+        # An unbounded budget has no quarter to take. 256 is enough for an
+        # answer whose reasoning was allowed to run as long as it liked.
+        want = 256 if ceiling <= 0 else max(64, ceiling // 4)
+    if ceiling > 0:
+        want = min(want, max(1, ceiling // 2))
+    return max(1, want)
+
+
+def unbounded_budget(prompt_len: int, model=None, tokenizer=None,
+                     floor: int = 64, fallback: int = 4096) -> int:
+    """What a budget of `0` means, in tokens: the rest of the window.
+
+    Never returns 0 or a negative, because both are read downstream as real
+    budgets - `max_new_tokens=0` generates nothing and a negative raises. A
+    prompt that already fills the window gets `floor` and will be truncated
+    by the model anyway; that is a prompt problem and it reports itself.
+    """
+    try:
+        used = int(prompt_len)
+    except (TypeError, ValueError):
+        used = 0
+    return max(int(floor),
+               model_window(model, tokenizer, fallback) - used)
 
 
 # ── pipeline constants ─────────────────────────────────────────────────────────
@@ -606,9 +690,24 @@ class PipelineConfig:
     vllm_gpu_util: float = 0.88
     vllm_max_len: int = 4096
     vllm_quantization: Optional[str] = None
+    # The FALLBACK, and no longer a budget anything reads directly. Each
+    # synth loop resolves its own from the recipe, falling back to this.
     teacher_max_new: int = 512
+    # Small on purpose: the agent prompt carries the whole tool surface and
+    # the answer is one JSON object.
+    agent_teacher_max_new: int = 512
+    # A whole prose answer with no think block. THE ONE THAT BIT: a truncated
+    # domain generation is discarded, not trimmed, so a cap set too low here
+    # silently selects for short source material instead of shortening it.
+    domain_teacher_max_new: int = 512
     # Reasoning traces need headroom for think + answer, not just a tool call.
     reasoning_teacher_max_new: int = 1024
+    # What happens when a generation wants more room than the above allows.
+    teacher_tell_budget: bool = False
+    teacher_overrun: str = "discard"
+    # -1 = derived per loop from that loop's budget. Left unresolved on purpose;
+    # the three budgets differ, so one number would be right for one of them.
+    teacher_answer_reserve: int = -1
 
     # LoRA / fine-tuning
     max_seq_length: int = 2048
@@ -1214,12 +1313,37 @@ def build_config(recipe, force: bool = False,
     abl_ckpt = getattr(_abl, "checkpoint_action", "continue") or "continue"
     abl_export = getattr(_abl, "export", "merge") or "merge"
 
-    # Teacher generation ceilings, pulled from the recipe (-1 = default).
+    # Teacher generation ceilings, pulled from the recipe (-1 = default,
+    # 0 = unbounded and _knob passes it through because its sentinel test is
+    # `< 0`, which is the whole reason 0 could be given this meaning).
     teacher_max_new = _knob(getattr(recipe.budget, "teacher_max_new", -1), 512)
+    # THREE LOOPS, THREE BUDGETS, ONE FALLBACK. The agent and domain loops
+    # both used to read teacher_max_new, and sizing it for one starved the
+    # other - see the note on Budget.teacher_max_new for what that cost. Each
+    # falls back to teacher_max_new so a recipe that only sets the general
+    # one keeps its exact previous behaviour.
+    agent_teacher_max_new = _knob(
+        getattr(recipe.budget, "agent_teacher_max_new", -1), teacher_max_new)
+    domain_teacher_max_new = _knob(
+        getattr(recipe.budget, "domain_teacher_max_new", -1), teacher_max_new)
     # Reasoning needs headroom for think + answer, unlike a tool call or plain
     # domain text; raise it if the teacher's answers are truncated mid-script.
     reasoning_teacher_max_new = _knob(
         getattr(recipe.budget, "reasoning_teacher_max_new", -1), 1024)
+
+    # The overrun policy. NOT run through _knob: its sentinel is -1 and these
+    # are a bool and a string, and the reserve's -1 has to SURVIVE to the loop
+    # that derives it rather than being replaced by a default here.
+    from ..box.describe import OVERRUN_DISCARD
+    teacher_tell_budget = bool(getattr(recipe.budget, "teacher_tell_budget",
+                                       False))
+    teacher_overrun = str(getattr(recipe.budget, "teacher_overrun", "")
+                          or OVERRUN_DISCARD)
+    try:
+        teacher_answer_reserve = int(
+            getattr(recipe.budget, "teacher_answer_reserve", -1))
+    except (TypeError, ValueError):
+        teacher_answer_reserve = -1
 
     return PipelineConfig(
         name=name,
@@ -1274,7 +1398,12 @@ def build_config(recipe, force: bool = False,
                          or 4096),
         vllm_quantization=None,
         teacher_max_new=teacher_max_new,
+        agent_teacher_max_new=agent_teacher_max_new,
+        domain_teacher_max_new=domain_teacher_max_new,
         reasoning_teacher_max_new=reasoning_teacher_max_new,
+        teacher_tell_budget=teacher_tell_budget,
+        teacher_overrun=teacher_overrun,
+        teacher_answer_reserve=teacher_answer_reserve,
         # LoRA
         max_seq_length=b.max_seq_length,
         lora_r=lora_r,

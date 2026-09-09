@@ -6,13 +6,26 @@ Canonical error signatures and their remediation. The
 [Troubleshooting FAQ](Troubleshooting-FAQ) is the operator decision index; this
 is the exact-match reference.
 
-## `almost nothing emitted a think block, and this run expected ...`
+## `almost nothing emitted a think block across the N row(s) asked to, and this run expected ...`
 
 **The only signature on this page that is a wrong ANSWER rather than a
 failure.** Eval prints it when a reasoning run finished but almost nothing it
 generated carried a thinking delimiter.
 
-There are two causes and from the outside they look identical:
+**If you saw this before the row count was in the message, check whether it was
+ever about you.** The average behind it used to run over EVERY expert with a
+`reasoned` number, and every non-reasoning expert had one — `0.00` — because the
+run's tag style was handed to all of them. On a nine-expert run with one
+reasoning expert that is `0.38` averaged with seventeen zeros, so the warning
+fired by construction on every realistic run, three lines under a row whose
+`0.38` proved the tags parse fine. An alarm that always fires is an alarm that
+never fires. Only rows that were ASKED to reason count now, `reasoned` prints
+`-` rather than `0.00` for the rest, and they are no longer stamped "does not
+reliably reason" for declining to do something nobody asked of them. If your run
+predates that, the tags were quite possibly never the problem.
+
+When it does fire, there are two causes and from the outside they look
+identical:
 
 - the base does not actually reason, or
 - the base reasons fine and the **tag style is wrong**.
@@ -56,6 +69,53 @@ Remediation, in order:
 Correcting the table changes the resolved config, and the resolved delimiters
 are stamped into it - so this changes `build_id`. The affected run needs a
 rebuild, not a re-score.
+
+## `NOTE: 66% of generations hit the token cap and were discarded.`
+
+Not an error, and not cosmetic either — this is the loudest thing the synth
+stage says, and it is easy to watch scroll past. Printed by any generator loop
+when more than a quarter of a batch ran out of budget.
+
+**A generation cut at the cap is discarded, not trimmed.** That is the part
+worth sitting with: a low ceiling does not shorten the corpus, it keeps whichever
+material happened to fit and deletes the rest. A real gauntlet at `512` tokens
+dropped 490 of 740 domain generations, so the lore corpus became the third of the
+narrative short enough to fit, the specialist learned atypically short lore, and
+the eval reported `NO ROUTER SIGNAL: lore scored better under a foreign expert
+than its own ... the fix is upstream`. It was upstream. It was here.
+
+Remediation, in order:
+
+1. **Raise the budget belonging to the loop that is actually being cut.** The
+   NOTE names it; there are four and they are not interchangeable:
+   `agent_teacher_max_new` (MCP tool calls), `domain_teacher_max_new` (plain
+   prose), `reasoning_teacher_max_new` (think block + answer), and
+   `teacher_max_new` as the fallback for any loop without its own. Raising the
+   fallback when one loop is starving moves only the loops that have not been
+   given a ceiling.
+
+2. **`0` means unbounded** — as far as the engine window allows. On the vLLM path
+   that window is `runtime.vllm_max_len` *minus the prompt*, and it defaults to
+   `4096`, so asking for unbounded without raising it can hand you LESS room than
+   naming a number. Preflight warns about exactly that case.
+
+3. **If the budget IS the constraint** — which is the whole point of the Nano
+   floor — stop discarding instead of raising. `budget.teacher_overrun:
+   answer-only` finishes a generation whose answer was cut;
+   `close-and-answer` also closes a thought still in progress and buys its
+   answer with `budget.teacher_answer_reserve`. Yield goes to ~100% at any
+   budget, the happy path costs nothing, and only the overruns pay for a second
+   batched call. See the [Recipe Options
+   Reference](Recipe-Options-Reference) for what each policy promises and where
+   it degrades.
+
+4. `budget.teacher_tell_budget: true` puts the available room into the teacher's
+   prompt so it aims to fit. Cheap, and it bounds nothing — no model obeys a
+   length instruction exactly.
+
+The progress line is the feedback loop: `cut short` should fall and `salvaged`
+should rise. If `cut short` stays high under a salvage policy, those generations
+overran, were given a reserve, and ran out of that too — raise the reserve.
 
 ## `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn`
 

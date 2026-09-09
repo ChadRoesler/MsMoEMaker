@@ -1112,10 +1112,20 @@ def generate_agent_traces(config, callback=None,
     )
 
     # Build teacher
+    #
+    # PASSED EXPLICITLY, NOT INHERITED. This loop used to construct the
+    # teacher with no budget at all and take the constructor's fallback,
+    # which read config.teacher_max_new - so the agent loop and the domain
+    # loop shared one number by omission rather than by decision, and there
+    # was no knob to separate them with. An unread knob is an inert lever;
+    # the test for this asserts the budget the teacher actually holds, not
+    # that the registry contains a name.
     if config.use_vllm:
-        teacher = _VLLMTeacher(config, model=teacher_model)
+        teacher = _VLLMTeacher(config, model=teacher_model,
+                               max_new_tokens=config.agent_teacher_max_new)
     else:
-        teacher = _HFTeacher(config, model=teacher_model)
+        teacher = _HFTeacher(config, model=teacher_model,
+                             max_new_tokens=config.agent_teacher_max_new)
 
     # Two names, because one name was the bug: the TEACHER's tokenizer prompts
     # the teacher, the BASE's writes the corpus.
@@ -1125,8 +1135,35 @@ def generate_agent_traces(config, callback=None,
     cut_short = 0
     t0 = time.time()
     t_kept0 = kept
+    salvaged = 0
+    # THE SAFEST LOOP TO SALVAGE IN, which is not obvious and is worth saying.
+    # A half-written tool call is not JSON, so an assembled continuation has to
+    # survive `_extract_calls` AND `_validate_tool_call` against the surface it
+    # was asked about - a stricter guard than either other loop has. There is no
+    # gate to close here, so both salvage policies mean the same thing: keep
+    # writing with the reserve and let the validators judge the result.
+    overrun = getattr(config, "teacher_overrun", OVERRUN_DISCARD)
+    reserve = _answer_reserve(config.agent_teacher_max_new,
+                              getattr(config, "teacher_answer_reserve", -1))
 
     sink = open(partial_path, "a", buffering=1)
+
+    def _accept(msgs, tools, text) -> bool:
+        """Validate one tool call and write it. True if it was kept."""
+        by_name = {t["name"]: t for t in tools}
+        calls = [c for c in _extract_calls(text)
+                 if c.get("method") == "tools/call"]
+        if not calls:
+            return False
+        if any(not ok for ok, _ in
+               (_validate_tool_call(c, by_name) for c in calls)):
+            return False
+        conv = msgs + [{"role": "assistant", "content": text}]
+        text_out = _finish(base_tokenizer.apply_chat_template(
+            conv, tokenize=False), base_tokenizer)
+        sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
+        return True
+
     try:
         while kept < target:
             n = min(teacher.batch_size, (target - kept) * 2)
@@ -1136,36 +1173,47 @@ def generate_agent_traces(config, callback=None,
                        for m, _, _, _ in batch_specs]
             completions = teacher.complete(prompts)
 
-            for (msgs, tools, task, listing), text in zip(batch_specs, completions):
+            # A tool call cut in half is not JSON, so this one WOULD have been
+            # caught - by _extract_calls, as a parse failure, filed under
+            # generic rejects. Counting it apart is what turns "the teacher is
+            # being flaky" into "the cap is too low".
+            pending = []
+            for (msgs, tools, task, listing), prompt, text in zip(
+                    batch_specs, prompts, completions):
                 attempted += 1
-                by_name = {t["name"]: t for t in tools}
-                # A tool call cut in half is not JSON, so this one WOULD have
-                # been caught - by _extract_calls, as a parse failure, filed
-                # under generic rejects. Counting it apart is what turns "the
-                # teacher is being flaky" into "the cap is too low".
                 if getattr(text, "truncated", False):
-                    cut_short += 1
+                    if overrun == OVERRUN_DISCARD or not str(text).strip():
+                        cut_short += 1
+                    else:
+                        pending.append((msgs, tools, prompt + str(text),
+                                        str(text)))
                     continue
-                calls = _extract_calls(text)
-                calls = [c for c in calls if c.get("method") == "tools/call"]
-
-                if not calls:
+                if _accept(msgs, tools, text):
+                    kept += 1
+                    if kept >= target:
+                        break
+                else:
                     rejects += 1
-                    continue
 
-                verdicts = [_validate_tool_call(c, by_name) for c in calls]
-                bad = [why for ok, why in verdicts if not ok]
-                if bad:
-                    rejects += 1
-                    continue
-
-                conv = msgs + [{"role": "assistant", "content": text}]
-                text_out = _finish(base_tokenizer.apply_chat_template(
-                    conv, tokenize=False), base_tokenizer)
-                sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
-                kept += 1
-                if kept >= target:
-                    break
+            if pending and kept < target:
+                tails = teacher.complete([stem_prompt
+                                          for _, _, stem_prompt, _ in pending],
+                                         max_new_tokens=reserve)
+                for (msgs, tools, _, stem), tail in zip(pending, tails):
+                    # An assembly that is still not valid JSON fails _accept
+                    # and is counted a reject, which is the honest place for
+                    # it: the cap explains why it was cut, not why the
+                    # finished object was malformed.
+                    if getattr(tail, "truncated", False):
+                        cut_short += 1
+                        continue
+                    if _accept(msgs, tools, stem + str(tail)):
+                        kept += 1
+                        salvaged += 1
+                        if kept >= target:
+                            break
+                    else:
+                        rejects += 1
 
             # Progress and accept rate
             session = kept - t_kept0
@@ -1174,13 +1222,23 @@ def generate_agent_traces(config, callback=None,
             eta = (target - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{target}  "
                   f"(accept {acc:.0f}% of {attempted}"
-                  f"{f', cut short {cut_short}' if cut_short else ''}, "
+                  f"{f', cut short {cut_short}' if cut_short else ''}"
+                  f"{f', salvaged {salvaged}' if salvaged else ''}, "
                   f"{rate:.1f}/s, ETA {eta:.0f} min)")
             if cut_short and cut_short > attempted * 0.25:
                 print(f"   NOTE: {100 * cut_short / max(attempted, 1):.0f}% of "
                       f"generations hit the token cap and were discarded. "
-                      f"Raise budget.teacher_max_new (0 = as far as the "
-                      f"engine window allows).")
+                      f"Raise budget.agent_teacher_max_new (0 = as far as the "
+                      f"engine window allows)"
+                      + (", or set budget.teacher_overrun: answer-only to "
+                         "finish them inside the budget you already have - "
+                         "an assembled call still has to parse and validate "
+                         "against the tool surface, so a bad one cannot slip "
+                         "through as a good row"
+                         if overrun == OVERRUN_DISCARD else
+                         f", or raise budget.teacher_answer_reserve (now "
+                         f"{reserve})")
+                      + ".")
 
             # Tripwire: broken teacher
             if attempted > 200 and acc < 5:
@@ -1312,14 +1370,19 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     # thinking from answer cleanly. A weak one (1.5B) rambles prose and ignores
     # the tag instruction. So we probe once with the tags; if they come back,
     # use them, else fall back to the plain-language marker. Both are data.
+    # Asked of the teacher, not baked into the corpus - see _budget_sentence.
+    room = (_budget_sentence(config.reasoning_teacher_max_new)
+            if getattr(config, "teacher_tell_budget", False) else "")
     tag_system = (
         f"You are a {display} specialist. Reason step by step inside "
         f"{teacher_style.open} … {teacher_style.close}, then give the final answer."
+        + room
     )
     marker_system = (
         f"You are a {display} specialist. Think through the task step by step. "
         f"Then write the line {marker!r} followed by your final answer and "
         f"nothing else."
+        + room
     )
 
     if config.use_vllm:
@@ -1406,8 +1469,49 @@ def generate_reasoning_traces(config, expert_name, callback=None,
     # counting, which also keeps template coverage EVEN rather than clumpy.
     cursor = kept
     cut_short = 0
+    salvaged = 0
+    # THE OVERRUN POLICY, resolved once. The reserve is derived from THIS
+    # loop's budget, which is why it is not resolved in build_config: the three
+    # loops no longer share a ceiling, so one number would be right for one.
+    overrun = getattr(config, "teacher_overrun", OVERRUN_DISCARD)
+    reserve = _answer_reserve(config.reasoning_teacher_max_new,
+                              getattr(config, "teacher_answer_reserve", -1))
     t0, t_kept0 = time.time(), kept
     sink = open(partial, "a", buffering=1)
+
+    def _accept(msgs, text) -> bool:
+        """Validate, canonicalise and write one trace. True if it was kept.
+
+        ONE PATH FOR BOTH, and that is the point of extracting it. A salvaged
+        row must face the identical shape checks a clean one does - both halves
+        present, no stray delimiter - because the failure mode of a salvage
+        pass is precisely a row that LOOKS finished. Two copies of this
+        validation would mean the assembled rows were the ones nobody checked.
+        """
+        think, answer = _parse_teacher_output(text, teacher_style)
+        # PRESENCE IS NOT SHAPE, and that gap cost a whole corpus. The test
+        # used to be "both halves exist", which a `think` consisting of
+        # nothing but "</think>" passes, and which the 92% accept rate then
+        # reported as a healthy run for nine thousand malformed rows. A stray
+        # delimiter in either half means the split landed on the wrong seam.
+        if not think or not answer or _has_delimiter(
+                think, teacher_style) or _has_delimiter(
+                answer, teacher_style):
+            return False
+        # Re-emit in the TARGET delimiter so the specialist learns
+        # <think>…</think> + answer, and eval splits on it later - even though
+        # the teacher spoke its own native delimiter.
+        canonical = f"{target.open}{think}{target.close}\n{answer}"
+        conv = [
+            {"role": "system", "content": clean_system},
+            msgs[1],  # the user task (msgs[0] is the teacher's system)
+            {"role": "assistant", "content": canonical},
+        ]
+        text_out = _finish(base_tokenizer.apply_chat_template(
+            conv, tokenize=False), base_tokenizer)
+        sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
+        return True
+
     try:
         while kept < n:
             batch_n = min(teacher.batch_size, (n - kept) * 2)
@@ -1417,49 +1521,60 @@ def generate_reasoning_traces(config, expert_name, callback=None,
             cursor += batch_n
             prompts = [teacher.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
-            for msgs, text in zip(batch, teacher.complete(prompts)):
+            # CUT AT THE CAP IS NOT AN ANSWER. A guillotined generation has
+            # both halves, no stray delimiter and a plausible shape - it
+            # passes every other test - and it ends mid-word. Real rows ended
+            # "**Final" because the teacher was starting to write "**Final
+            # Answer**" when the budget ran out. Counted apart from `rejects`
+            # on purpose: this number is how you learn the cap is too low.
+            #
+            # Under a salvage policy it is no longer only a number. An overrun
+            # is set aside here and finished in ONE batched call below, so the
+            # happy path costs exactly what it always did and only the
+            # generations that would have been thrown away pay for a second.
+            pending = []
+            for msgs, prompt, text in zip(batch, prompts,
+                                          teacher.complete(prompts)):
                 attempted += 1
                 if not sample:
                     sample = text
-                # CUT AT THE CAP IS NOT AN ANSWER. A guillotined generation
-                # has both halves, no stray delimiter and a plausible shape -
-                # it passes every other test - and it ends mid-word. Real
-                # rows ended "**Final" because the teacher was starting to
-                # write "**Final Answer**" when the budget ran out. Counted
-                # apart from `rejects` on purpose: this number is how you
-                # learn the cap is too low, and lumping it in with genuine
-                # rejects hides exactly that.
                 if getattr(text, "truncated", False):
-                    cut_short += 1
+                    stem = _overrun_stem(text, overrun, teacher_style,
+                                         speaks_tags, marker)
+                    if stem is None:
+                        cut_short += 1
+                    else:
+                        pending.append((msgs, prompt + stem, stem))
                     continue
-                think, answer = _parse_teacher_output(text, teacher_style)
-                # PRESENCE IS NOT SHAPE, and that gap cost a whole corpus.
-                # The test used to be "both halves exist", which a `think`
-                # consisting of nothing but "</think>" passes, and which
-                # the 92% accept rate then reported as a healthy run for
-                # nine thousand malformed rows. A stray delimiter in either
-                # half means the split landed on the wrong seam; that is a
-                # reject, and finding it at trace 1 is the entire point.
-                if not think or not answer or _has_delimiter(
-                        think, teacher_style) or _has_delimiter(
-                        answer, teacher_style):
+                if _accept(msgs, text):
+                    kept += 1
+                    if kept >= n:
+                        break
+                else:
                     rejects += 1
-                    continue
-                # Re-emit in the TARGET delimiter so the specialist learns
-                # <think>…</think> + answer, and eval splits on it later - even
-                # though the teacher spoke its own native delimiter.
-                canonical = f"{target.open}{think}{target.close}\n{answer}"
-                conv = [
-                    {"role": "system", "content": clean_system},
-                    msgs[1],  # the user task (msgs[0] is the teacher's system)
-                    {"role": "assistant", "content": canonical},
-                ]
-                text_out = _finish(base_tokenizer.apply_chat_template(
-                    conv, tokenize=False), base_tokenizer)
-                sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
-                kept += 1
-                if kept >= n:
-                    break
+
+            # THE SALVAGE PASS. One call, `reserve` tokens, for the whole
+            # batch's overruns - batching matters here, because a per-row
+            # second call would undo vLLM's throughput on the exact path that
+            # was already the slowest thing in the build.
+            if pending and kept < n:
+                tails = teacher.complete([stem_prompt
+                                          for _, stem_prompt, _ in pending],
+                                         max_new_tokens=reserve)
+                for (msgs, _, stem), tail in zip(pending, tails):
+                    if getattr(tail, "truncated", False):
+                        # Ran out AGAIN inside the reserve. One attempt only:
+                        # a loop that keeps buying endings for a teacher that
+                        # will not stop is a loop with no bound on it.
+                        cut_short += 1
+                        continue
+                    if _accept(msgs, stem + str(tail)):
+                        kept += 1
+                        salvaged += 1
+                        if kept >= n:
+                            break
+                    else:
+                        rejects += 1
             # THE SAME READING THE TOOLS LOOP GIVES. It had t0 and a rate
             # and an ETA; this one had neither, so the longest stage of the
             # build was the one you could not put a number on. The rate is
@@ -1471,17 +1586,34 @@ def generate_reasoning_traces(config, expert_name, callback=None,
             eta = (n - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
                   f"rejects {rejects}"
-                  f"{f', cut short {cut_short}' if cut_short else ''}, "
+                  f"{f', cut short {cut_short}' if cut_short else ''}"
+                  f"{f', salvaged {salvaged}' if salvaged else ''}, "
                   f"{rate:.1f}/s, ETA {eta:.0f} min)")
             if cut_short and cut_short > attempted * 0.25:
                 # A QUARTER OF THE BUDGET SPENT ON TRACES NOBODY KEEPS is a
                 # setting, not a fluctuation. Said once, loudly, rather than
                 # left for somebody to infer from a dangling word in a row
                 # they happened to open.
+                #
+                # NAME THE LEVER THE READER CAN ACTUALLY PULL. "Raise the
+                # budget" is the whole answer only for somebody with VRAM
+                # spare. On the hardware this project builds for, the budget
+                # IS the constraint, and the advice that helps is the other
+                # one - which nobody discovers unless it is said here.
                 print(f"   NOTE: {100 * cut_short / max(attempted, 1):.0f}% of "
                       f"generations hit the token cap and were discarded. "
                       f"Raise budget.reasoning_teacher_max_new (0 = as far "
-                      f"as the engine window allows).")
+                      f"as the engine window allows)"
+                      + (", or set budget.teacher_overrun: close-and-answer to "
+                         "finish them inside the budget you already have - "
+                         "discarding a truncated generation does not shorten "
+                         "this corpus, it keeps whichever material happened "
+                         "to fit"
+                         if overrun == OVERRUN_DISCARD else
+                         f", or raise budget.teacher_answer_reserve (now "
+                         f"{reserve}) - these overran, were given a reserve "
+                         f"to finish in, and ran out of that too")
+                      + ".")
             if callback:
                 # INSIDE THE LOOP. Every callback in this file fired either
                 # before the loop or after os.replace, so between "stage
@@ -1532,14 +1664,28 @@ def generate_domain_traces(config, expert_name, callback=None,
 
     templates = _load_templates(templates_path)
     display = DISPLAY_LANG.get(expert_name, expert_name.replace("_", " ").title())
-    system = f"You are a {display} specialist."
+    # TWO PROMPTS, AND THIS LOOP DID NOT HAVE TWO.
+    #
+    # `system` is the TEACHER's and may carry a length instruction; the corpus
+    # row must carry the plain identity prompt. This loop used to write
+    # `msgs[0]` - the teacher's own system message - straight into every row,
+    # which was harmless while the two were byte-identical and became a leak
+    # the moment one of them grew a crutch: every row would have taught the
+    # specialist "keep the whole response under about 358 words" as part of its
+    # identity. generate_reasoning_traces has kept a separate `clean_system`
+    # for this exact reason since the tool loop; now so does this one.
+    clean_system = f"You are a {display} specialist."
+    system = (clean_system
+              + (_budget_sentence(config.domain_teacher_max_new)
+                 if getattr(config, "teacher_tell_budget", False)
+                 else ""))
 
     if config.use_vllm:
         teacher = _VLLMTeacher(config, model=teacher_model,
-                               max_new_tokens=config.teacher_max_new)
+                               max_new_tokens=config.domain_teacher_max_new)
     else:
         teacher = _HFTeacher(config, model=teacher_model,
-                             max_new_tokens=config.teacher_max_new)
+                             max_new_tokens=config.domain_teacher_max_new)
 
     # Same rule as the reasoning path: the trace is trained on by the
     # specialist, so it must speak the BASE's tokenizer, not the teacher's.
@@ -1571,8 +1717,35 @@ def generate_domain_traces(config, expert_name, callback=None,
     # same handful of questions for the whole run.
     cursor = kept
     cut_short = 0
+    salvaged = 0
+    # THERE IS NO GATE IN THIS LOOP, so both salvage policies collapse to the
+    # same mechanism here: keep writing with the reserve and accept it if the
+    # continuation ends on its own. `close-and-answer` has nothing extra to
+    # close, and preflight says so rather than letting the recipe imply a
+    # promise this loop cannot make.
+    #
+    # And note what is NOT guaranteed: reasoning has a structural terminator to
+    # inject, prose has only EOS, so this raises the yield without bounding it.
+    # A continuation that also runs out is still discarded.
+    overrun = getattr(config, "teacher_overrun", OVERRUN_DISCARD)
+    reserve = _answer_reserve(config.domain_teacher_max_new,
+                              getattr(config, "teacher_answer_reserve", -1))
     t0 = time.time()
     sink = open(partial, "a", buffering=1)
+
+    def _accept(msgs, text) -> bool:
+        """Write one plain-text row. True if it was kept."""
+        answer = (text or "").strip()
+        if not answer:
+            return False
+        # clean_system, NOT msgs[0]: see the note where the two are built.
+        conv = [{"role": "system", "content": clean_system}, msgs[1],
+                {"role": "assistant", "content": answer}]
+        text_out = _finish(base_tokenizer.apply_chat_template(
+            conv, tokenize=False), base_tokenizer)
+        sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
+        return True
+
     try:
         while kept < n:
             batch_n = min(teacher.batch_size, (n - kept) * 2)
@@ -1581,38 +1754,72 @@ def generate_domain_traces(config, expert_name, callback=None,
             cursor += batch_n
             prompts = [teacher.tokenizer.apply_chat_template(
                 m, tokenize=False, add_generation_prompt=True) for m in batch]
-            for msgs, text in zip(batch, teacher.complete(prompts)):
+            # See the note in generate_reasoning_traces: a generation cut at
+            # the cap ends mid-sentence and passes every other test. Under a
+            # salvage policy it is set aside and finished in one batched call
+            # below, so the happy path costs what it always did.
+            pending = []
+            for msgs, prompt, text in zip(batch, prompts,
+                                          teacher.complete(prompts)):
                 attempted += 1
-                # See the note in generate_reasoning_traces: a generation cut
-                # at the cap ends mid-sentence and passes every other test.
                 if getattr(text, "truncated", False):
-                    cut_short += 1
+                    if overrun == OVERRUN_DISCARD or not str(text).strip():
+                        cut_short += 1
+                    else:
+                        pending.append((msgs, prompt + str(text), str(text)))
                     continue
-                answer = (text or "").strip()
-                if not answer:
+                if _accept(msgs, text):
+                    kept += 1
+                    if kept >= n:
+                        break
+                else:
                     rejects += 1
-                    continue
-                conv = [msgs[0], msgs[1],
-                        {"role": "assistant", "content": answer}]
-                text_out = _finish(base_tokenizer.apply_chat_template(
-                    conv, tokenize=False), base_tokenizer)
-                sink.write(json.dumps({"text": text_out}, ensure_ascii=False) + "\n")
-                kept += 1
-                if kept >= n:
-                    break
+
+            if pending and kept < n:
+                tails = teacher.complete([stem_prompt
+                                          for _, stem_prompt, _ in pending],
+                                         max_new_tokens=reserve)
+                for (msgs, _, stem), tail in zip(pending, tails):
+                    if getattr(tail, "truncated", False):
+                        # Prose has no terminator to force, so a continuation
+                        # that also runs out is genuinely unfinished. One
+                        # attempt, then discard.
+                        cut_short += 1
+                        continue
+                    if _accept(msgs, stem + str(tail)):
+                        kept += 1
+                        salvaged += 1
+                        if kept >= n:
+                            break
+                    else:
+                        rejects += 1
             session = kept - resumed
             acc = 100.0 * session / max(attempted, 1)
             rate = session / max(time.time() - t0, 1e-9)
             eta = (n - kept) / max(rate, 1e-9) / 60
             print(f"   kept {kept}/{n}  (accept {acc:.0f}% of {attempted}, "
                   f"rejects {rejects}"
-                  f"{f', cut short {cut_short}' if cut_short else ''}, "
+                  f"{f', cut short {cut_short}' if cut_short else ''}"
+                  f"{f', salvaged {salvaged}' if salvaged else ''}, "
                   f"{rate:.1f}/s, ETA {eta:.0f} min)")
             if cut_short and cut_short > attempted * 0.25:
+                # THIS IS THE NOTE THAT FIRED SEVEN TIMES IN A REAL GAUNTLET
+                # and named only the lever that costs VRAM. On the hardware
+                # this project builds for, the budget IS the constraint.
                 print(f"   NOTE: {100 * cut_short / max(attempted, 1):.0f}% of "
                       f"generations hit the token cap and were discarded. "
-                      f"Raise budget.teacher_max_new (0 = as far as the "
-                      f"engine window allows).")
+                      f"Raise budget.domain_teacher_max_new (0 = as far as "
+                      f"the engine window allows)"
+                      + (", or set budget.teacher_overrun: answer-only to "
+                         "finish them inside the budget you already have - "
+                         "discarding a truncated generation does not shorten "
+                         "this corpus, it keeps whichever material happened "
+                         "to fit"
+                         if overrun == OVERRUN_DISCARD else
+                         f", or raise budget.teacher_answer_reserve (now "
+                         f"{reserve}) - these were given a reserve to finish "
+                         f"in and ran out of that too")
+                      + ".")
             if callback:
                 callback(st.DATA_SYNTH, "running",
                          f"{expert_name}: {kept}/{n} traces "
@@ -1723,6 +1930,140 @@ def _resolve_max_new(asked, fallback):
     if int(asked) == UNBOUNDED:
         return None
     return int(asked)
+
+
+# THE POLICY NAMES LIVE IN box/describe.py, not here.
+#
+# They are public recipe vocabulary and the installer TUI offers them as a
+# choice, which is the same reason eval_modes lives there - a front-end should
+# not have to hardcode a list this module happens to own. This file owns the
+# MECHANISM; describe.py owns the words.
+from ..box.describe import (OVERRUN_ANSWER_ONLY, OVERRUN_CLOSE_AND_ANSWER,
+                            OVERRUN_DISCARD, OVERRUN_POLICIES)  # noqa: F401
+
+# Sentence enders, plus any closing quote or bracket that belongs to them, and
+# only when whitespace or the end follows - so "3.14" and "Node.js" are not
+# sentence boundaries and neither is the dot in "e.g. this".
+_SENTENCE_END = re.compile(r"(?<!\b[A-Z])[.!?][\"'\u2019\u201d)\]]*(?=\s|$)")
+
+
+def _trim_to_sentence(text: str, keep_at_least: float = 0.5) -> str:
+    """Cut back to the last sentence boundary, if that keeps enough of it.
+
+    A thought that stops mid-word and is then closed reads as damage. The same
+    thought cut at its last full stop reads as brief, which is what it is.
+
+    `keep_at_least` is the guard that makes this safe to apply blindly: if the
+    only sentence boundary is near the start - a one-line preamble followed by
+    a long unbroken derivation, which is exactly what reasoning output looks
+    like - trimming to it would throw the reasoning away to gain tidiness.
+    Below that fraction the text is returned as it came, mid-word and all,
+    because a scruffy thought beats an empty one.
+    """
+    body = (text or "").rstrip()
+    if not body:
+        return body
+    end = None
+    for match in _SENTENCE_END.finditer(body):
+        end = match.end()
+    if end is None or end < len(body) * keep_at_least:
+        return body
+    return body[:end]
+
+
+# Lives in config.pipeline with the other budget arithmetic (see
+# unbounded_budget); preflight needs the same number to report it, and a second
+# copy of "a quarter, floored, never more than half" is the shape that drifts.
+_answer_reserve = cfg.answer_reserve
+
+
+def _terminator(style, speaks_tags: bool, marker: str) -> str:
+    """The text that ends the reasoning and starts the answer.
+
+    WHICH ONE IS A RUNTIME ANSWER, not a configuration one. The reasoning loop
+    probes its teacher once and switches to the plain-language marker if the
+    teacher does not speak its own tags, so a salvage pass that assumed tags
+    would inject a closer into a corpus built on markers - producing a row
+    with a delimiter the splitter is not looking for, which `_has_delimiter`
+    then correctly rejects as a stray. Ask the same question the loop asked.
+    """
+    if speaks_tags:
+        return style.close
+    return f"\n{marker}"
+
+
+def _reasoning_already_ended(text: str, style, speaks_tags: bool,
+                             marker: str) -> bool:
+    """Did this generation finish reasoning, whatever got cut afterwards?
+
+    This is the whole difference between the two salvage policies:
+    `answer-only` continues only when this is True, because then the boundary
+    is the teacher's own and only the answer is missing.
+    """
+    body = text or ""
+    if speaks_tags:
+        return bool(style is not None and style.close and style.close in body)
+    return _marker_at(body, marker) >= 0
+
+
+def _budget_sentence(budget) -> str:
+    """A length instruction for the TEACHER, or "" when there is no number.
+
+    The cheapest half of fitting inside a budget: ask. It costs nothing, it
+    lowers the overrun rate, and it BOUNDS NOTHING - no model obeys a length
+    instruction exactly, which is precisely why the salvage policy exists as a
+    separate knob rather than this being the whole answer.
+
+    Empty for an unbounded budget, because there is no room to describe. Words
+    rather than tokens because a teacher cannot count its own tokens and will
+    do better with a unit it can; ~0.7 words per token for English prose.
+
+    TEACHER-SIDE ONLY. This never reaches the specialist's prompt - the corpus
+    teaches "identity + task -> answer", and baking "keep it under 350 words"
+    into every training row would teach the specialist to be terse rather than
+    teaching it the domain. Same reason `clean_system` exists.
+    """
+    try:
+        room = int(budget or 0)
+    except (TypeError, ValueError):
+        return ""
+    if room <= 0:
+        return ""
+    return (f" Keep the whole response under about {max(20, int(room * 0.7))} "
+            f"words so that it fits in one reply.")
+
+
+def _overrun_stem(text, policy: str, style, speaks_tags: bool,
+                  marker: str) -> Optional[str]:
+    """What to continue writing FROM, or None if this policy won't salvage it.
+
+    Called only for a generation that hit its cap. Returns the text a second,
+    small call should continue - which is the generation itself when the
+    teacher already ended its reasoning, or the thought trimmed and terminated
+    when it had not and the policy allows inventing that boundary.
+
+    None means "count this as discarded", which is what every caller did
+    unconditionally before there was a choice.
+    """
+    if policy == OVERRUN_DISCARD:
+        return None
+    body = str(text or "")
+    if not body.strip():
+        # Nothing to continue from. A cap so small the teacher produced only
+        # whitespace is a budget problem, not a salvage problem.
+        return None
+    if _reasoning_already_ended(body, style, speaks_tags, marker):
+        # The teacher chose its own boundary and the ANSWER is what ran out.
+        # Both policies salvage this one; neither invents anything.
+        return body
+    if policy != OVERRUN_CLOSE_AND_ANSWER:
+        return None
+    # Still mid-thought. `answer-only` stopped above; this is the permissive
+    # policy, so trim to the last full stop and write the boundary ourselves.
+    thought = _trim_to_sentence(body)
+    if not thought.strip():
+        return None
+    return thought + _terminator(style, speaks_tags, marker)
 
 
 def _finish(rendered: str, tokenizer) -> str:
@@ -2174,6 +2515,8 @@ class _HFTeacher:
         # default is TWENTY tokens - so passing None through would turn "let
         # the chain finish" into the shortest generation this file can
         # produce. The model's own context window is the honest ceiling.
+        # config.teacher_max_new is the FALLBACK, reached only when a caller
+        # passes nothing. Every loop in this file now passes its own.
         self.max_new_tokens = _resolve_max_new(max_new_tokens,
                                                config.teacher_max_new)
         self._unbounded = self.max_new_tokens is None
@@ -2219,19 +2562,23 @@ class _HFTeacher:
         """Tokens this call may generate. Never None - see __init__."""
         if not self._unbounded:
             return self.max_new_tokens
-        window = (getattr(self.model.config, "max_position_embeddings", 0)
-                  or getattr(self.tokenizer, "model_max_length", 0) or 0)
-        # model_max_length is a sentinel-sized int on some tokenizers, which
-        # would ask for a trillion tokens. Anything past the window is not a
-        # real answer either way.
-        if not window or window > 1_000_000:
-            window = 4096
-        return max(64, int(window) - int(prompt_len))
+        # ONE COPY OF THE WINDOW GUARD, shared with the eval - which needs the
+        # identical sentinel handling and grew it here first. See
+        # cfg.model_window for why a tokeniser will happily claim a window of
+        # a trillion tokens.
+        return cfg.unbounded_budget(prompt_len, model=self.model,
+                                    tokenizer=self.tokenizer)
 
-    def complete(self, prompts):
+    def complete(self, prompts, max_new_tokens=None):
+        """Generate. `max_new_tokens` overrides this call's ceiling only.
+
+        See the vLLM teacher's note: the salvage pass asks for a small reserve
+        and must not disturb the standing budget the next batch will use.
+        """
         import torch
         inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.model.device)
-        budget = self._budget(inputs.input_ids.shape[1])
+        budget = (self._budget(inputs.input_ids.shape[1])
+                  if max_new_tokens is None else max(1, int(max_new_tokens)))
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -2403,15 +2750,33 @@ class _VLLMTeacher:
         # somebody guessed.
         self.max_new_tokens = _resolve_max_new(max_new_tokens,
                                                config.teacher_max_new)
-        self.params = SamplingParams(
-            temperature=0.7, top_p=0.8, top_k=20,
-            repetition_penalty=1.05,
-            max_tokens=self.max_new_tokens,
-        )
+        # KEPT AS KWARGS SO A PER-CALL BUDGET CAN REBUILD THEM. A salvage
+        # pass needs the same sampler with a different ceiling, and the
+        # obvious route - copy the SamplingParams and set max_tokens - depends
+        # on that object's copy semantics, which differ across vLLM versions
+        # and cannot be checked from a box without vLLM on it. Rebuilding from
+        # the kwargs uses only the constructor already known to work, because
+        # it is the one this line has always called.
+        self._sampler = dict(temperature=0.7, top_p=0.8, top_k=20,
+                             repetition_penalty=1.05)
+        self.params = SamplingParams(max_tokens=self.max_new_tokens,
+                                     **self._sampler)
+        self._SamplingParams = SamplingParams
         self.batch_size = config.vllm_batch
 
-    def complete(self, prompts):
-        outs = self.llm.generate(prompts, self.params)
+    def complete(self, prompts, max_new_tokens=None):
+        """Generate. `max_new_tokens` overrides this call's ceiling only.
+
+        The override exists for the salvage pass, which buys an ending with a
+        small reserve rather than regenerating a whole example. It is a
+        DIFFERENT question from the teacher's standing budget and must not
+        change it: the next ordinary batch has to be unaffected.
+        """
+        params = self.params
+        if max_new_tokens is not None:
+            params = self._SamplingParams(
+                max_tokens=max(1, int(max_new_tokens)), **self._sampler)
+        outs = self.llm.generate(prompts, params)
         # finish_reason was here the whole time and was being dropped on the
         # floor: "stop" for a generation that ended itself, "length" for one
         # cut at the cap. See Completion.

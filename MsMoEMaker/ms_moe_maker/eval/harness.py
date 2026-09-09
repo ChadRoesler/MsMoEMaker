@@ -1374,6 +1374,43 @@ def _split_reasoning_answer(text: str, style) -> Tuple[str, bool]:
     return answer, reasoned
 
 
+def _eval_budget(max_new_tokens: int, max_prompt_tokens: int,
+                 model=None, tok=None, label: str = "",
+                 domain: str = "") -> int:
+    """The per-sample generation budget, with `0` turned into a real number.
+
+    UNBOUNDED CANNOT STAY 0 PAST THIS POINT, and the reason is not tidiness.
+    Six places downstream read this as a real budget: `model.generate` emits
+    nothing against 0, `_truncate_reference` leaves the reference at full
+    length while the generation is empty, and the cut-off counter asks
+    `generated >= budget` - which is true of EVERY generation against 0. A run
+    that let the sentinel through would report sixteen of sixteen samples cut
+    off by the budget having produced not one token, and every score in the
+    row would be the empty string against a full reference.
+
+    `0` is also the only value this function is allowed to change. It is the
+    recipe's spelling of "as far as the model window allows", and this is the
+    first place in the program where either half of that is known:
+    `eval_max_new_tokens` runs once for the whole run, before a model exists.
+
+    The subtraction is against `max_prompt_tokens` rather than the real prompt
+    length because prompts are truncated to that cap anyway, so it is the
+    honest upper bound - and one budget shared by every sample is what keeps
+    the reference truncation and the cut-off count comparable down a row.
+    """
+    try:
+        asked = int(max_new_tokens)
+    except (TypeError, ValueError):
+        return int(max_new_tokens or 0) or 256
+    if asked != 0:
+        return asked
+    budget = cfg_module.unbounded_budget(max_prompt_tokens, model=model,
+                                        tokenizer=tok)
+    _trace(f"{label}/{domain}: budget 0 = unbounded -> {budget} tokens "
+           f"(model window less the {max_prompt_tokens}-token prompt cap)")
+    return budget
+
+
 def eval_generation(model_dir: str, test_data_path: str,
                     label: str, domain: str,
                     num_samples: int = 10,
@@ -1382,6 +1419,7 @@ def eval_generation(model_dir: str, test_data_path: str,
                     # passes the value resolved from the recipe and the run's
                     # shape (pipeline.eval_max_new_tokens), because 256 cuts a
                     # thinking trace off before it reaches the answer.
+                    # 0 = unbounded, resolved against the model window below.
                     max_new_tokens: int = 256,
                     max_prompt_tokens: int = 1024,
                     callback=None,
@@ -1432,6 +1470,9 @@ def eval_generation(model_dir: str, test_data_path: str,
             result.status = UNMEASURABLE
             result.note = f"could not load {model_dir}: {exc}"
             return result
+
+    max_new_tokens = _eval_budget(max_new_tokens, max_prompt_tokens,
+                                  model, tok, label, domain)
 
     seen_first = False
     peak_mib = 0.0
@@ -1808,6 +1849,61 @@ def detect_dead_experts(report: EvalReport, threshold: float = 1.2,
     return dead
 
 
+def style_for_domain(domain: str, style, reasoning_experts) -> Any:
+    """The reasoning style to SCORE this domain against, or None.
+
+    None is not "no style configured" - it is "this row was never asked to
+    reason", and it is what makes `reasoned` come back as its documented -1
+    sentinel instead of a 0.00 that reads like a failed measurement.
+
+    The domain decides, not the model. `moe/deliberation` is asked, because
+    the gap between it and deliberation's own row is a finding - discipline
+    present in the specialist and lost at the stitch. `moe/notes` is not.
+    """
+    if style is None:
+        return None
+    return style if domain in set(reasoning_experts or ()) else None
+
+
+def wrong_tag_style_caveat(stages: Dict[str, Any], style) -> Optional[str]:
+    """The one misconfiguration indistinguishable from a real finding.
+
+    `split()` returns "no clean split" when the delimiters do not match the
+    output - which is exactly what a model that simply did not reason looks
+    like. A table one release behind a new model family reports "never
+    reasons", every score silently includes the think block, and the numbers
+    read as a result instead of a mistake. We cannot tell the two apart; we
+    CAN say so, which is the whole job.
+
+    THE DENOMINATOR IS THE BUG THIS CARRIES A SCAR FROM. The average used to
+    run over every row with a `reasoned` number, and every non-reasoning
+    expert had one (0.00), because the run's style was handed to all of them.
+    On a real nine-expert run with one reasoning expert that is 0.38 averaged
+    with seventeen zeros - 0.02, under any threshold - so the alarm fired by
+    construction on every realistic run, three lines below a row whose 0.38
+    proved the tags were fine. An alarm that always fires is an alarm that
+    never fires.
+
+    Only rows that were ASKED count now, which is what `reasoned >= 0` means
+    once the style is chosen per domain.
+    """
+    if style is None:
+        return None
+    asked = [r for r in stages.values() if getattr(r, "reasoned", -1.0) >= 0]
+    if not asked:
+        return None
+    if (sum(r.reasoned for r in asked) / len(asked)) >= 0.1:
+        return None
+    return (f"almost nothing emitted a think block across the {len(asked)} "
+            f"row(s) asked to, and this run expected "
+            f"{style.open!r}…{style.close!r}. That is either a model that "
+            f"does not reason or the WRONG TAG STYLE - the two look identical "
+            f"from here, and every quality score above includes the trace if "
+            f"it is the second. Check the family for this base in "
+            f"reasoning.yaml (drop a corrected one at ~/.msmoe/reasoning.yaml; "
+            f"no release needed).")
+
+
 def reasoning_discipline_caveat(enrichment: float, reasoned: float,
                                 capped_fraction: float, expert: str = "",
                                 enrichment_floor: float = 1.2,
@@ -2079,6 +2175,33 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
         # than the generator used is measuring a different artifact.
         reasoning_style = reasoning_style_of_config(config)
 
+        # PER EXPERT, NOT PER RUN, AND THE SENTINEL DEPENDED ON IT.
+        #
+        # `reasoned` has a documented "never asked" value of -1, and three
+        # separate readers already handle it correctly: the table prints '-'
+        # instead of 0.00, the row flag skips "does not reliably reason", and
+        # the wrong-tag-style caveat leaves the row out of its average. All
+        # three were unreachable, because this style was handed to EVERY
+        # expert - so on any run that reasons at all, every expert got
+        # measured for a think block it was never asked to write, scored 0.00,
+        # and the sentinel never appeared.
+        #
+        # What that cost, on a real 9-expert run with one reasoning expert:
+        # eight rows of 0.00 each stamped "does not reliably reason", and a
+        # caveat averaging 0.38 with seventeen zeros to conclude "almost
+        # nothing emitted a think block ... or the WRONG TAG STYLE" - printed
+        # three lines under a row whose 0.38 proves the tags parse fine. The
+        # denominator made the alarm fire by construction on every realistic
+        # run, which is the same as it never firing.
+        #
+        # The MoE surface follows the DOMAIN, not the model: moe/deliberation
+        # is asked (and its gap from deliberation's own row is the finding -
+        # discipline lost at the stitch), while moe/notes is not.
+        _reasoning_experts = set(getattr(config, "reasoning_experts", None) or [])
+
+        def _style_for(domain):
+            return style_for_domain(domain, reasoning_style, _reasoning_experts)
+
         # ONE MODEL IN MEMORY AT A TIME, AND THE MoE LOADED ONCE.
         #
         # This loop used to call eval_generation(moe_dir, ...) INSIDE the
@@ -2100,7 +2223,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                 model_dir=expert_dir, test_data_path=held_paths[expert_name],
                 label=expert_name, domain=expert_name,
                 num_samples=num_samples, max_new_tokens=max_new_tokens,
-                reasoning_style=reasoning_style)
+                reasoning_style=_style_for(expert_name))
             report.stages[expert_name] = res
             if res.status == UNMEASURABLE:
                 report.unmeasured.append(f"quality/{expert_name}: {res.note}")
@@ -2128,7 +2251,7 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                     label="moe", domain=expert_name,
                     num_samples=num_samples, max_new_tokens=max_new_tokens,
                     loaded=(moe_model, moe_tok, moe_device),
-                    reasoning_style=reasoning_style)
+                    reasoning_style=_style_for(expert_name))
                 report.stages[f"moe/{expert_name}"] = moe_res
                 if moe_res.status == UNMEASURABLE:
                     report.unmeasured.append(
@@ -2155,29 +2278,12 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                     f"split into one). Read that row as a thin sample, not as "
                     f"a score comparable with a full one.")
 
-        # DID YOU PICK THE RIGHT TAG STYLE?
-        #
-        # This is the one place a misconfiguration is INDISTINGUISHABLE from a
-        # real finding. `_split_reasoning_answer` returns "no clean split" when
-        # the delimiters do not match the output - which is exactly what a
-        # model that simply did not reason looks like. So a table that is one
-        # release behind a new model family reports "never reasons", every
-        # score silently includes the think block, and the numbers look like a
-        # result instead of a mistake.
-        #
-        # We cannot tell the two apart. We CAN say so, which is the whole job.
-        if reasoning_style is not None:
-            scored = [r for r in report.stages.values() if r.reasoned >= 0]
-            if scored and (sum(r.reasoned for r in scored) / len(scored)) < 0.1:
-                report.caveats.append(
-                    f"almost nothing emitted a think block, and this run "
-                    f"expected {reasoning_style.open!r}…{reasoning_style.close!r}. "
-                    f"That is either a model that does not reason or the WRONG "
-                    f"TAG STYLE - the two look identical from here, and every "
-                    f"quality score above includes the trace if it is the "
-                    f"second. Check the family for this base in reasoning.yaml "
-                    f"(drop a corrected one at ~/.msmoe/reasoning.yaml; no "
-                    f"release needed).")
+        # DID YOU PICK THE RIGHT TAG STYLE? See wrong_tag_style_caveat - it
+        # lives at module level so its denominator can be tested, which is the
+        # part of it that was wrong.
+        _tag_caveat = wrong_tag_style_caveat(report.stages, reasoning_style)
+        if _tag_caveat:
+            report.caveats.append(_tag_caveat)
 
         # RAN OUT THE CLOCK, OR NEVER FINISHED THE SENTENCE?
         #
@@ -2197,7 +2303,10 @@ def run_eval(config, spec: Optional[Dict[str, Any]] = None) -> EvalReport:
                     f"rather than finished. Every score in that row is on a "
                     f"truncated output, and `reasoned` is a LOWER BOUND - a "
                     f"trace cut before its close tag reads as 'did not "
-                    f"reason'. Raise eval.max_new_tokens and ask again.")
+                    f"reason'. Raise eval.max_new_tokens and ask again - "
+                    f"eval.max_new_tokens: 0 lets every sample run until it "
+                    f"stops on its own, which is the setting that makes this "
+                    f"caveat impossible rather than smaller.")
 
         # THE DIAGNOSIS THE READER CANNOT BE EXPECTED TO INVENT. High routing
         # enrichment next to a low `reasoned` is the predicted failure of
