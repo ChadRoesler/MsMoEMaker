@@ -412,6 +412,43 @@ class TestPreflightSaysWhichCeilingEachLoopWillWriteUnder:
         lines = [c.detail for c in _pf_lines(_body())]
         assert any("automatic" in d for d in lines), lines
 
+    def test_automatic_says_WHICH_automatic_answer_it_picked(self):
+        """FOUND BY RUNNING IT, not by a test, which is why this one exists.
+
+        `-1` resolves to 256 for a plain run and 1024 for one that writes
+        thinking traces. The first version of this line printed "this run
+        writes thinking traces" for BOTH, so three real recipes reported 256
+        tokens per sample with a note giving the opposite of the reason they
+        got it. Every test passed; nothing compared the number to the words.
+        """
+        reasoning = next(d for d in (c.detail for c in _pf_lines(_body()))
+                         if "tokens per sample" in d)
+        assert "1024" in reasoning and "writes thinking traces" in reasoning
+
+        # A run with no reasoning expert and a non-reasoning base gets 256, and
+        # must not be told it writes traces.
+        plain = {
+            "schema_version": 1, "name": "t", "size": "0.5B",
+            "base_kind": "nonreasoning",
+            "runtime": {"use_vllm": True},
+            "experts": [
+                {"name": "python",
+                 "source": {"kind": "stack", "language": "Python"}},
+                {"name": "csharp",
+                 "source": {"kind": "stack", "language": "C#"}}],
+        }
+        from ms_moe_maker.config.recipe import parse
+        from ms_moe_maker.run import preflight
+        rec, _ = parse(plain)
+        pf = preflight.run(config.build_config(rec), rec, offline=True,
+                           need_exporter=False)
+        line = next(c.detail for c in pf.checks
+                    if "eval budget" in c.name and "tokens per sample" in c.detail)
+        assert "256" in line, line
+        assert "writes thinking traces" not in line, (
+            "a plain run was told it writes thinking traces: " + line)
+        assert "nothing in this run writes a thinking trace" in line
+
 
 class TestPreflightCatchesTheUnboundedDowngrade:
     """Unbounded on vLLM is NOT "as much as it takes".

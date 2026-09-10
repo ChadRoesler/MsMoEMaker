@@ -204,6 +204,35 @@ your file.
 | `warmup_ratio` | 0.05 | Fraction of the run spent easing the learning rate up from zero instead of hitting the model at full strength on step one. |
 | `warmup_floor` | 10 | Never warm up for fewer steps than this, however short the run. |
 | `collect_headroom` | 1.5 | How much more text to gather than the step budget strictly needs, so packing doesn't starve. |
+| `teacher_max_new` | 512 | Ceiling for any teacher loop that has not been given its own, below. |
+| `agent_teacher_max_new` | = `teacher_max_new` | Tokens the MCP tool-call teacher may write for one example. Can stay tight: the prompt carries the whole tool surface and the answer is one JSON object. |
+| `domain_teacher_max_new` | = `teacher_max_new` | Tokens the plain-text teacher may write. **Too low does not shorten this corpus, it biases it** — a generation cut at the cap is discarded, not trimmed, so what survives is whichever material happened to fit. |
+| `reasoning_teacher_max_new` | 1024 | Tokens the reasoning teacher may write. Higher than the others because the thinking alone can eat the whole budget before the answer starts. |
+| `teacher_tell_budget` | false | Put the room available into the teacher's own prompt, in words, so it aims to fit. Lowers the overrun rate; bounds nothing, because no model obeys a length instruction exactly. |
+| `teacher_overrun` | discard | What to do when a generation overruns anyway. `discard` throws it away; `answer-only` finishes one whose answer was cut; `close-and-answer` also closes a thought still in progress and buys its answer. |
+| `teacher_answer_reserve` | -1 | Tokens held back to buy that ending. `-1` = a quarter of *that loop's* budget, floored at 64, never more than half — a reserve that eats the budget leaves nothing to think with. |
+
+**Three loops, three ceilings, and `0` means unbounded.** The agent loop answers
+with one JSON tool call, the domain loop with a page of prose, the reasoning loop
+with a think block *and* an answer. They used to share one number, and sizing it
+for the tool calls starved the others: at 512 a real gauntlet discarded 490 of
+740 domain generations, so that corpus became the third of the narrative short
+enough to fit and the eval reported `NO ROUTER SIGNAL ... the fix is upstream`.
+It was upstream. Raise the ceiling belonging to the loop that is actually being
+cut — the NOTE in the log names it. `0` means as far as the engine window allows,
+which on the vLLM path is `runtime.vllm_max_len` minus the prompt, so unbounded
+is only ever as generous as that ceiling.
+
+**If the budget IS the constraint, stop discarding instead of raising.** That is
+the whole case for `teacher_overrun`: on the hardware this thing is built for you
+cannot buy your way out with VRAM. `answer-only` finishes a generation that
+already ended its reasoning and had its answer cut, and never invents a boundary
+the teacher did not choose. `close-and-answer` also takes one still mid-thought —
+trim to the last full stop, write the terminator, spend the reserve on the answer
+— which puts yield at ~100% at any budget. The happy path costs nothing: a
+generation that finishes on its own is one call, and only the overruns pay for a
+second, batched one. Only the reasoning loop has a delimiter to force, so
+elsewhere `close-and-answer` behaves as `answer-only`, and preflight says so.
 
 Reach for `target_steps` and `corpus.max_samples` before you reach for
 `lora_r`. Measured: at 0.5B the rank was already 128 while each expert saw
@@ -331,6 +360,7 @@ shorter scan and you should mean it.
 | `held_out_fraction` | 0.1 | Share of each corpus kept out of training and used to score the result. Raising it buys a more trustworthy score and takes text away from the expert; 0.95 and above is ignored, because it leaves nothing to train on. |
 | `num_samples` | 20 | Generations per expert for the quality half. |
 | `dead_threshold` | 1.2 | Enrichment below this marks an expert as not meaningfully preferred. |
+| `max_new_tokens` | -1 | Tokens generated per sample. `-1` = you decide: 256, or **1024 when the run writes thinking traces** — a `<think>` block alone routinely runs past 256, so a smaller budget stops mid-thought and `reasoned` reports "does not reliably reason" about a model that reasons fine. `0` = unbounded: the honest setting for a `reasoned` number you mean to trust, and the expensive one — it is paid once per sample per expert per surface, so preflight counts the generations before you spend them. |
 | `script` | — | Replaces our eval entirely. Called with `--data-root --output-root --held-out --num-samples`. |
 
 `dead_threshold: 1.2` is deliberately above what a 150-step router produces.
@@ -359,6 +389,8 @@ token forever.
 | `direct_load` | false | Skip the staging copy when loading checkpoints. |
 | `alloc_conf` | — | Passed straight to `PYTORCH_CUDA_ALLOC_CONF`. `expandable_segments:True` is the one that matters on unified memory. |
 | `llama_cpp` | (search) | Path to your llama.cpp build. **Put it here, not in an env var** — this is the one path most likely to differ per box, so a recipe that can't carry it is a recipe that exports nothing on your friend's machine. |
+| `use_vllm` | false | Serve the teacher through vLLM instead of plain transformers. Much faster generation, and a second serving stack to install and keep happy. It also moves the teacher batch from 96 to 512 and is part of the build fingerprint, so preflight **fails** rather than falling back quietly — a corpus generated without it is not the corpus this `build_id` describes. |
+| `vllm_max_len` | 4096 | vLLM's context window. It is what reserves the KV cache, and it is **the real ceiling any unbounded teacher budget runs into** — ask for unbounded without raising this and you have asked for less room than you think. |
 
 #### `abliterate:` — decensor the base first
 

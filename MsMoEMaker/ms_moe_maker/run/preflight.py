@@ -602,10 +602,24 @@ def _check_eval_budget(pf: Preflight, config, recipe) -> None:
                f"was enough - unbounded is for the run you have already "
                f"decided to spend a night on.")
         return
+    if int(asked or -1) >= 0:
+        pf.add("eval budget", PASS, f"{resolved} tokens per sample")
+        return
+    # AUTOMATIC IS TWO DIFFERENT ANSWERS AND THIS SAID ONLY ONE OF THEM.
+    #
+    # `-1` picks 256 for a plain run and 1024 for one that writes thinking
+    # traces, and the first version of this line printed "this run writes
+    # thinking traces" for BOTH - so three real recipes reported 256 tokens
+    # per sample with a note claiming the opposite of why they got it.
+    # Confidently wrong about its own reasoning, which is the one thing a
+    # preflight line must never be.
+    reasons = resolved == cfg_module.EVAL_MAX_NEW_TOKENS_REASONING
     pf.add("eval budget", PASS,
-           f"{resolved} tokens per sample"
-           + (" (automatic: this run writes thinking traces)"
-              if int(asked or -1) < 0 else ""))
+           f"{resolved} tokens per sample (automatic: "
+           + ("this run writes thinking traces, which need room for the block "
+              "AND the answer after it" if reasons else
+              "nothing in this run writes a thinking trace")
+           + ")")
 
 
 def _check_reasoning(pf: Preflight, config, recipe) -> None:

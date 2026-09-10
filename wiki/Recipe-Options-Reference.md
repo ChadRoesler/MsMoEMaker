@@ -172,6 +172,12 @@ Primary options include:
 - `max_samples`
 - `router_mix_total`
 - `per_repo_cap`
+- `synth_samples` — how many traces to GENERATE per generated expert. `-1` =
+  derived from `max_samples` and the tier. It governs **both** generated
+  corpora — the tools expert's MCP traces and reasoning traces — which is why
+  it is not called `agent_samples`; naming a knob after one of the two things
+  it controls is how `data.code` happened. A source can override it for one
+  expert with `examples:`.
 - source-specific controls (`max_shards`, etc.)
 
 What it changes:
@@ -328,6 +334,10 @@ Guidance:
 
 Options include:
 
+- `enabled` — whether the stage runs at all. Default `false`. `abliterate: true`
+  is shorthand for `abliterate: {enabled: true}`; inside a mapping you set it
+  explicitly, so a block that carries tuned knobs can be switched off without
+  deleting it.
 - `n_trials` — Optuna trials; `-1` means the default (200).
 - `seed` — reproducible study seed (unset = random).
 - `quantization` — `none` or `bnb_4bit`.

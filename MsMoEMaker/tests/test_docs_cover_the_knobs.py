@@ -28,19 +28,15 @@ from ms_moe_maker.config import recipe as recipe_mod
 
 #: Recipe fields with no prose yet. DEBT, not policy - see the module docstring.
 #: Each entry is a promise to write a line, not permission to skip one.
-UNDOCUMENTED = {
-    # Added this session with the per-loop budgets and the overrun policy.
-    "budget.agent_teacher_max_new",
-    "budget.domain_teacher_max_new",
-    "budget.teacher_tell_budget",
-    "budget.teacher_overrun",
-    "budget.teacher_answer_reserve",
-    # Older, and undocumented for longer than anyone realised.
-    "abliterate.enabled",
-    "corpus.synth_samples",
-    "runtime.use_vllm",
-    "runtime.vllm_max_len",
-}
+#:
+#: EMPTY, AND THAT IS THE POINT. It held nine entries when this test was
+#: written - five from the per-loop budgets and the overrun policy, four older
+#: than anyone realised. All nine now have prose in the wiki's
+#: Recipe-Options-Reference, so the ratchet did its job twice: it named the
+#: debt, and then it failed the build when the debt was paid and the list was
+#: not updated. Keep it empty if you can. Adding to it should feel like a
+#: decision, and the next person to add a field will find out here.
+UNDOCUMENTED: set = set()
 
 
 def _doc_text():
@@ -135,8 +131,10 @@ class TestThePublishedVocabularyIsAlsoWrittenDown:
 
     KEYS_NEEDING_PROSE = ("overrun_policies", "eval_modes")
 
-    #: Same ratchet, same rules.
-    UNDOCUMENTED_KEYS = {"overrun_policies", "eval_modes"}
+    #: Same ratchet, same rules. Both keys are documented in CLI-Reference
+    #: under `describe`, which is where a front-end author would look for the
+    #: legal values of `eval.mode` and `budget.teacher_overrun`.
+    UNDOCUMENTED_KEYS: set = set()
 
     def test_the_ratchet_holds(self, docs):
         from ms_moe_maker.box.describe import DESCRIBE
@@ -156,8 +154,11 @@ class TestThePublishedVocabularyIsAlsoWrittenDown:
 class TestEveryCliVerbIsWrittenDown:
     """A verb nobody can find is a verb nobody uses."""
 
-    #: `bundle` shipped without a mention in any doc.
-    UNDOCUMENTED_VERBS = {"bundle"}
+    #: `bundle` shipped without a mention in ANY doc - not the wiki, not
+    #: either README - and so did `export`, which only escaped this list
+    #: because the word appears in prose about GGUF export. Both are written
+    #: up in CLI-Reference now.
+    UNDOCUMENTED_VERBS: set = set()
 
     def test_the_ratchet_holds(self, docs):
         from ms_moe_maker.box.describe import DESCRIBE

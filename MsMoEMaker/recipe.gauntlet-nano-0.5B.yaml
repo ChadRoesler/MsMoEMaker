@@ -14,13 +14,13 @@
 #   * llama.cpp for the export stage (or accept the warned skip - which now
 #     records WARNED, not done, in the manifest Theatre paints from).
 schema_version: 1
-name: gauntlet-0.5B
+name: gauntlet-nano-0.5B
 size: 0.5B
 base_kind: nonreasoning       # the base does NOT reason; two experts will anyway
 
 roots:                        # tier 2: the roots block now actually decides
-  data: gauntlet-data/{size}
-  output: gauntlet-runs/{size}
+  data: gauntlet-nano-data/{size}
+  output: gauntlet-nano-runs/{size}
 
 experts:
   # kind=stack, with the per-source shard cap (tier 2) and per-expert token
@@ -105,7 +105,7 @@ runtime:
   vllm_max_len: 4096
 
 budget:
-  target_steps: 600           # a shakedown, not a result
+  target_steps: 200           # measuring YIELD, not training a model
   max_seq_length: 2048
   lora_r: 64                  # recipe-first rank (tier 3 sentinel fix)
   lora_alpha: 32
@@ -119,21 +119,27 @@ budget:
   # does not shorten a corpus, it keeps whatever was short enough to fit - and
   # the eval reported it as NO ROUTER SIGNAL, which was true and did not say
   # upstream of what.
-  teacher_max_new: 512              # fallback only now; each loop has its own
-  agent_teacher_max_new: 512        # fine here: 1 cut short in 10,187
-  domain_teacher_max_new: 2048      # THE STARVED ONE - 66% cut short at 512
-  reasoning_teacher_max_new: 4096   # 0.4% cut short; already right
+  # DELIBERATELY TOO SMALL. This recipe exists to make the overrun policy do
+  # something: at these ceilings a good fraction of every loop WILL run out,
+  # which is the whole point - the numbers to watch are `cut short` and
+  # `salvaged` in the progress line. Do not copy these into a real run.
+  teacher_max_new: 256              # fallback
+  agent_teacher_max_new: 256        # a JSON tool call, tight
+  domain_teacher_max_new: 512       # the ceiling that starved lore last time
+  reasoning_teacher_max_new: 768    # think block + answer, on a shoestring
   teacher_tell_budget: true         # ask it to fit. Costs nothing, bounds nothing
-  # A NET, NOT A CRUTCH. This box can raise ceilings, so it does not need the
-  # permissive policy: answer-only finishes a generation whose ANSWER was cut
-  # and never invents a reasoning boundary the teacher did not choose. It can
-  # only help. Flip to close-and-answer when the budget is the constraint.
-  teacher_overrun: answer-only
+  # THE PERMISSIVE POLICY, WHICH IS THE THING UNDER TEST. Trims a thought to
+  # its last full stop, writes the terminator, and buys the answer with the
+  # reserve - so a generation that overran becomes a well-formed row instead of
+  # a discarded one. Only the reasoning loop has a delimiter to force; in the
+  # agent and domain loops this behaves as answer-only, and preflight says so.
+  teacher_overrun: close-and-answer
+  teacher_answer_reserve: -1        # a quarter of each loop's own budget
 
 corpus:
   min_samples: 300            # will be derived UP; watch it say so
   max_samples: 32000
-  synth_samples: 500          # the run-wide trace default; source.examples
+  synth_samples: 200          # the run-wide trace default; source.examples
                               #   overrides it per expert
   per_repo_cap: 20
   router_mix_total: 16000     # half the prod mix: smaller derived floor
