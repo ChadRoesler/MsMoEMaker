@@ -82,6 +82,7 @@ Primary options usually include:
 - `grad_accum`
 - LoRA controls (`lora_r`, `lora_alpha`, `lora_dropout`)
 - warmup controls
+
 ### Teacher generation budgets
 
 Three synth loops generate the corpora, and they no longer share one ceiling.
@@ -140,7 +141,6 @@ than letting the recipe imply a promise the loop cannot make.
 
 The happy path costs nothing: a generation that finishes on its own is one
 call, and only the overruns pay for a second, batched one.
-
 
 What it changes:
 
