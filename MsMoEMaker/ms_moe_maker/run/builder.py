@@ -49,20 +49,50 @@ class StageCallback:
 
     def __init__(self, notify=None):
         """
-        notify: optional callable(stage_id, status, note) for propagating
-                stage changes outward (to the Runner / manifest).
+        notify: optional callable(stage_id, status, note, artifact) for
+                propagating stage changes outward (to the Runner / manifest).
+
+        ARTIFACT IS THE FOURTH ARGUMENT AND IT USED TO NOT EXIST, which is the
+        whole reason `manifest.Stage.artifact` was never populated on this path.
+        The pipeline knew every one of these paths and recorded them in
+        `BuildResult.artifacts`; the callback had nowhere to put them, and
+        nothing copied that dict into the manifest afterwards. So the field was
+        declared, documented, parsed by Theatre, shipped in /api/state and drawn
+        on the card - and blank on every in-process build ever run.
+
+        Four POSITIONAL arguments rather than a keyword shim, and rather than
+        sniffing the callback's arity. A shim would let a three-argument
+        listener keep working while silently dropping artifacts, which is
+        exactly the failure being fixed here wearing a compatibility hat. This
+        callback is internal - constructed in one place in runner.py - so
+        widening it is a change, not a break.
         """
         self._stages: Dict[str, dict] = {}
-        self.notify = notify  # callable(stage_id, status, note) or None
+        self.notify = notify    # callable(stage_id, status, note, artifact)
 
-    def stage(self, name: str, status: str, note: str = ""):
+    def stage(self, name: str, status: str, note: str = "",
+              artifact: Optional[str] = None):
+        """Report a stage change, optionally naming what it produced.
+
+        `artifact` is A PATH OR NOTHING. `BuildResult.artifacts` is looser than
+        its own `stage_id -> path` comment - the gate stores its status word
+        there and a skipped GGUF export stores the sentence "skipped (no
+        llama.cpp)" - and `manifest.Stage.artifact` promises a path relative to
+        the run directory. Copying that dict wholesale would put "pass" in a
+        field documented as a path, which is a smaller lie than a blank field
+        but a lie in a place a reader trusts. So only the entries that are
+        genuinely one path are passed, and the rest stay notes, which is what
+        they always were.
+        """
         if name not in self._stages:
             self._stages[name] = {"name": name, "status": "pending", "note": ""}
         self._stages[name]["status"] = status
         if note:
             self._stages[name]["note"] = note
+        if artifact:
+            self._stages[name]["artifact"] = artifact
         if self.notify:
-            self.notify(name, status, note)
+            self.notify(name, status, note, artifact)
 
 
 def resolve_only(requested: Optional[Sequence[str]],
@@ -230,7 +260,8 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         ablated_dir = abliterate_mod.abliterate_base(config)
         config = dataclasses.replace(config, base=ablated_dir)
         print(f"[abliterate] base repointed -> {ablated_dir}")
-        cb.stage(stages.ABLITERATE_BASE, mf.DONE, f"abliterated base → {ablated_dir}")
+        cb.stage(stages.ABLITERATE_BASE, mf.DONE,
+                 f"abliterated base → {ablated_dir}", artifact=ablated_dir)
         result.stages_completed.append(stages.ABLITERATE_BASE)
         result.artifacts[stages.ABLITERATE_BASE] = ablated_dir
 
@@ -536,7 +567,8 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
         cb.stage(f"finetune.{safe_name}",
                  mf.SKIPPED if was_present else mf.DONE,
                  f"already trained → {out_dir}" if was_present
-                 else f"saved → {out_dir}")
+                 else f"saved → {out_dir}",
+                 artifact=out_dir)
         result.stages_completed.append(f"finetune.{safe_name}")
         result.artifacts[f"finetune.{safe_name}"] = out_dir
 
@@ -673,7 +705,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
                                                     "zero")):
         cb.stage(stages.STITCH,
                  mf.SKIPPED if stitch_was_present else mf.DONE,
-                 f"skeleton → {moe_dir}")
+                 f"skeleton → {moe_dir}", artifact=moe_dir)
         result.stages_completed.append(stages.STITCH)
         result.artifacts[stages.STITCH] = moe_dir
     else:
@@ -713,7 +745,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
 
     cb.stage(stages.ROUTER,
              mf.SKIPPED if router_was_present else mf.DONE,
-             f"router-trained → {router_dir}")
+             f"router-trained → {router_dir}", artifact=router_dir)
     result.stages_completed.append(stages.ROUTER)
     result.artifacts[stages.ROUTER] = router_dir
 
@@ -759,7 +791,7 @@ def run_pipeline(recipe, force: bool = False, dryrun: bool = False,
     elif gguf_path:
         cb.stage(stages.EXPORT_GGUF,
                  mf.SKIPPED if export_was_present else mf.DONE,
-                 f"GGUF → {gguf_path}")
+                 f"GGUF → {gguf_path}", artifact=gguf_path)
         result.stages_completed.append(stages.EXPORT_GGUF)
         result.artifacts[stages.EXPORT_GGUF] = gguf_path
     else:

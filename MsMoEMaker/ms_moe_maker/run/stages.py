@@ -26,7 +26,7 @@ finetune stages, and a recipe with three means three.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 # -- fixed stages ------------------------------------------------------------
 
@@ -202,3 +202,83 @@ def artifact_for(stage_id: str) -> str | None:
         return FINETUNE_ARTIFACT.format(
             expert=stage_id[len(FINETUNE_PREFIX):])
     return None
+
+
+# ── the substitution the repeated stages take ───────────────────────────────
+#
+# Published so a consumer can expand `finetune.{expert}` without parsing braces
+# out of an id, and built from the parameter name rather than beside it, so the
+# two can never disagree about what the placeholder is called.
+EXPERT_PARAMETER = "expert"
+EXPERT_TEMPLATE = "{" + EXPERT_PARAMETER + "}"
+
+
+def _row(stage_id: str,
+         optional: bool = False,
+         parameter: str | None = None) -> Dict[str, Any]:
+    """One published row, with label and artifact read through the real lookups.
+
+    Deliberately NOT a literal per row. Every row - the templated one included -
+    goes through label_for() and artifact_for(), which are the same two
+    functions the runner and the viewer use. A published payload assembled from
+    hand-written strings is a second source of truth that starts out correct;
+    this one cannot drift from the constants above because it does not hold a
+    copy of them.
+    """
+    return {
+        "id": stage_id,
+        "label": label_for(stage_id),
+        "artifact": artifact_for(stage_id),
+        "optional": optional,
+        "parameter": parameter,
+    }
+
+
+def describe() -> List[Dict[str, Any]]:
+    """This pipeline's stage vocabulary, in execution order.
+
+    WHY IT IS BUILT HERE AND NOT IN box/describe.py. `--describe` is stdlib-only
+    so it can answer on a half-installed tool, which rules out importing this
+    module over there - but a hand-written copy of this list in the identity
+    card would be a second source of truth, the exact mistake `COMMANDS` was
+    moved OUT of __main__ to fix. So the payload is built beside the constants
+    it describes, and __main__ asks for it the way it already asks
+    corpus.describe() and validators.describe(). This module is stdlib-only
+    too; only its package __init__ is heavy, which is why the caller degrades.
+
+    THE ORDER IS PART OF THE ANSWER. These rows are the sequence plan() emits,
+    with the per-expert block in its real slot, so a front-end can draw the
+    whole shape of a build before the first stage opens - and say "3 of 9"
+    honestly instead of counting stages as they arrive. plan() remains the code
+    that actually runs; test_stage_vocabulary pins this list against what plan()
+    returns, so a reordering there cannot leave this quietly wrong. That is a
+    wiring check, not two literals agreeing with each other.
+
+    EVERY ROW CARRIES EVERY KEY, so a consumer never branches on which fields a
+    row happens to have:
+
+        id         the stage id, or a {parameter} template for repeated ones
+        label      the sentence a human reads
+        artifact   the directory it leaves in the run root, or None
+        optional   whether a build can legitimately skip it
+        parameter  the name substituted into id/label/artifact, or None
+
+    `optional` is the key worth having and the one a consumer would otherwise
+    guess wrong: a build with one expert emits no gate.experts and a recipe with
+    no generated source emits no data.synth. Without this, a viewer drawing a
+    plan from the vocabulary reports two stages as missing forever.
+
+    Adding a row is additive under the same rule as EVENTS - a consumer that
+    does not know a stage must ignore it. Renaming or removing one is not.
+    """
+    return [
+        _row(PREFLIGHT),
+        _row(ABLITERATE_BASE, optional=True),
+        _row(DATA_CORPUS),
+        _row(DATA_SYNTH, optional=True),
+        _row(finetune_id(EXPERT_TEMPLATE), parameter=EXPERT_PARAMETER),
+        _row(GATE_EXPERTS, optional=True),
+        _row(STITCH),
+        _row(ROUTER),
+        _row(EXPORT_GGUF),
+    ]

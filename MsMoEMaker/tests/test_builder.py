@@ -25,16 +25,45 @@ class TestStageCallback:
 
     def test_notify_callback_called(self):
         notified = []
-        cb = builder.StageCallback(notify=lambda s, st, n: notified.append((s, st, n)))
+        cb = builder.StageCallback(
+            notify=lambda s, st, n, a: notified.append((s, st, n, a)))
         cb.stage("data.corpus", "running", "hello")
         assert len(notified) == 1
-        assert notified[0] == ("data.corpus", "running", "hello")
+        assert notified[0] == ("data.corpus", "running", "hello", None)
 
     def test_notify_callback_for_done(self):
         notified = []
-        cb = builder.StageCallback(notify=lambda s, st, n: notified.append((s, st, n)))
+        cb = builder.StageCallback(
+            notify=lambda s, st, n, a: notified.append((s, st, n, a)))
         cb.stage("data.corpus", "done", "finished")
-        assert notified[0] == ("data.corpus", "done", "finished")
+        assert notified[0] == ("data.corpus", "done", "finished", None)
+
+    def test_the_artifact_reaches_the_listener(self):
+        """THE FOURTH ARGUMENT, AND THE REASON IT EXISTS.
+
+        The pipeline knew every artifact path and recorded it in
+        BuildResult.artifacts; this callback had nowhere to put one, and nothing
+        copied that dict into the manifest afterwards. So manifest.Stage.artifact
+        - declared, documented, parsed by Theatre, shipped in /api/state and
+        drawn on the card - was blank on every in-process build.
+        """
+        notified = []
+        cb = builder.StageCallback(
+            notify=lambda s, st, n, a: notified.append((s, st, n, a)))
+        cb.stage("stitch", "done", "skeleton", artifact="/runs/0.5B/moe_untrained")
+        assert notified[0][3] == "/runs/0.5B/moe_untrained"
+        assert cb._stages["stitch"]["artifact"] == "/runs/0.5B/moe_untrained"
+
+    def test_a_stage_with_no_artifact_reports_none_not_an_empty_string(self):
+        """None and "" are different answers. A stage that produced nothing has
+        no artifact; a stage whose artifact came back empty is a bug upstream,
+        and the manifest reader has to be able to tell them apart."""
+        notified = []
+        cb = builder.StageCallback(
+            notify=lambda s, st, n, a: notified.append(a))
+        cb.stage("preflight", "done")
+        assert notified == [None]
+        assert "artifact" not in cb._stages["preflight"]
 
     def test_multi_stage_tracking(self):
         cb = builder.StageCallback()

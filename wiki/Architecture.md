@@ -44,11 +44,37 @@ key off them.
 ## Contracts
 
 - **Stage ids** are stable; renaming one is a breaking change.
-- **The manifest** (`msmoe-run.json` in the output root) is the only interface
-  between the pipeline and viewers. Additive fields don't bump its schema.
+- **The manifest** (`msmoe-run.json` in the output root) is the interface
+  between the pipeline and viewers. Additive fields don't bump schema.
+- **Run recipe copy** is preserved beside the manifest as
+  `msmoe-recipe.<source-suffix>` (for example `.yaml` or `.json`).
 - **`--json`** emits one JSON object per line on stdout; prose goes to stderr.
 - **`recipe_id`** identifies the recipe as written; **`build_id`** identifies the
   resolved build (recipe + defaults + box).
+
+## Stage vocabulary publishing (`describe.stages`)
+
+The stage contract is also published by `describe` so integrations can render
+pipeline shape without hardcoding internal lists.
+
+`describe.stages` returns ordered rows with:
+
+- `id`
+- `label`
+- `artifact`
+- `optional`
+- `parameter` (for templated rows)
+
+For example, `finetune.{expert}` is published once as a template row, and
+consumers expand it using `parameter: "expert"`.
+
+## Stage artifact paths in manifests
+
+Builder stages operate with absolute paths internally. Runner manifest writes
+store stage artifacts relative to the run directory, which keeps manifests
+portable when runs are moved, copied, or mounted under different prefixes.
+
+Treat `manifest.stage(<id>).artifact` as a run-relative path when present.
 
 ## Design invariants
 

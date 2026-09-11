@@ -787,6 +787,23 @@ def load(path: str, defaults_path: Optional[str] = None,
     rec.defaults_digests = _defaults.file_digests(
         defaults_path, include_user=include_user_defaults)
 
+    # WHERE IT CAME FROM, AND WHAT IT SAID.
+    #
+    # The manifest already stamps a sha256 of every DEFAULTS file a run
+    # inherits, and stamped nothing at all about the recipe - so a finished run
+    # could tell you the fingerprint of the config it resolved to and not the
+    # text that produced it. `build_id` makes a rebuild VERIFIABLE; the text is
+    # what makes it POSSIBLE. A run directory that cannot say what recipe built
+    # it is incomplete on its own terms, before any viewer is involved.
+    #
+    # Set here rather than in parse() for the same reason the defaults are: a
+    # path is the moment a box gets involved, and parse() stays pure. Dynamic
+    # attributes, matching resolved_defaults and defaults_digests directly
+    # above - every reader uses getattr with a default, so a Recipe built by
+    # hand in a test is still a valid Recipe.
+    rec.source_path = str(path)
+    rec.source_text = text
+
     # THE BOX'S OWN TABLE, CHECKED OUT LOUD. merge_tiers refuses a malformed or
     # incomplete tier rather than raising - adding hardware should not be a
     # cliff - but a refusal nobody sees is the same as no check at all.

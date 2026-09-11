@@ -79,6 +79,24 @@ OVERRUN_POLICIES = (OVERRUN_DISCARD, OVERRUN_ANSWER_ONLY,
 EVENTS = ("started", "stage", "progress", "refused", "warning", "error",
           "defaults", "done")
 
+# WHAT THE `started` EVENT CARRIES. Published because it is the only place a
+# build states its own ABSOLUTE run directory - the manifest deliberately holds
+# none, so that a run directory can be moved, copied to another box or read
+# through a mount with a different prefix without invalidating it.
+#
+# That makes this event the one bridge between "the process I launched" and
+# "the directory on disk", and a reader that wants to cross it should not have
+# to learn the keys by running a build and looking.
+#
+# `env_applied` and `agreed` are the translation layer - the environment this
+# box actually imposed. On Jetson that is where LD_LIBRARY_PATH and the CUDA
+# compat shim live, which is to say it is where the interesting failures are.
+#
+# Additive under the same rule as EVENTS: a consumer that does not know a key
+# must ignore it. Removing or renaming one is a breaking change.
+STARTED_FIELDS = ("recipe_id", "name", "size", "experts", "run_dir",
+                  "data_root", "command", "cwd", "env_applied", "agreed")
+
 DESCRIBE = {
     "name": NAME,
     "kind": "pipeline",
@@ -87,6 +105,7 @@ DESCRIBE = {
     "eval_modes": list(EVAL_MODES),
     "overrun_policies": list(OVERRUN_POLICIES),
     "events": list(EVENTS),
+    "started_fields": list(STARTED_FIELDS),
     # The manifest schema this build writes into a run directory. A reader
     # (seren-theatre) can check compatibility before it trusts a file.
     "manifest_schema_version": 1,

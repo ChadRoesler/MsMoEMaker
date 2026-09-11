@@ -65,6 +65,20 @@ SCHEMA_VERSION = 1
 # in the same sweep.
 MANIFEST_NAME = "msmoe-run.json"
 
+#: THE RUN'S OWN COPY OF THE RECIPE THAT PRODUCED IT, written beside the
+#: manifest. Stem only: the SUFFIX is kept from the original file, so a JSON
+#: recipe stays `.json` and a YAML one stays `.yaml`. A reader should never have
+#: to guess what a file is from a name we picked - and JSON being valid YAML 1.2
+#: is exactly the kind of technically-true that makes somebody open the wrong
+#: parser at 2am.
+#:
+#: WHY THIS FILE HOLDS THE NAME. It is a sibling of the manifest in every sense:
+#: same directory, same "small document describing the run rather than an
+#: artifact of it", same atomic writer, and the same contract-with-a-reader that
+#: MANIFEST_NAME already has. Anything that reads run directories needs both
+#: names, and one place to look for them is the point.
+RECIPE_STEM = "msmoe-recipe"
+
 # How long a "running" stage may go without a heartbeat before a reader should
 # treat the manifest as abandoned rather than live. Generous on purpose: a
 # 14B expert can spend a long time inside one stage with nothing to report,
@@ -232,6 +246,43 @@ def _atomic_write(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def recipe_path(run_dir: Path, suffix: str) -> Path:
+    """Where this run's recipe copy goes, keeping the original suffix."""
+    clean = suffix if suffix.startswith(".") else ("." + suffix if suffix else "")
+    return Path(run_dir) / (RECIPE_STEM + clean)
+
+
+def find_recipe(run_dir: Path) -> Optional[Path]:
+    """This run's recipe copy, whatever suffix it kept. None if there is none.
+
+    None is a real answer and must stay distinguishable from an empty file: a
+    run built before recipes were preserved has nothing here, and that is not
+    the same fact as a recipe that was written and came back blank.
+    """
+    try:
+        found = sorted(Path(run_dir).glob(RECIPE_STEM + ".*"))
+    except OSError:
+        return None
+    return found[0] if found else None
+
+
+def write_recipe(run_dir: Path, text: str, suffix: str) -> Path:
+    """Preserve the recipe text beside the manifest. Atomic, like the manifest.
+
+    Same writer as the manifest for the same reason: Theatre polls these
+    directories while a build writes them, and a reader that can catch half a
+    document needs retry logic to paper over a race the writer could simply not
+    create.
+
+    Not idempotent-checked on purpose - rewriting the same bytes is free, and a
+    guard would be one more thing that can be wrong about whether the file is
+    current.
+    """
+    target = recipe_path(run_dir, suffix)
+    _atomic_write(target, text)
+    return target
 
 
 def write(run_dir: Path, manifest: Manifest) -> Path:

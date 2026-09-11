@@ -103,6 +103,22 @@ For exploratory local runs, user defaults may be acceptable.
    - output root
 4. Archive artifacts and metadata together.
 
+## Run directory self-containment
+
+New runs preserve the exact recipe text in the run directory as
+`msmoe-recipe.<suffix>`, alongside `msmoe-run.json`.
+
+Why this matters:
+
+- `build_id` verifies parity
+- recipe copy makes a rebuild possible months later
+
+Practical guidance:
+
+- treat run dir as the archive unit
+- keep `msmoe-run.json` and `msmoe-recipe.*` together
+- if suffix differs (`.yaml` vs `.json`), preserve it as-is when copying
+
 ## Interpreting `recipe_id` vs `build_id`
 
 - `recipe_id`: identity of recipe content

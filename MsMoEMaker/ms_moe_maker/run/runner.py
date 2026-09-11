@@ -295,6 +295,8 @@ class Runner:
         self._drift: List[str] = []
         self._current: Optional[str] = None
         self._missing_module: Optional[str] = None
+        # Preserved once, on the first flush - see _preserve_recipe.
+        self._recipe_saved = False
 
     # -- manifest bookkeeping ----------------------------------------------
 
@@ -310,6 +312,40 @@ class Runner:
         except OSError as exc:
             # Never let reporting kill the build it is reporting on.
             self.ev.warning(f"could not write the run manifest: {exc}")
+        self._preserve_recipe()
+
+    def _preserve_recipe(self) -> None:
+        """Copy the recipe into the run directory. Once, best effort.
+
+        FROM HERE BECAUSE THIS IS WHERE THE DIRECTORY EXISTS. `mf.write` mkdirs
+        its own parent, so the first flush is the first moment there is anywhere
+        to put this - and _flush runs on every build path, in-process and
+        subprocess alike, so hanging it here means there is no route that
+        forgets. Guarded by a flag rather than by checking the disk: the answer
+        cannot change during a run, and a stat per stage transition to re-learn
+        something we already know is a poll pretending to be a fact.
+
+        BEST EFFORT, LIKE THE MANIFEST ABOVE IT. A build that failed because its
+        own bookkeeping could not be written would be a worse trade than a
+        build whose record is missing a file - and the warning goes on the event
+        stream, where the person watching will see it, rather than into a log
+        nobody opens.
+
+        A hand-constructed Recipe has no source at all, which is not an error:
+        `parse()` stays pure and tests build recipes in memory. Nothing to copy
+        means nothing to copy.
+        """
+        if self._recipe_saved:
+            return
+        self._recipe_saved = True
+        text = getattr(self.recipe, "source_text", None)
+        origin = getattr(self.recipe, "source_path", "") or ""
+        if not text:
+            return
+        try:
+            mf.write_recipe(self.run_dir, text, Path(origin).suffix)
+        except OSError as exc:
+            self.ev.warning(f"could not preserve the recipe: {exc}")
 
     def _set(self, stage_id: str, status: str, **kw: Any) -> None:
         stage = self.manifest.stage(stage_id)
@@ -487,8 +523,22 @@ class Runner:
             os.environ[key] = value
 
         # Connect builder stage events to manifest bookkeeping
-        def _on_stage(stage_id, status, note=""):
-            self._set(stage_id, status, note=note)
+        def _on_stage(stage_id, status, note="", artifact=None):
+            # RELATIVISED HERE, in one place. Stage.artifact promises a path
+            # relative to the run directory so the manifest survives being
+            # moved, copied to another box, or read through a mount with a
+            # different prefix - which is exactly what Theatre does over a
+            # share. The builder deals in absolute paths because it is the one
+            # creating them; _relative is the seam between those two facts.
+            #
+            # Only passed when there IS one: _set does setattr, so handing it
+            # artifact=None would blank an artifact a previous transition of the
+            # same stage had already recorded.
+            if artifact:
+                self._set(stage_id, status, note=note,
+                          artifact=_relative(str(artifact), self.run_dir))
+            else:
+                self._set(stage_id, status, note=note)
 
         self.ev.started(recipe_id=self.manifest.recipe_id,
                         name=self.manifest.name, size=self.manifest.size,

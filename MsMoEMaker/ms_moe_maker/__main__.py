@@ -203,6 +203,30 @@ class _Tee:
                 pass
 
 
+def _box_stages():
+    """The stage vocabulary this pipeline runs, in execution order.
+
+    WHY THIS KEY IS HERE AND NOT IN box/describe.py, WHICH OWNS THE VERBS.
+    That module is stdlib-only on purpose - it has to answer on a half-installed
+    tool - so it cannot import run.stages, and a hand-typed copy of the stage
+    list over there would be the second-source-of-truth mistake `COMMANDS` was
+    moved out of THIS file to fix. run.stages builds its own payload beside the
+    constants it describes; this asks for it, exactly as `kinds` and
+    `validators` ask their registries.
+
+    Same defensiveness as _box_corpus_kinds, and it is not theoretical here:
+    run/stages.py is stdlib-only, but importing it runs run/__init__.py, which
+    imports the builder. A missing heavy dep degrades this to an empty list
+    rather than taking `--describe` down - which is the one moment the contract
+    most has to hold.
+    """
+    try:
+        from .run import stages as _s
+        return _s.describe()
+    except Exception:
+        return []
+
+
 def _box_corpus_kinds():
     """The corpus registry as ROWS, for --describe and Backstage's craft form.
 
@@ -267,6 +291,14 @@ DESCRIBE = {
     "knobs": _box_knobs(),
     "registry_errors": _box_registry_errors(),
     "modes": list(_d.EVAL_MODES),
+    # WHAT A BUILD ACTUALLY DOES, stage by stage, with the directory each one
+    # leaves behind. Published for the same reason `events` is: a front-end
+    # drawing a run's shape should not have to hardcode our pipeline, and a
+    # reader confronting an archived run should be able to ask this install what
+    # its stage ids and artifact directories mean instead of guessing from
+    # names. seren-theatre had a hardcoded copy of the artifact names and it
+    # went stale the moment they were renamed off `fraunkenstein_`.
+    "stages": _box_stages(),
 }
 
 

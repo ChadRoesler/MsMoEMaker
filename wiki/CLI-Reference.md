@@ -22,13 +22,25 @@ ms-moe-maker init --defaults-template              # write ~/.msmoe/defaults.yam
 ### `describe`
 
 Print the box: tiers, templates, corpus kinds, eval modes, overrun policies,
-the knob glossary, defaults. Zero side effects, JSON on stdout.
+the knob glossary, defaults, and stage vocabulary. Zero side effects, JSON on
+stdout.
 
-This is the contract a front-end builds from, which is why the vocabularies live
-here rather than being hardcoded anywhere: `eval_modes` and `overrun_policies`
-are the legal values for `eval.mode` and `budget.teacher_overrun`, and `events`
-is the event vocabulary emitted under `--json`. Adding a value is additive — a
-consumer that does not know one ignores it; removing or renaming one is not.
+This is the contract a front-end builds from, which is why vocabularies live
+here rather than being hardcoded anywhere: `eval_modes` and
+`overrun_policies` are legal values for `eval.mode` and
+`budget.teacher_overrun`, `events` is the event vocabulary emitted under
+`--json`, and `stages` publishes the pipeline stage rows in execution order.
+
+Each `stages` row includes:
+
+- `id`
+- `label`
+- `artifact` (or `null`)
+- `optional` (whether the stage may be absent on a valid build)
+- `parameter` (for templated rows like `finetune.{expert}`)
+
+Adding values/rows is additive — consumers should ignore unknown ones.
+Removing or renaming existing ones is breaking for integrations.
 
 ```bash
 ms-moe-maker describe

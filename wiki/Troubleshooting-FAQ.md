@@ -90,6 +90,18 @@ Action:
 - run with explicit `--defaults`
 - compare `recipe_id` and `build_id` semantics in run metadata
 
+### Archived run is missing the recipe text
+
+Likely cause:
+
+- run predates recipe-preservation support, or archive copy was incomplete
+
+Action:
+
+- check for `msmoe-recipe.*` beside `msmoe-run.json`
+- if absent, recover the original recipe from source control/history
+- for future runs, archive the whole run directory as one unit
+
 ## Escalation checklist
 
 Before filing an issue or asking for review, capture:
