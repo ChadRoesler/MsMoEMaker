@@ -129,20 +129,104 @@ class TestThePublishedVocabularyIsAlsoWrittenDown:
     """`--describe` is a contract with front-ends; the docs are the contract
     with people. A key in one and not the other is half a contract."""
 
-    KEYS_NEEDING_PROSE = ("overrun_policies", "eval_modes")
+    KEYS_NEEDING_PROSE = ("overrun_policies", "eval_modes", "started_fields")
 
-    #: Same ratchet, same rules. Both keys are documented in CLI-Reference
-    #: under `describe`, which is where a front-end author would look for the
-    #: legal values of `eval.mode` and `budget.teacher_overrun`.
-    UNDOCUMENTED_KEYS: set = set()
+    #: Same ratchet, same rules. `overrun_policies` and `eval_modes` are
+    #: documented in CLI-Reference under `describe`, which is where a front-end
+    #: author would look for the legal values of `eval.mode` and
+    #: `budget.teacher_overrun`.
+    #:
+    #: `started_fields` is genuine debt: seren-theatre reads that event to find
+    #: a run directory, so the keys are a contract with a real consumer, and
+    #: nothing in any doc mentions them. Listed here so the ratchet stays green
+    #: now and `test_the_key_debt_list_does_not_rot` fires the moment somebody
+    #: writes the prose - at which point delete this line.
+    UNDOCUMENTED_KEYS: set = {"started_fields"}
+
+    #: WHY `stages` IS NOT IN THE LIST ABOVE, THOUGH IT IS EQUALLY UNDOCUMENTED.
+    #:
+    #: This ratchet matches a key NAME as a substring of the docs, and "stages"
+    #: is ordinary English that already appears in seven of them ("the build runs
+    #: nine stages"). An entry for it would be permanently, falsely green - a
+    #: test that reports coverage it never checked, which is worse than no test
+    #: because somebody would trust it.
+    #:
+    #: It cannot go in UNDOCUMENTED_KEYS either: the debt-rot check looks for the
+    #: same substring and would fire immediately against that same prose.
+    #:
+    #: So the mechanism does not fit this key. Fixing it means matching something
+    #: unambiguous - a backticked form, or a heading - and that is a change to
+    #: how every entry here is checked, not a new entry.
+    UNRATCHETABLE_KEYS: set = {"stages"}
 
     def test_the_ratchet_holds(self, docs):
-        from ms_moe_maker.box.describe import DESCRIBE
+        # THE MERGED PAYLOAD, not the identity card. The card carries eleven
+        # keys; `__main__` publishes twelve more that only an installed CLI can
+        # answer - kinds, validators, knobs, tiers, stages and the rest - and
+        # reading only the card meant every one of those was invisible to this
+        # check no matter what was added to the tuple above.
+        from ms_moe_maker.__main__ import DESCRIBE
         missing = sorted(
             key for key in self.KEYS_NEEDING_PROSE
             if key in DESCRIBE and key not in self.UNDOCUMENTED_KEYS
             and not any(key in text for text in docs.values()))
         assert not missing, missing
+
+    @staticmethod
+    def published_vocabularies() -> set:
+        """Every list-shaped key `--describe` actually publishes.
+
+        A METHOD SO IT CAN BE ASSERTED ON DIRECTLY. Reading the identity card
+        instead of the merged payload hides twelve keys, and no coverage check
+        could tell the difference - every key published today is already
+        accounted for either way, so the mistake would only surface on the next
+        one added. Pulling it out gives the source of truth its own test.
+        """
+        from ms_moe_maker.__main__ import DESCRIBE
+        return {k for k in DESCRIBE
+                if isinstance(DESCRIBE[k], (list, tuple))}
+
+    def test_the_check_reads_the_merged_payload_not_the_card(self):
+        """The card is a SUBSET, and the difference is where the debt hides.
+
+        `stages` is published by the installed CLI and not by the stdlib-only
+        identity card, so it is the witness: if this check ever goes back to
+        reading the card, `stages` vanishes from the set and so does every
+        future key that only an installed CLI can answer.
+        """
+        from ms_moe_maker.box.describe import DESCRIBE as CARD
+        got = self.published_vocabularies()
+        assert "stages" in got, (
+            "the coverage check is reading the identity card rather than the "
+            "merged payload, so every key only an installed CLI can answer - "
+            "kinds, validators, knobs, tiers, stages - is invisible to it.")
+        assert "stages" not in CARD, (
+            "stages moved into the stdlib-only card; this test's witness is "
+            "stale, pick another __main__-only key.")
+        assert got - set(CARD), "the merged payload published nothing extra"
+
+    def test_every_published_key_is_accounted_for(self, docs):
+        """A key nobody listed is a key nobody decided about.
+
+        Not "every key needs prose" - most are self-evident rows a front-end
+        renders. This asserts only that a key is either being checked, or
+        recorded as debt, or recorded as not fitting the mechanism. The failure
+        mode this closes is a new published vocabulary going in and nobody
+        noticing it was never documented.
+        """
+        vocabularies = self.published_vocabularies()
+        decided = (set(self.KEYS_NEEDING_PROSE) | self.UNDOCUMENTED_KEYS
+                   | self.UNRATCHETABLE_KEYS)
+        # Rows a front-end renders rather than words a person looks up.
+        self_evident = {"commands", "requires", "kinds", "validators", "knobs",
+                        "tiers", "gates", "templates", "modes", "events",
+                        "registry_errors", "reasoning", "defaults"}
+        missing = sorted(vocabularies - decided - self_evident)
+        assert not missing, (
+            f"{missing} are published vocabularies that nobody has decided "
+            f"about. Add each to KEYS_NEEDING_PROSE (it should be documented), "
+            f"UNDOCUMENTED_KEYS (it should be, and is not yet) or the "
+            f"self_evident set above (it is rows, not prose).")
 
     def test_the_key_debt_list_does_not_rot(self, docs):
         documented = sorted(k for k in self.UNDOCUMENTED_KEYS
