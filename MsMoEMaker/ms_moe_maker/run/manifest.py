@@ -262,10 +262,23 @@ def find_recipe(run_dir: Path) -> Optional[Path]:
     the same fact as a recipe that was written and came back blank.
     """
     try:
-        found = sorted(Path(run_dir).glob(RECIPE_STEM + ".*"))
+        found = sorted(_recipe_copies(Path(run_dir)))
     except OSError:
         return None
     return found[0] if found else None
+
+
+def _recipe_copies(run_dir: Path) -> List[Path]:
+    """Every file in the run directory that is a recipe copy, any suffix.
+
+    The bare stem counts: `recipe_path` keeps the ORIGINAL suffix and invents
+    none, so a recipe read from a file with no extension is written as the bare
+    stem - and a glob on `stem.*` never found it. `msmoe-recipe-notes.txt`
+    does not count: the name has to be the stem exactly, or the stem plus one
+    suffix.
+    """
+    return [p for p in run_dir.glob(RECIPE_STEM + "*")
+            if p.name == RECIPE_STEM or p.name.startswith(RECIPE_STEM + ".")]
 
 
 def write_recipe(run_dir: Path, text: str, suffix: str) -> Path:
@@ -282,6 +295,17 @@ def write_recipe(run_dir: Path, text: str, suffix: str) -> Path:
     """
     target = recipe_path(run_dir, suffix)
     _atomic_write(target, text)
+    # ONE COPY, NOT ONE PER SUFFIX. A run directory rebuilt from a JSON recipe
+    # after a YAML one would otherwise hold both, and find_recipe would hand
+    # back whichever sorted first - which is the stale one half the time.
+    # Removed AFTER the new copy is safely down, so there is no moment with
+    # nothing in place.
+    for stale in _recipe_copies(Path(run_dir)):
+        if stale != target:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     return target
 
 

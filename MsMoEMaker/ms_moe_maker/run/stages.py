@@ -26,6 +26,7 @@ finetune stages, and a recipe with three means three.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Sequence, Tuple
 
 # -- fixed stages ------------------------------------------------------------
@@ -202,6 +203,43 @@ def artifact_for(stage_id: str) -> str | None:
         return FINETUNE_ARTIFACT.format(
             expert=stage_id[len(FINETUNE_PREFIX):])
     return None
+
+
+# ── what makes a saved checkpoint count as PRESENT ──────────────────────────
+#
+# `save_pretrained` writes ONE of two layouts, and which one is a function of
+# size: a single `model.safetensors` up to `max_shard_size` (5GB by default, in
+# transformers and in the vendored Heretic settings alike), and above that
+# `model-0000N-of-0000M.safetensors` shards plus an index that names them. A 7B
+# in bf16 is ~15GB, so every size the defaults table lists past 0.5B lands in
+# the sharded layout.
+#
+# The three resume predicates - abliterate_is_done, specialist_is_done,
+# router_is_done - each looked for the single file only. On a 0.5B that is the
+# file that exists, so nothing noticed; on anything bigger every one of them
+# was permanently False, and every resume retrained every specialist, retrained
+# the router and re-ran the whole abliteration study. That is the exact
+# regression abliterate_is_done's own comment says was just fixed, back for
+# every non-toy size. One helper, three callers, so it cannot be fixed in two
+# of them and forgotten in the third.
+#
+# The index is a fair completion marker for the sharded layout: transformers
+# writes the shards first and the index last, so an index with no shards is
+# not a state a normal save passes through. A TRUNCATED shard is the same
+# class of problem as a truncated single file and is caught by neither - this
+# is the resume skip, not a load.
+WEIGHT_MARKERS: Tuple[str, ...] = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
+
+
+def weights_present(directory: str) -> bool:
+    """Does this directory hold model weights in ANY layout save_pretrained writes?"""
+    return any(os.path.exists(os.path.join(directory, marker))
+               for marker in WEIGHT_MARKERS)
 
 
 # ── the substitution the repeated stages take ───────────────────────────────

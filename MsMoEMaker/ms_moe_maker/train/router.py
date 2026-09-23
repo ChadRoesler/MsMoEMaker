@@ -35,8 +35,9 @@ def router_is_done(config) -> bool:
     d = router_dir(config)
     if not os.path.exists(os.path.join(d, "config.json")):
         return False
-    return (os.path.exists(os.path.join(d, "model.safetensors"))
-            or os.path.exists(os.path.join(d, "pytorch_model.bin")))
+    # Either layout - the trained MoE is N specialists wide, so it is sharded
+    # long before the specialists themselves are. See stages.weights_present.
+    return st.weights_present(d)
 
 
 def train_router(config, final_dir: str, safe_names: List[str],

@@ -141,10 +141,12 @@ def specialist_is_done(config, safe_name: str, retrain: bool = False) -> bool:
     d = specialist_dir(config, safe_name)
     if not os.path.exists(os.path.join(d, "config.json")):
         return False
-    has_weights = (os.path.exists(os.path.join(d, "model.safetensors"))
-                   or os.path.exists(os.path.join(d, "pytorch_model.bin")))
+    # Sharded OR single-file - see stages.weights_present. A specialist bigger
+    # than max_shard_size is saved as model-0000N-of-0000M plus an index, and
+    # the single-file check this used to be meant a 7B expert never counted as
+    # trained, so every resume trained it again.
     has_tokenizer = os.path.exists(os.path.join(d, "tokenizer_config.json"))
-    return has_weights and has_tokenizer
+    return st.weights_present(d) and has_tokenizer
 
 
 def expert_seed(seed: int, safe_name: str) -> int:
@@ -648,7 +650,8 @@ def fine_tune_specialist(config, safe_name: str, data_path: str,
         tokenizer.save_pretrained(out_dir)
 
     # Verify: saved weights are truly dense
-    saved_cfg = json.load(open(f"{out_dir}/config.json"))
+    with open(os.path.join(out_dir, "config.json"), encoding="utf-8") as fh:
+        saved_cfg = json.load(fh)
     if saved_cfg.get("quantization_config") is not None:
         raise RuntimeError(
             f"{out_dir} saved STILL QUANTISED. Delete and retrain with "

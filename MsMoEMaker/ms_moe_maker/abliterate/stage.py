@@ -14,6 +14,8 @@ import os
 import subprocess
 import sys
 
+from ..run import stages as st
+
 
 def abliterate_dir(config) -> str:
     return f"{config.output_root}/abliterated_base"
@@ -29,12 +31,15 @@ def abliterate_is_done(config) -> bool:
     # which is why this predicate was permanently False and the 200-trial
     # study re-ran on every resume. The child now always writes a merged,
     # loadable checkpoint, so this predicate is reachable.)
+    #
+    # And "weights" means EITHER layout - see stages.weights_present. Heretic's
+    # max_shard_size is 5GB, so any base past ~2.5B params is written sharded,
+    # and a single-file check here was the 200-trial re-run all over again for
+    # exactly the bases worth abliterating.
     d = abliterate_dir(config)
     if not os.path.exists(os.path.join(d, "config.json")):
         return False
-    has_weights = (os.path.exists(os.path.join(d, "model.safetensors"))
-                   or os.path.exists(os.path.join(d, "pytorch_model.bin")))
-    return has_weights and os.path.exists(
+    return st.weights_present(d) and os.path.exists(
         os.path.join(d, "tokenizer_config.json"))
 
 

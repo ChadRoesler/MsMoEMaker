@@ -295,7 +295,8 @@ class Runner:
         self._drift: List[str] = []
         self._current: Optional[str] = None
         self._missing_module: Optional[str] = None
-        # Preserved once, on the first flush - see _preserve_recipe.
+        # Preserved once it SUCCEEDS, on the first flush that can - see
+        # _preserve_recipe.
         self._recipe_saved = False
 
     # -- manifest bookkeeping ----------------------------------------------
@@ -331,21 +332,31 @@ class Runner:
         stream, where the person watching will see it, rather than into a log
         nobody opens.
 
+        THE FLAG IS SET ON SUCCESS, NOT ON ATTEMPT. It used to be set first, so
+        one transient failure on the first flush - the directory not there yet
+        on a slow mount, a momentary permission race - meant the run never got
+        its recipe, silently, with one warning scrolled off the top of a
+        nine-hour log. Now the next flush tries again, and a disk that stays
+        broken warns on every flush, which is exactly what the manifest write
+        above already does for the same failure.
+
         A hand-constructed Recipe has no source at all, which is not an error:
         `parse()` stays pure and tests build recipes in memory. Nothing to copy
         means nothing to copy.
         """
         if self._recipe_saved:
             return
-        self._recipe_saved = True
         text = getattr(self.recipe, "source_text", None)
         origin = getattr(self.recipe, "source_path", "") or ""
         if not text:
+            self._recipe_saved = True     # nothing to copy is a final answer
             return
         try:
             mf.write_recipe(self.run_dir, text, Path(origin).suffix)
         except OSError as exc:
             self.ev.warning(f"could not preserve the recipe: {exc}")
+            return
+        self._recipe_saved = True
 
     def _set(self, stage_id: str, status: str, **kw: Any) -> None:
         stage = self.manifest.stage(stage_id)

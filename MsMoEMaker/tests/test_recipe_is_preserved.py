@@ -119,6 +119,32 @@ class TestFindingIt:
     def test_a_directory_that_does_not_exist_is_None(self, tmp_path):
         assert mf.find_recipe(tmp_path / "nope") is None
 
+    def test_a_suffixless_copy_is_found_too(self, tmp_path):
+        """write_recipe invents no suffix for a source that had none, and the
+        finder used to glob `stem.*` - so the one layout the writer could
+        produce that the finder could not see was the bare stem."""
+        mf.write_recipe(tmp_path, "name: x", "")
+        found = mf.find_recipe(tmp_path)
+        assert found is not None and found.name == mf.RECIPE_STEM
+
+    def test_a_lookalike_name_is_not_the_recipe(self, tmp_path):
+        (tmp_path / (mf.RECIPE_STEM + "-notes.txt")).write_text(
+            "not it", encoding="utf-8")
+        assert mf.find_recipe(tmp_path) is None
+
+    def test_a_rewrite_with_another_suffix_leaves_one_copy(self, tmp_path):
+        """A run rebuilt from a JSON recipe after a YAML one held both, and the
+        finder handed back whichever sorted first - `.json` - which is the
+        stale one exactly when the YAML was the rewrite."""
+        mf.write_recipe(tmp_path, "name: old", ".json")
+        mf.write_recipe(tmp_path, "name: new", ".yaml")
+        copies = sorted(p.name for p in tmp_path.iterdir()
+                        if p.name.startswith(mf.RECIPE_STEM))
+        assert copies == [mf.RECIPE_STEM + ".yaml"], copies
+        found = mf.find_recipe(tmp_path)
+        assert found is not None
+        assert found.read_text(encoding="utf-8") == "name: new"
+
 
 class TestTheRunnerActuallyDoesIt:
     """THE WIRING HALF. Everything above proves the writer works; none of it
@@ -182,6 +208,34 @@ class TestTheRunnerActuallyDoesIt:
                         dryrun=True)
         runner._set(st.PREFLIGHT, mf.RUNNING)        # must not raise
         assert any("preserve the recipe" in m for m in seen), seen
+
+    def test_a_failed_write_is_retried_on_the_next_flush(self, tmp_path,
+                                                        monkeypatch):
+        """The once-only flag used to be set BEFORE the attempt, so a single
+        transient failure on the first flush - a slow mount, a permission race
+        - meant the run never got its recipe, with one warning scrolled off the
+        top of a nine-hour log. The flag now records success, not effort."""
+        rec, target = loaded(tmp_path)
+        real = mf.write_recipe
+        attempts = []
+
+        def flaky(*a, **k):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise OSError("not yet")
+            return real(*a, **k)
+
+        monkeypatch.setattr(mf, "write_recipe", flaky)
+        runner = self._runner(tmp_path, rec)
+        runner._set(st.PREFLIGHT, mf.RUNNING)          # fails, warns
+        assert mf.find_recipe(runner.run_dir) is None
+        runner._set(st.PREFLIGHT, mf.DONE)             # tries again
+        found = mf.find_recipe(runner.run_dir)
+        assert found is not None, "never retried after the first failure"
+        assert found.read_text(encoding="utf-8") == target.read_text(
+            encoding="utf-8")
+        runner._set(st.DATA_CORPUS, mf.RUNNING)        # and then stops
+        assert len(attempts) == 2, f"kept writing: {len(attempts)} attempts"
 
     def test_it_lands_in_the_same_directory_as_the_manifest(self, tmp_path):
         rec, _ = loaded(tmp_path)
