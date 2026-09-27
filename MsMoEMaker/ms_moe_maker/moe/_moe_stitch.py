@@ -31,7 +31,7 @@ Original module docstring follows.
 """
 
 """
-Ms.Moe - streaming MoE stitcher (GPL-3.0)
+Ms.Moe - streaming MoE stitcher (AGPL-3.0-or-later)
 
 WHY THIS EXISTS
 ---------------
