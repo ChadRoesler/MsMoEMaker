@@ -30,7 +30,7 @@ def _row(reasoned):
 
 
 def _the_real_run(never_asked=-1.0):
-    """Chad's gauntlet: nine experts, one of them asked to reason.
+    """The gauntlet: nine experts, one of them asked to reason.
 
     `never_asked` is the knob this whole file turns on. -1.0 is what the
     sentinel is for; 0.0 is what the code used to produce, and the tests below

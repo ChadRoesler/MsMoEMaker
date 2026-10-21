@@ -115,7 +115,7 @@ def plan(experts: List[str],
     `synth` is the experts whose source has to be GENERATED rather than
     downloaded, and it is a parameter because it used to be the literal check
     `if "agentcore" in experts`. That worked exactly as long as the only
-    generated expert in the world was Chad's MCP-trace one. A recipe with a
+    generated expert in the world was the MCP-trace one. A recipe with a
     synth expert called anything else got no data.synth stage at all, so the
     longest phase of its build was invisible in the viewer - the failure being
     silence, which is the worst shape for it.

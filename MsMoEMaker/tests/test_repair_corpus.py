@@ -28,7 +28,7 @@ sys.modules["repair_tool"] = repair_tool
 _spec.loader.exec_module(repair_tool)
 
 
-# Chad's actual rows, trimmed but byte-faithful in shape.
+# Real rows, trimmed but byte-faithful in shape.
 SHAPE_B = (
     "<|im_start|>assistant\n"
     "<think>Okay, so the user is asking me to think through a task.\n"

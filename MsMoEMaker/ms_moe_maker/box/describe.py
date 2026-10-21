@@ -10,7 +10,7 @@ ms-moe-maker is deliberately Seren-agnostic. No seren-* dependency, no assumptio
 that Lodestar exists, no Seren in the name. It is a pipeline for building a
 specified mixture of experts, usable by someone who has never heard of any of
 this. seren-theatre[stagehand] depends on ms-moe-maker; ms-moe-maker depends on nothing of
-Chad's. Mandate is not ethos - the connection is opt-in from the Seren side,
+Seren's. Mandate is not ethos - the connection is opt-in from the Seren side,
 and the run DIRECTORY is the only thing the two ever share.
 """
 from __future__ import annotations

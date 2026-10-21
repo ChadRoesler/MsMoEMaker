@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # MODULE LEVEL ON PURPOSE. `cfg` used to be imported inside collect_corpus and
 # three other functions, and then referenced from _collect_from_shards, which
 # imported nothing - so `cfg.safe_name(...)` there was a NameError that only
-# fired once a real build reached the shard scan. Killed Chad's first Spark run
+# fired once a real build reached the shard scan. Killed the first real Spark run
 # at stage 1.
 #
 # Same shape as the `import moe_stitch` bug in stitch.py: a module bound LOCAL
